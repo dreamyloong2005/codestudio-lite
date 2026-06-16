@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="CodeStudio Lite">
+  <rect x="12" y="12" width="232" height="232" rx="50" fill="#d4f24e"/>
+  <path
+    d="M210 128H176L151 202L105 54L80 128H46"
+    fill="none"
+    stroke="#0a0b0d"
+    stroke-width="24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

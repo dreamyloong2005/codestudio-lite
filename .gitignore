@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-portable/
+src-tauri/target/
+*.log
+*.tmp
+*.bak
+.DS_Store
+.env
+.env.*
+!.env.example

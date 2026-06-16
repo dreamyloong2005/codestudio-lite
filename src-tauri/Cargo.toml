@@ -1,0 +1,33 @@
+[package]
+name = "codestudio-lite"
+version = "1.0.0-preview"
+description = "A desktop-only Local AI Gateway and Provider Switcher for AI coding tools."
+authors = ["CodeStudio Lite"]
+license = "MIT"
+edition = "2021"
+
+[package.metadata]
+product-name = "CodeStudio Lite"
+
+[lib]
+name = "codestudio_lite_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_norway = "0.9"
+json5 = "0.4"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+toml = "0.8"
+toml_edit = "0.25"
+uuid = { version = "1", features = ["v4", "serde"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Security_Credentials"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
