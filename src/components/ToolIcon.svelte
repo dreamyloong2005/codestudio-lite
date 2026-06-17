@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Terminal } from "@lucide/svelte";
+  import AppIcon from "./AppIcon.svelte";
 
   export let toolId: string | null | undefined = null;
   export let label = "";
@@ -89,7 +89,7 @@
   {#if icon}
     <img src={icon.src} alt="" aria-hidden="true" />
   {:else if category === "system"}
-    <Terminal size={18} aria-hidden="true" />
+    <AppIcon name="system" size={18} />
   {:else}
     <span aria-hidden="true">{accessibleLabel.slice(0, 2).toUpperCase()}</span>
   {/if}

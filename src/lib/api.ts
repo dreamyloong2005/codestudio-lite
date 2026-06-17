@@ -62,6 +62,13 @@ const CLAUDE_DESKTOP_DEFAULT_ROUTES = [
   "claude-fable-5"
 ];
 const MOCK_DETECTION_CACHE_KEY = "codestudio-lite:detection-cache";
+const mockCodexAuthStatus = {
+  available: true,
+  method: "chat_gpt" as const,
+  storage: "auth_json" as const,
+  path: "~/.codex/auth.json",
+  detail: "Codex ChatGPT/OAuth login cache detected in auth.json."
+};
 
 export async function ensureAppDirs(): Promise<ProfileSummary> {
   if (isTauri()) {
@@ -391,7 +398,9 @@ export async function updateAppSettings(request: UpdateAppSettingsRequest): Prom
   mockSettings = {
     ...mockSettings,
     theme: request.theme ?? mockSettings.theme,
-    language: request.language ?? mockSettings.language
+    language: request.language ?? mockSettings.language,
+    preserveCodexOfficialAuth:
+      request.preserveCodexOfficialAuth ?? mockSettings.preserveCodexOfficialAuth
   };
   mockActivity = [
     {
@@ -1201,7 +1210,8 @@ let mockSettings: AppSettings = {
   backupBeforeWrite: true,
   redactSecrets: true,
   confirmInstallCommands: true,
-  confirmConfigWrites: true
+  confirmConfigWrites: true,
+  preserveCodexOfficialAuth: true
 };
 
 let mockGatewayRunning = false;
@@ -1470,6 +1480,9 @@ function readMockDetectionCache(): DetectionSnapshot | null {
       return null;
     }
     const snapshot = JSON.parse(cached) as DetectionSnapshot;
+    if (!snapshot.codexAuth) {
+      return null;
+    }
     return {
       ...snapshot,
       source: "cached",
@@ -1708,6 +1721,7 @@ function mockDetection(): DetectionSnapshot {
     appConfigDir,
     activeProfile: mockDefaultActiveProfileId(),
     activeProfileName: mockActiveProfileName(),
+    codexAuth: mockCodexAuthStatus,
     tools: mockVisibleTools(tools),
     system,
     envConflicts: mockClaudeEnvConflicts,
@@ -2000,6 +2014,7 @@ function mockProfiles(): ProfileSummary {
     activeProfile: mockDefaultActiveProfileId(),
     activeProfileName: mockActiveProfileName(),
     activeProfilesByMode: cloneMockActiveProfilesByMode(),
+    codexAuth: mockCodexAuthStatus,
     drafts: mockAllProfiles()
   };
 }

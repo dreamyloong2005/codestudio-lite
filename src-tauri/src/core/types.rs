@@ -228,11 +228,42 @@ pub struct DetectionSnapshot {
     pub app_config_dir: String,
     pub active_profile: Option<String>,
     pub active_profile_name: Option<String>,
+    pub codex_auth: CodexAuthStatus,
     pub tools: Vec<ToolStatus>,
     pub system: Vec<ToolStatus>,
     pub problems: Vec<Problem>,
     #[serde(default)]
     pub env_conflicts: Vec<EnvironmentVariableConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexAuthMethod {
+    ChatGpt,
+    ApiKey,
+    AccessToken,
+    Unknown,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexAuthStorage {
+    AuthJson,
+    Keyring,
+    Auto,
+    None,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAuthStatus {
+    pub available: bool,
+    pub method: CodexAuthMethod,
+    pub storage: CodexAuthStorage,
+    pub path: Option<String>,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +293,7 @@ pub struct AppSettings {
     pub redact_secrets: bool,
     pub confirm_install_commands: bool,
     pub confirm_config_writes: bool,
+    pub preserve_codex_official_auth: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +303,8 @@ pub struct UpdateAppSettingsRequest {
     pub theme: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default)]
+    pub preserve_codex_official_auth: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -605,6 +639,7 @@ pub struct ProfileSummary {
     pub active_profile: Option<String>,
     pub active_profile_name: Option<String>,
     pub active_profiles_by_mode: ActiveProfilesByMode,
+    pub codex_auth: CodexAuthStatus,
     pub drafts: Vec<ProfileDraft>,
 }
 

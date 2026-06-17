@@ -161,10 +161,22 @@ export interface DetectionSnapshot {
   appConfigDir: string;
   activeProfile: string | null;
   activeProfileName: string | null;
+  codexAuth: CodexAuthStatus;
   tools: ToolStatus[];
   system: ToolStatus[];
   problems: Problem[];
   envConflicts: EnvironmentVariableConflict[];
+}
+
+export type CodexAuthMethod = "chat_gpt" | "api_key" | "access_token" | "unknown" | "none";
+export type CodexAuthStorage = "auth_json" | "keyring" | "auto" | "none" | "unknown";
+
+export interface CodexAuthStatus {
+  available: boolean;
+  method: CodexAuthMethod;
+  storage: CodexAuthStorage;
+  path: string | null;
+  detail: string;
 }
 
 export interface DoctorCheck {
@@ -190,11 +202,13 @@ export interface AppSettings {
   redactSecrets: boolean;
   confirmInstallCommands: boolean;
   confirmConfigWrites: boolean;
+  preserveCodexOfficialAuth: boolean;
 }
 
 export interface UpdateAppSettingsRequest {
   theme?: AppSettings["theme"] | null;
   language?: Locale | null;
+  preserveCodexOfficialAuth?: boolean | null;
 }
 
 export interface ProfileDraft {
@@ -431,6 +445,7 @@ export interface ProfileSummary {
   activeProfile: string | null;
   activeProfileName: string | null;
   activeProfilesByMode: ActiveProfilesByMode;
+  codexAuth: CodexAuthStatus;
   drafts: ProfileDraft[];
 }
 

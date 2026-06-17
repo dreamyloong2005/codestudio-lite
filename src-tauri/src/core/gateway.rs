@@ -11,7 +11,7 @@ use crate::core::upstream_http;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -826,13 +826,17 @@ fn route_request(request: HttpRequest, config: &GatewayConfig) -> RouteResponse 
 
     match (request.method.as_str(), target.route_path.as_str()) {
         ("GET", "/v1/models") => RouteResponse::Buffered(models_response(&target)),
-        ("POST", "/v1/responses") => responses_response(&request.body, config, &target),
-        ("POST", "/v1/chat/completions") => {
-            chat_completions_response(&request.body, config, &target)
+        ("POST", "/v1/responses") => {
+            responses_response(&request.body, &request.headers, config, &target)
         }
-        ("POST", "/v1/messages") => messages_response(&request.body, config, &target),
+        ("POST", "/v1/chat/completions") => {
+            chat_completions_response(&request.body, &request.headers, config, &target)
+        }
+        ("POST", "/v1/messages") => {
+            messages_response(&request.body, &request.headers, config, &target)
+        }
         ("POST", route_path) if gemini_route_from_path(route_path).is_some() => {
-            gemini_generate_content_response(&request.body, config, &target)
+            gemini_generate_content_response(&request.body, &request.headers, config, &target)
         }
         _ => RouteResponse::Buffered(json_response(
             404,
@@ -932,6 +936,7 @@ fn claude_desktop_models_response(target: &GatewayRouteTarget) -> HttpResponse {
 
 fn responses_response(
     body: &[u8],
+    request_headers: &HashMap<String, String>,
     config: &GatewayConfig,
     target: &GatewayRouteTarget,
 ) -> RouteResponse {
@@ -954,7 +959,7 @@ fn responses_response(
         .unwrap_or(false);
 
     if let Some(profile) = active {
-        return forward_responses(request_body, profile, config, stream);
+        return forward_responses(request_body, request_headers, profile, config, stream);
     }
 
     if let Some(response) = missing_tool_profile_response(target) {
@@ -992,6 +997,7 @@ fn responses_response(
 
 fn chat_completions_response(
     body: &[u8],
+    request_headers: &HashMap<String, String>,
     config: &GatewayConfig,
     target: &GatewayRouteTarget,
 ) -> RouteResponse {
@@ -1015,7 +1021,7 @@ fn chat_completions_response(
         .unwrap_or(false);
 
     if let Some(profile) = active {
-        return forward_chat_completion(request_body, profile, config, stream);
+        return forward_chat_completion(request_body, request_headers, profile, config, stream);
     }
 
     if let Some(response) = missing_tool_profile_response(target) {
@@ -1049,6 +1055,7 @@ fn chat_completions_response(
 
 fn messages_response(
     body: &[u8],
+    request_headers: &HashMap<String, String>,
     config: &GatewayConfig,
     target: &GatewayRouteTarget,
 ) -> RouteResponse {
@@ -1071,7 +1078,7 @@ fn messages_response(
         .unwrap_or(false);
 
     if let Some(profile) = active {
-        return forward_messages(request_body, profile, config, stream);
+        return forward_messages(request_body, request_headers, profile, config, stream);
     }
 
     if let Some(response) = missing_tool_profile_response(target) {
@@ -1101,6 +1108,7 @@ fn messages_response(
 
 fn gemini_generate_content_response(
     body: &[u8],
+    request_headers: &HashMap<String, String>,
     config: &GatewayConfig,
     target: &GatewayRouteTarget,
 ) -> RouteResponse {
@@ -1131,6 +1139,7 @@ fn gemini_generate_content_response(
         return forward_gateway_request(
             GatewayProtocol::GoogleGemini,
             request_body,
+            request_headers,
             profile,
             config,
             stream,
@@ -1185,6 +1194,7 @@ fn missing_tool_profile_response(target: &GatewayRouteTarget) -> Option<RouteRes
 
 fn forward_responses(
     request_body: serde_json::Value,
+    request_headers: &HashMap<String, String>,
     profile: ProfileDraft,
     config: &GatewayConfig,
     stream: bool,
@@ -1192,6 +1202,7 @@ fn forward_responses(
     forward_gateway_request(
         GatewayProtocol::OpenAiResponses,
         request_body,
+        request_headers,
         profile,
         config,
         stream,
@@ -1200,6 +1211,7 @@ fn forward_responses(
 
 fn forward_chat_completion(
     request_body: serde_json::Value,
+    request_headers: &HashMap<String, String>,
     profile: ProfileDraft,
     config: &GatewayConfig,
     stream: bool,
@@ -1207,6 +1219,7 @@ fn forward_chat_completion(
     forward_gateway_request(
         GatewayProtocol::OpenAiChatCompletions,
         request_body,
+        request_headers,
         profile,
         config,
         stream,
@@ -1215,6 +1228,7 @@ fn forward_chat_completion(
 
 fn forward_messages(
     request_body: serde_json::Value,
+    request_headers: &HashMap<String, String>,
     profile: ProfileDraft,
     config: &GatewayConfig,
     stream: bool,
@@ -1222,6 +1236,7 @@ fn forward_messages(
     forward_gateway_request(
         GatewayProtocol::AnthropicMessages,
         request_body,
+        request_headers,
         profile,
         config,
         stream,
@@ -1316,6 +1331,7 @@ struct ConvertedGatewayRequest {
 fn forward_gateway_request(
     client_protocol: GatewayProtocol,
     mut request_body: Value,
+    request_headers: &HashMap<String, String>,
     profile: ProfileDraft,
     config: &GatewayConfig,
     stream: bool,
@@ -1338,7 +1354,8 @@ fn forward_gateway_request(
             .or_else(|| profile_model(&profile))
             .unwrap_or_else(|| CLIENT_MODEL.to_string());
         let endpoint = upstream_endpoint(upstream_protocol, &profile, &upstream_model, stream);
-        let headers = upstream_headers(upstream_protocol, &api_key);
+        let headers =
+            upstream_headers_with_passthrough(upstream_protocol, &api_key, request_headers);
 
         if stream {
             let timeout_seconds = profile.timeout_seconds;
@@ -1371,6 +1388,7 @@ fn forward_gateway_request(
         &profile,
         config,
         &api_key,
+        request_headers,
         stream,
     );
     if stream {
@@ -1524,13 +1542,14 @@ fn convert_gateway_request(
     profile: &ProfileDraft,
     config: &GatewayConfig,
     api_key: &str,
+    request_headers: &HashMap<String, String>,
     stream: bool,
 ) -> ConvertedGatewayRequest {
     let model = effective_upstream_model(request_body, profile, config);
     let parts = request_parts_from_client(client_protocol, request_body, &model);
     let body = request_body_for_protocol(upstream_protocol, &parts, stream);
     let endpoint = upstream_endpoint(upstream_protocol, profile, &model, stream);
-    let headers = upstream_headers(upstream_protocol, api_key);
+    let headers = upstream_headers_with_passthrough(upstream_protocol, api_key, request_headers);
 
     ConvertedGatewayRequest {
         endpoint,
@@ -3488,6 +3507,150 @@ fn upstream_headers(protocol: GatewayProtocol, api_key: &str) -> String {
     }
 }
 
+fn upstream_headers_with_passthrough(
+    protocol: GatewayProtocol,
+    api_key: &str,
+    request_headers: &HashMap<String, String>,
+) -> String {
+    let mut headers = upstream_headers(protocol, api_key);
+    let mut generated = generated_header_names(&headers);
+    let mut passthrough_headers = safe_passthrough_headers(request_headers)
+        .into_iter()
+        .filter(|(name, _)| !generated.contains(*name))
+        .collect::<Vec<_>>();
+    passthrough_headers.sort_by(|left, right| left.0.cmp(right.0));
+
+    for (name, value) in passthrough_headers {
+        generated.insert(name.to_string());
+        headers.push_str(canonical_passthrough_header_name(name));
+        headers.push_str(": ");
+        headers.push_str(value);
+        headers.push_str("\r\n");
+    }
+
+    headers
+}
+
+fn generated_header_names(headers: &str) -> HashSet<String> {
+    headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, _)| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_ascii_lowercase())
+        .collect()
+}
+
+fn safe_passthrough_headers(headers: &HashMap<String, String>) -> Vec<(&str, &str)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = name.trim();
+            let value = value.trim();
+            if value.is_empty() || !is_safe_passthrough_header(name, value) {
+                return None;
+            }
+            Some((name, value))
+        })
+        .collect()
+}
+
+fn is_safe_passthrough_header(name: &str, value: &str) -> bool {
+    if !is_valid_header_name(name) || !is_safe_header_value(value) {
+        return false;
+    }
+    if is_forbidden_passthrough_header(name) {
+        return false;
+    }
+    name.starts_with("x-")
+        || name.starts_with("anthropic-")
+        || name.starts_with("openai-")
+        || name.starts_with("cf-")
+        || name.starts_with("helicone-")
+        || name == "http-referer"
+        || name == "referer"
+        || name == "user-agent"
+}
+
+fn is_forbidden_passthrough_header(name: &str) -> bool {
+    matches!(
+        name,
+        "accept"
+            | "accept-encoding"
+            | "authorization"
+            | "connection"
+            | "content-length"
+            | "content-type"
+            | "cookie"
+            | "expect"
+            | "host"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "x-api-key"
+            | "x-codestudio-client"
+            | "x-codestudio-client-tool"
+            | "x-codestudio-tool"
+            | "x-goog-api-key"
+            | "anthropic-version"
+    )
+}
+
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+                    | b'0'..=b'9'
+                    | b'a'..=b'z'
+            )
+        })
+}
+
+fn is_safe_header_value(value: &str) -> bool {
+    !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+}
+
+fn canonical_passthrough_header_name(name: &str) -> &str {
+    match name {
+        "http-referer" => "HTTP-Referer",
+        "referer" => "Referer",
+        "user-agent" => "User-Agent",
+        "x-title" => "X-Title",
+        "x-stainless-lang" => "X-Stainless-Lang",
+        "x-stainless-package-version" => "X-Stainless-Package-Version",
+        "x-stainless-os" => "X-Stainless-OS",
+        "x-stainless-arch" => "X-Stainless-Arch",
+        "x-stainless-runtime" => "X-Stainless-Runtime",
+        "x-stainless-runtime-version" => "X-Stainless-Runtime-Version",
+        "x-codestudio-client" => "X-CodeStudio-Client",
+        "x-codestudio-tool" => "X-CodeStudio-Tool",
+        "x-codestudio-client-tool" => "X-CodeStudio-Client-Tool",
+        "anthropic-beta" => "anthropic-beta",
+        "openai-beta" => "OpenAI-Beta",
+        "cf-ray" => "CF-Ray",
+        _ => name,
+    }
+}
+
 fn normalize_gemini_model_name(model: &str) -> String {
     model
         .trim()
@@ -4785,6 +4948,48 @@ mod tests {
         }
     }
 
+    fn test_profile(protocol: &str) -> ProfileDraft {
+        ProfileDraft {
+            id: "profile-test".to_string(),
+            name: "Test".to_string(),
+            app: "codex".to_string(),
+            is_builtin: false,
+            mode: Default::default(),
+            provider: "test-provider".to_string(),
+            protocol: protocol.to_string(),
+            model: "test-model".to_string(),
+            base_url: "https://api.example.test/v1".to_string(),
+            auth_ref: Some("test-key".to_string()),
+            timeout_seconds: 30,
+            created_at: None,
+            updated_at: None,
+            last_test_status: None,
+        }
+    }
+
+    fn header_map(items: &[(&str, &str)]) -> HashMap<String, String> {
+        items
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    fn contains_header(headers: &str, name: &str, value: &str) -> bool {
+        headers.lines().filter_map(|line| line.split_once(':')).any(
+            |(header_name, header_value)| {
+                header_name.eq_ignore_ascii_case(name) && header_value.trim() == value
+            },
+        )
+    }
+
+    fn header_value(headers: &str, name: &str) -> Option<String> {
+        headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim().to_string())
+    }
+
     #[test]
     fn chat_request_can_convert_to_anthropic_messages_body() {
         let request = json!({
@@ -5020,6 +5225,165 @@ mod tests {
 
         assert_eq!(body["stream"].as_bool(), Some(true));
         assert_eq!(body["messages"][0]["content"].as_str(), Some("Ping"));
+    }
+
+    #[test]
+    fn upstream_headers_pass_through_safe_custom_context_headers() {
+        let request_headers = header_map(&[
+            ("x-provider-model-family", "gpt-5"),
+            ("anthropic-beta", "tools-2025-01-01"),
+            ("openai-beta", "responses=v1"),
+            ("cf-ray", "abc123"),
+            ("helicone-auth", "Bearer helicone-test"),
+            ("http-referer", "https://codestudio.design"),
+            ("user-agent", "Codex CLI"),
+        ]);
+        let headers = upstream_headers_with_passthrough(
+            GatewayProtocol::OpenAiResponses,
+            "upstream-key",
+            &request_headers,
+        );
+
+        assert!(contains_header(
+            &headers,
+            "x-provider-model-family",
+            "gpt-5"
+        ));
+        assert!(contains_header(
+            &headers,
+            "anthropic-beta",
+            "tools-2025-01-01"
+        ));
+        assert!(contains_header(&headers, "openai-beta", "responses=v1"));
+        assert!(contains_header(&headers, "cf-ray", "abc123"));
+        assert!(contains_header(
+            &headers,
+            "helicone-auth",
+            "Bearer helicone-test"
+        ));
+        assert!(contains_header(
+            &headers,
+            "http-referer",
+            "https://codestudio.design"
+        ));
+        assert!(contains_header(&headers, "user-agent", "Codex CLI"));
+    }
+
+    #[test]
+    fn upstream_headers_do_not_pass_through_auth_transport_or_protocol_headers() {
+        let request_headers = header_map(&[
+            ("authorization", "Bearer local-token"),
+            ("host", "127.0.0.1:43112"),
+            ("content-length", "999"),
+            ("connection", "keep-alive"),
+            ("content-type", "text/plain"),
+            ("accept", "text/plain"),
+            ("x-api-key", "incoming-anthropic-key"),
+            ("x-goog-api-key", "incoming-gemini-key"),
+            ("anthropic-version", "2099-01-01"),
+            ("x-codestudio-tool", "codex"),
+            ("x-custom-safe", "ok"),
+        ]);
+        let headers = upstream_headers_with_passthrough(
+            GatewayProtocol::AnthropicMessages,
+            "upstream-key",
+            &request_headers,
+        );
+
+        assert_eq!(
+            header_value(&headers, "x-api-key").as_deref(),
+            Some("upstream-key")
+        );
+        assert_eq!(
+            header_value(&headers, "anthropic-version").as_deref(),
+            Some("2023-06-01")
+        );
+        assert_eq!(
+            header_value(&headers, "content-type").as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(
+            header_value(&headers, "accept").as_deref(),
+            Some("application/json")
+        );
+        assert!(contains_header(&headers, "x-custom-safe", "ok"));
+        assert!(!contains_header(
+            &headers,
+            "authorization",
+            "Bearer local-token"
+        ));
+        assert!(!contains_header(&headers, "host", "127.0.0.1:43112"));
+        assert!(!contains_header(&headers, "content-length", "999"));
+        assert!(!contains_header(&headers, "connection", "keep-alive"));
+        assert!(!contains_header(
+            &headers,
+            "x-goog-api-key",
+            "incoming-gemini-key"
+        ));
+        assert!(!contains_header(&headers, "x-codestudio-tool", "codex"));
+    }
+
+    #[test]
+    fn upstream_headers_reject_header_injection_and_unknown_headers() {
+        let request_headers = header_map(&[
+            ("x-safe", "ok"),
+            ("x-injected", "hello\r\nAuthorization: Bearer leaked"),
+            ("forwarded", "for=127.0.0.1"),
+            ("bad name", "nope"),
+        ]);
+        let headers = upstream_headers_with_passthrough(
+            GatewayProtocol::OpenAiChatCompletions,
+            "upstream-key",
+            &request_headers,
+        );
+
+        assert!(contains_header(&headers, "x-safe", "ok"));
+        assert!(!headers.contains("Bearer leaked"));
+        assert!(!contains_header(&headers, "forwarded", "for=127.0.0.1"));
+        assert!(!contains_header(&headers, "bad name", "nope"));
+    }
+
+    #[test]
+    fn converted_gateway_request_uses_safe_passthrough_headers() {
+        let request_body = json!({
+            "model": "codestudio-default",
+            "messages": [{ "role": "user", "content": "Ping" }]
+        });
+        let request_headers = header_map(&[
+            ("x-provider-model-family", "claude"),
+            ("authorization", "Bearer local-token"),
+            ("anthropic-version", "2099-01-01"),
+        ]);
+        let profile = test_profile(PROTOCOL_ANTHROPIC_MESSAGES);
+        let converted = convert_gateway_request(
+            GatewayProtocol::OpenAiChatCompletions,
+            GatewayProtocol::AnthropicMessages,
+            &request_body,
+            &profile,
+            &test_config(false),
+            "upstream-key",
+            &request_headers,
+            false,
+        );
+
+        assert!(contains_header(
+            &converted.headers,
+            "x-provider-model-family",
+            "claude"
+        ));
+        assert_eq!(
+            header_value(&converted.headers, "x-api-key").as_deref(),
+            Some("upstream-key")
+        );
+        assert_eq!(
+            header_value(&converted.headers, "anthropic-version").as_deref(),
+            Some("2023-06-01")
+        );
+        assert!(!contains_header(
+            &converted.headers,
+            "authorization",
+            "Bearer local-token"
+        ));
     }
 
     #[test]

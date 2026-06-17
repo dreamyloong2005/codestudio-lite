@@ -1,16 +1,7 @@
 <script lang="ts">
-  import {
-    AppWindow,
-    Copy,
-    LayoutDashboard,
-    Power,
-    RotateCw,
-    Settings,
-    Square,
-    UserRoundCog,
-    WandSparkles
-  } from "@lucide/svelte";
   import { onDestroy, onMount } from "svelte";
+  import AppIcon, { type AppIconName } from "./components/AppIcon.svelte";
+  import BrandLogo from "./components/BrandLogo.svelte";
   import {
     detectEnvironment,
     ensureAppDirs,
@@ -25,6 +16,7 @@
   import { setLocale, t } from "./lib/i18n";
   import { applyTheme } from "./lib/theme";
   import CodexClient from "./routes/CodexClient.svelte";
+  import CodexOAuth from "./routes/CodexOAuth.svelte";
   import Dashboard from "./routes/Dashboard.svelte";
   import Profiles from "./routes/Profiles.svelte";
   import SettingsRoute from "./routes/Settings.svelte";
@@ -37,7 +29,7 @@
     WizardPrefill
   } from "./types";
 
-  type Route = "dashboard" | "codexClient" | "wizard" | "profiles" | "settings";
+  type Route = "dashboard" | "codexClient" | "codexOAuth" | "wizard" | "profiles" | "settings";
 
   let route: Route = "dashboard";
   let dashboardLoading = true;
@@ -55,12 +47,13 @@
   const BACKGROUND_DETECTION_WARMUP_DELAYS_MS = [3500, 12000];
   const BACKGROUND_DETECTION_INTERVAL_MS = 30000;
 
-  const navItems: Array<{ id: Route; labelKey: Parameters<typeof $t>[0]; icon: typeof LayoutDashboard }> = [
-    { id: "dashboard", labelKey: "app.nav.dashboard", icon: LayoutDashboard },
-    { id: "codexClient", labelKey: "app.nav.codexClient", icon: AppWindow },
-    { id: "wizard", labelKey: "app.nav.wizard", icon: WandSparkles },
-    { id: "profiles", labelKey: "app.nav.profiles", icon: UserRoundCog },
-    { id: "settings", labelKey: "app.nav.settings", icon: Settings }
+  const navItems: Array<{ id: Route; labelKey: Parameters<typeof $t>[0]; icon: AppIconName }> = [
+    { id: "dashboard", labelKey: "app.nav.dashboard", icon: "dashboard" },
+    { id: "codexClient", labelKey: "app.nav.codexClient", icon: "codexClient" },
+    { id: "codexOAuth", labelKey: "app.nav.codexOAuth", icon: "key" },
+    { id: "wizard", labelKey: "app.nav.wizard", icon: "wizard" },
+    { id: "profiles", labelKey: "app.nav.profiles", icon: "profiles" },
+    { id: "settings", labelKey: "app.nav.settings", icon: "settings" }
   ];
 
   $: activeProfileId = snapshot?.activeProfile ?? profileSummary?.activeProfile ?? null;
@@ -280,17 +273,7 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-mark">
-        <svg viewBox="0 0 256 256" role="img" aria-hidden="true">
-          <rect x="12" y="12" width="232" height="232" rx="50" fill="var(--brand-icon-bg)" />
-          <path
-            d="M210 128H176L151 202L105 54L80 128H46"
-            fill="none"
-            stroke="var(--brand-icon-ink)"
-            stroke-width="24"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
+        <BrandLogo />
       </div>
       <div>
         <strong>CodeStudio Lite</strong>
@@ -301,7 +284,7 @@
       <div class="nav-section-title">Workspace</div>
       {#each navItems as item}
         <button class:active={route === item.id} title={$t(item.labelKey)} on:click={() => selectRoute(item.id)}>
-          <svelte:component this={item.icon} size={18} />
+          <AppIcon name={item.icon} size={18} />
           <span class="nav-item-label">{$t(item.labelKey)}</span>
           {#if item.id === "settings" && $appUpdateState.updateAvailable}
             <span class="nav-update-dot" aria-label={$t("settings.updateAvailableDot")}></span>
@@ -333,16 +316,16 @@
 
       <div class="sidebar-gateway-actions">
         <button class="icon-button gateway-start-button" title={$t("common.start")} on:click={() => runGatewayAction("start")} disabled={gatewayBusy || gatewayStatus?.running}>
-          <Power size={16} />
+          <AppIcon name="power" size={16} />
         </button>
         <button class="icon-button" title={$t("common.restart")} on:click={() => runGatewayAction("restart")} disabled={gatewayBusy}>
-          <RotateCw size={16} class={gatewayBusy ? "spin" : ""} />
+          <AppIcon name="restart" size={16} class={gatewayBusy ? "spin" : ""} />
         </button>
         <button class="icon-button" title={$t("common.stop")} on:click={() => runGatewayAction("stop")} disabled={gatewayBusy || !gatewayStatus?.running}>
-          <Square size={16} />
+          <AppIcon name="stop" size={16} />
         </button>
         <button class="icon-button" title={$t("dashboard.copyGatewayUrl")} on:click={copyGatewayUrl} disabled={!gatewayStatus?.baseUrl}>
-          <Copy size={16} />
+          <AppIcon name="copy" size={16} />
         </button>
       </div>
     </section>
@@ -369,6 +352,8 @@
       />
     {:else if route === "codexClient"}
       <CodexClient />
+    {:else if route === "codexOAuth"}
+      <CodexOAuth summary={profileSummary} {snapshot} onProfileSwitched={refreshAfterProfileChange} />
     {:else if route === "wizard"}
       <SetupWizard {snapshot} prefill={wizardPrefill} onProfileSaved={async () => {
         await refreshAfterProfileChange();

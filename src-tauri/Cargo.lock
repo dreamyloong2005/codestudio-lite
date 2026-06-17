@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "codestudio-lite"
-version = "1.0.0-preview"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "dirs 5.0.1",

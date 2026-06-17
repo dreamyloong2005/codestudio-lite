@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Eye, EyeOff } from "@lucide/svelte";
+  import AppIcon from "./AppIcon.svelte";
 
   export let value = "";
   export let placeholder = "sk-...";
@@ -17,9 +17,9 @@
   />
   <button type="button" class="icon-button" title={visible ? "Hide API key" : "Show API key"} on:click={() => (visible = !visible)}>
     {#if visible}
-      <EyeOff size={16} />
+      <AppIcon name="eyeOff" size={16} />
     {:else}
-      <Eye size={16} />
+      <AppIcon name="eye" size={16} />
     {/if}
   </button>
 </div>

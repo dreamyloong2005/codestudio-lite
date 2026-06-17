@@ -59,8 +59,8 @@ function ensureStaticFavicon() {
   const existingLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   const link = existingLink ?? document.createElement("link");
   link.rel = "icon";
-  link.type = "image/svg+xml";
-  link.href = "/icon.svg";
+  link.type = "image/png";
+  link.href = "/icon.png";
   if (!existingLink) {
     document.head.appendChild(link);
   }

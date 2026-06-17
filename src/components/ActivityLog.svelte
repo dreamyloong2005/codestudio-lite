@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { Clock3 } from "@lucide/svelte";
   import { t } from "../lib/i18n";
   import type { ActivityEvent } from "../types";
+  import AppIcon from "./AppIcon.svelte";
   import StatusPill from "./StatusPill.svelte";
 
   export let events: ActivityEvent[] = [];
@@ -13,7 +13,7 @@
       <h2>{$t("activity.title")}</h2>
       <p>{$t("activity.subtitle")}</p>
     </div>
-    <Clock3 size={18} />
+    <AppIcon name="clock" size={18} />
   </div>
 
   <div class="activity-list">

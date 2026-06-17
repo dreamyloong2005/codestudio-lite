@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { ArrowLeft, ArrowRight, Check, KeyRound } from "@lucide/svelte";
   import { previewProfileWrite, saveProfileDraft } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
+  import AppIcon from "../components/AppIcon.svelte";
   import SecretInput from "../components/SecretInput.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
   import type {
@@ -558,7 +558,7 @@
     </div>
     <div class="wizard-actions">
       <button class="secondary-button" title={$t("common.back")} disabled={currentStep === 0} on:click={() => (currentStep -= 1)}>
-        <ArrowLeft size={16} />
+        <AppIcon name="arrowLeft" size={16} />
         {$t("common.back")}
       </button>
       <button
@@ -569,10 +569,10 @@
       >
         {#if currentStep === steps.length - 1}
           {saving ? $t("common.saving") : $t("common.save")}
-          <Check size={16} />
+          <AppIcon name="check" size={16} />
         {:else}
           {$t("common.next")}
-          <ArrowRight size={16} />
+          <AppIcon name="arrowRight" size={16} />
         {/if}
       </button>
     </div>
@@ -588,7 +588,7 @@
         aria-current={index === currentStep ? "step" : undefined}
       >
         {#if index < currentStep}
-          <Check size={14} />
+          <AppIcon name="check" size={14} />
         {:else}
           <span>{index + 1}</span>
         {/if}
@@ -676,7 +676,7 @@
         </label>
       </div>
       <div class="security-note">
-        <KeyRound size={18} />
+        <AppIcon name="key" size={18} />
         {$t("wizard.securityNote")}
       </div>
     {:else if currentStep === 2}

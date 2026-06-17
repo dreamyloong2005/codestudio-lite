@@ -1,7 +1,7 @@
 {
   "name": "codestudio-lite",
   "private": true,
-  "version": "1.0.0-preview",
+  "version": "1.0.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -14,7 +14,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@lucide/svelte": "^1.18.0",
+    "@iconify-icons/solar": "^1.2.3",
+    "@iconify/svelte": "^5.2.2",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "svelte": "^5.0.0"

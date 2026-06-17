@@ -54,6 +54,7 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
     let profile_summary = profile::load_profile_summary()?;
     let active_profile = profile_summary.active_profile.clone();
     let active_profile_name = profile_summary.active_profile_name.clone();
+    let codex_auth = profile_summary.codex_auth.clone();
     let env_conflicts = env_health::claude_env_conflicts_for_active_config(
         &profile_summary.drafts,
         &profile_summary.active_profiles_by_mode.config,
@@ -109,6 +110,7 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
         app_config_dir: display_path(&paths.config_dir),
         active_profile,
         active_profile_name,
+        codex_auth,
         tools,
         system,
         problems,

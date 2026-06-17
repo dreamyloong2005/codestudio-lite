@@ -1,15 +1,16 @@
 <script lang="ts">
-  import { Copy, Download, LoaderCircle, PenLine, SquareCheckBig, Trash2, Upload, Wrench } from "@lucide/svelte";
   import {
     applyProfile,
     clearClaudeEnvironmentVariables,
     duplicateProfileDraft,
     exportProfiles,
     importProfiles,
+    loadAppSettings,
     previewProfileApply,
     updateProfileDraft
   } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
+  import AppIcon from "../components/AppIcon.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
   import type {
@@ -69,6 +70,8 @@
   let profileIoError: string | null = null;
   let profileIoMessage: string | null = null;
   let syncClaudeVsCodePlugin = false;
+  let preserveCodexOfficialAuth = true;
+  let codexAuthConflictConfirmed = false;
 
   const toolOrder = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes"];
   const toolLabels: Record<string, string> = {
@@ -110,6 +113,14 @@
   $: selectedNativeDiff = selectedModePreview?.nativeDiff ?? null;
   $: selectedModeSupported = selectedModePreview?.supported ?? false;
   $: applyEnvConflicts = applyResult?.envConflicts ?? applyPreview?.envConflicts ?? [];
+  $: pendingApplyDisplacesCodexOAuth = Boolean(
+    pendingApply &&
+    canonicalProfileToolId(pendingApply.app) === "codex" &&
+    pendingApply.mode === "config" &&
+    !providerIsOfficial(pendingApply.provider) &&
+    !preserveCodexOfficialAuth &&
+    (summary?.codexAuth.available || activeCodexConfigProfileIsOfficial(summary))
+  );
   $: canSyncClaudeVsCodePlugin =
     Boolean(pendingApply) &&
     canonicalProfileToolId(pendingApply?.app ?? "") === "claude" &&
@@ -149,11 +160,13 @@
     applyError = null;
     selectedApplyMode = profile.mode;
     syncClaudeVsCodePlugin = false;
+    codexAuthConflictConfirmed = false;
     applyingId = actionKey(profile.id, profile.mode);
 
     try {
       applyPreview = await previewProfileApply({ profileId: profile.id });
       selectedApplyMode = profile.mode;
+      preserveCodexOfficialAuth = await loadCodexAuthPreservationSetting();
     } catch (err) {
       applyError = errorLabel(err instanceof Error ? err.message : String(err));
     } finally {
@@ -257,6 +270,11 @@
   async function handleApplyWithOptions(profileId: string, restartAfterApply = false) {
     if (pendingApply && isProfileActive(pendingApply)) {
       applyError = $t("profiles.alreadyActiveBlocked");
+      return;
+    }
+
+    if (pendingApplyDisplacesCodexOAuth && !codexAuthConflictConfirmed) {
+      codexAuthConflictConfirmed = true;
       return;
     }
 
@@ -399,6 +417,7 @@
     selectedApplyMode = "gateway";
     pendingApplyMode = "gateway";
     syncClaudeVsCodePlugin = false;
+    codexAuthConflictConfirmed = false;
   }
 
   function actionKey(profileId: string, mode: ProviderApplyMode, restartAfterApply = false, syncClaudeVsCode = false) {
@@ -427,9 +446,33 @@
 
   function profileCredentialLabel(profile: ProfileDraft) {
     if (providerIsOfficial(profile.provider)) {
+      if (canonicalProfileToolId(profile.app) === "codex" && summary?.codexAuth) {
+        return summary.codexAuth.available
+          ? $t("profiles.credentialCodexOAuthDetected")
+          : $t("profiles.credentialCodexOAuthMissing");
+      }
       return $t("profiles.credentialOfficial");
     }
     return profile.authRef ? $t("profiles.credentialLinked") : $t("profiles.credentialMissing");
+  }
+
+  function codexOfficialAuthDetail(profile: ProfileDraft) {
+    if (!providerIsOfficial(profile.provider) || canonicalProfileToolId(profile.app) !== "codex") {
+      return null;
+    }
+    const status = summary?.codexAuth;
+    if (!status) {
+      return $t("profiles.codexOAuthUnknown");
+    }
+    if (status.storage === "keyring" || status.storage === "auto") {
+      return $t("profiles.codexOAuthKeyring");
+    }
+    if (status.available) {
+      return status.path
+        ? $t("profiles.codexOAuthDetectedAt", { path: status.path })
+        : $t("profiles.codexOAuthDetected");
+    }
+    return $t("profiles.codexOAuthMissing");
   }
 
   function profileEndpointLabel(profile: ProfileDraft) {
@@ -595,6 +638,9 @@
       "Selects the local gateway provider/model pair as OpenClaw's primary default.": "profiles.diff.gatewayOpenClawModel",
       "Registers the local gateway virtual model under the managed provider.": "profiles.diff.gatewayModelRegistration",
       "Keeps the official Codex login path available while routing model requests through the Local Gateway.": "profiles.diff.keepOfficialLoginForGateway",
+      "Keeps Codex API tokens scoped to the active provider so auth.json can preserve the official login.": "profiles.diff.codexScopedApiTokens",
+      "Removes a legacy API-key mirror from Codex config.toml without touching auth.json.": "profiles.diff.removeLegacyApiKeyMirror",
+      "Removes a legacy environment-style API key from Codex config.toml.": "profiles.diff.removeLegacyEnvApiKey",
       "Stores only the local CodeStudio token, not the real upstream Provider API key.": "profiles.diff.storeLocalToken",
       "Points Claude Code at the selected upstream Provider Base URL.": "profiles.diff.claudeBaseUrl",
       "Stores the selected Provider API key as Claude Code's bearer token.": "profiles.diff.claudeAuthToken",
@@ -761,7 +807,7 @@
         titleKey: "profiles.mode.configSectionTitle",
         descriptionKey: "profiles.mode.configSectionDescription",
         groups: buildProfileGroups(
-          drafts.filter((profile) => profile.mode === "config"),
+          drafts.filter((profile) => profile.mode === "config" && profileVisibleInProfiles(profile)),
           activeByMode.config,
           installedToolIds
         )
@@ -771,7 +817,7 @@
         titleKey: "profiles.mode.gatewaySectionTitle",
         descriptionKey: "profiles.mode.gatewaySectionDescription",
         groups: buildProfileGroups(
-          drafts.filter((profile) => profile.mode === "gateway"),
+          drafts.filter((profile) => profile.mode === "gateway" && profileVisibleInProfiles(profile)),
           activeByMode.gateway,
           installedToolIds
         )
@@ -869,6 +915,31 @@
     return normalized;
   }
 
+  function profileVisibleInProfiles(profile: ProfileDraft) {
+    return !(canonicalProfileToolId(profile.app) === "codex" && providerIsOfficial(profile.provider));
+  }
+
+  async function loadCodexAuthPreservationSetting() {
+    try {
+      const settings = await loadAppSettings();
+      return settings.preserveCodexOfficialAuth;
+    } catch {
+      return true;
+    }
+  }
+
+  function activeCodexConfigProfileIsOfficial(profileSummary: ProfileSummary | null) {
+    const activeProfileId =
+      profileSummary?.activeProfilesByMode.config.codex ??
+      profileSummary?.activeProfilesByMode.config["codex-app"] ??
+      null;
+    if (!activeProfileId) {
+      return false;
+    }
+    const activeProfile = profileSummary?.drafts.find((profile) => profile.id === activeProfileId);
+    return activeProfile?.provider.trim() === "official";
+  }
+
   function protocolOptionsFor(toolId: string, mode: ProviderApplyMode): readonly ProtocolOption[] {
     if (mode === "gateway") {
       return protocolOptions;
@@ -961,10 +1032,10 @@
         on:click={openImportDialog}
       >
         {#if profileIoBusy === "import"}
-          <LoaderCircle class="spin" size={16} />
+          <AppIcon name="loading" class="spin" size={16} />
           {$t("profiles.importing")}
         {:else}
-          <Upload size={16} />
+          <AppIcon name="upload" size={16} />
           {$t("common.import")}
         {/if}
       </button>
@@ -975,10 +1046,10 @@
         on:click={handleExportProfiles}
       >
         {#if profileIoBusy === "export"}
-          <LoaderCircle class="spin" size={16} />
+          <AppIcon name="loading" class="spin" size={16} />
           {$t("profiles.exporting")}
         {:else}
-          <Download size={16} />
+          <AppIcon name="download" size={16} />
           {$t("common.export")}
         {/if}
       </button>
@@ -1036,6 +1107,9 @@
                       {#if profile.isBuiltin}
                         <p class="protected-profile-note">{$t("profiles.builtinProtected")}</p>
                       {/if}
+                      {#if codexOfficialAuthDetail(profile)}
+                        <p class="protected-profile-note">{codexOfficialAuthDetail(profile)}</p>
+                      {/if}
                     </div>
                     <div>
                       <StatusPill
@@ -1050,7 +1124,7 @@
                         title={isActive ? $t("profiles.alreadyActiveProfile") : $t("profiles.previewModeApply", { name: profile.name, mode: applyModeLabel(profile.mode) })}
                         on:click={() => openApply(profile)}
                       >
-                        <SquareCheckBig size={16} />
+                        <AppIcon name="apply" size={16} />
                         {#if isActive}
                           {$t("common.active")}
                         {:else}
@@ -1058,7 +1132,7 @@
                         {/if}
                       </button>
                       {#if !profile.isBuiltin}
-                        <button class="icon-button" title={$t("profiles.editProfile")} disabled={duplicatingId !== null} on:click={() => openEdit(profile)}><PenLine size={16} /></button>
+                        <button class="icon-button" title={$t("profiles.editProfile")} disabled={duplicatingId !== null} on:click={() => openEdit(profile)}><AppIcon name="edit" size={16} /></button>
                         <button
                           class="icon-button"
                           title={$t("profiles.duplicateProfile")}
@@ -1066,12 +1140,12 @@
                           on:click={() => handleDuplicate(profile)}
                         >
                           {#if duplicatingId === profile.id}
-                            <LoaderCircle class="spin" size={16} />
+                            <AppIcon name="loading" class="spin" size={16} />
                           {:else}
-                            <Copy size={16} />
+                            <AppIcon name="copy" size={16} />
                           {/if}
                         </button>
-                        <button class="icon-button danger" title={$t("profiles.deleteProfile")}><Trash2 size={16} /></button>
+                        <button class="icon-button danger" title={$t("profiles.deleteProfile")}><AppIcon name="delete" size={16} /></button>
                       {/if}
                     </div>
                   </article>
@@ -1183,10 +1257,10 @@
           </button>
           <button class="primary-button" disabled={!canSaveEdit} on:click={handleEditSave}>
             {#if editingId === pendingEdit.id}
-              <LoaderCircle class="spin" size={16} />
+              <AppIcon name="loading" class="spin" size={16} />
               {$t("common.saving")}
             {:else}
-              <PenLine size={16} />
+              <AppIcon name="edit" size={16} />
               {$t("profiles.saveEdit")}
             {/if}
           </button>
@@ -1233,9 +1307,9 @@
                 </div>
                 <button class="secondary-button" disabled={clearingEnvConflict || applyingId !== null} on:click={clearApplyEnvConflicts}>
                   {#if clearingEnvConflict}
-                    <LoaderCircle class="spin" size={16} />
+                    <AppIcon name="loading" class="spin" size={16} />
                   {:else}
-                    <Wrench size={16} />
+                    <AppIcon name="repair" size={16} />
                   {/if}
                   {$t("envConflict.clearAction")}
                 </button>
@@ -1248,6 +1322,18 @@
                     <code>{conflict.currentValuePreview}</code>
                   </div>
                 {/each}
+              </div>
+            </section>
+          {/if}
+
+          {#if pendingApplyDisplacesCodexOAuth}
+            <section class="native-diff auth-conflict-panel">
+              <div class="native-diff-heading">
+                <div>
+                  <strong>{$t("profiles.codexOAuthConflictTitle")}</strong>
+                  <span>{$t("profiles.codexOAuthApiDisplacesOAuth")}</span>
+                </div>
+                <StatusPill status={codexAuthConflictConfirmed ? "ok" : "warning"} label={codexAuthConflictConfirmed ? $t("profiles.codexOAuthConflictConfirmed") : $t("profiles.codexOAuthConflictNeedsConfirm")} />
               </div>
             </section>
           {/if}
@@ -1343,7 +1429,7 @@
           {/if}
         {:else if applyingId === actionKey(pendingApply.id, pendingApplyMode)}
           <div class="empty-row">
-            <LoaderCircle class="spin" size={18} />
+            <AppIcon name="loading" class="spin" size={18} />
             {$t("common.loading")}
           </div>
         {/if}
@@ -1360,11 +1446,11 @@
                 on:click={() => handleApplyWithOptions(pendingApply!.id, true)}
               >
                 {#if applyingId === actionKey(pendingApply.id, selectedApplyMode, true, canSyncClaudeVsCodePlugin && syncClaudeVsCodePlugin)}
-                  <LoaderCircle class="spin" size={16} />
+                  <AppIcon name="loading" class="spin" size={16} />
                   {$t("common.loading")}
                 {:else}
-                  <SquareCheckBig size={16} />
-                  {$t("profiles.applyAndRestart")}
+                  <AppIcon name="apply" size={16} />
+                  {$t(pendingApplyDisplacesCodexOAuth && !codexAuthConflictConfirmed ? "profiles.confirmAndApplyRestart" : "profiles.applyAndRestart")}
                 {/if}
               </button>
             {/if}
@@ -1374,11 +1460,11 @@
               on:click={() => handleApplyWithOptions(pendingApply!.id)}
             >
               {#if applyingId === actionKey(pendingApply.id, selectedApplyMode, false, canSyncClaudeVsCodePlugin && syncClaudeVsCodePlugin)}
-                <LoaderCircle class="spin" size={16} />
+                <AppIcon name="loading" class="spin" size={16} />
                 {$t("common.loading")}
               {:else}
-                <SquareCheckBig size={16} />
-                {$t(selectedApplyMode === "gateway" ? "profiles.applyGatewayMode" : "profiles.applyConfigMode")}
+                <AppIcon name="apply" size={16} />
+                {$t(pendingApplyDisplacesCodexOAuth && !codexAuthConflictConfirmed ? "profiles.confirmAndApply" : selectedApplyMode === "gateway" ? "profiles.applyGatewayMode" : "profiles.applyConfigMode")}
               {/if}
             </button>
           {/if}

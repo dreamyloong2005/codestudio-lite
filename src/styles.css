@@ -18,8 +18,8 @@
   --text-muted: #7d818c;
   --accent: #d4f24e;
   --accent-ink: #0a0b0d;
-  --brand-icon-bg: #d4f24e;
-  --brand-icon-ink: #0a0b0d;
+  --brand-icon-bg: #0b0d10;
+  --brand-icon-ink: #f4d94e;
   --cyan: #5ec8d4;
   --violet: #b18cf0;
   --amber: #f0b65a;
@@ -56,8 +56,8 @@
   --text-muted: #6b7280;
   --accent: #15835c;
   --accent-ink: #ffffff;
-  --brand-icon-bg: #d4f24e;
-  --brand-icon-ink: #0a0b0d;
+  --brand-icon-bg: #0b0d10;
+  --brand-icon-ink: #f4d94e;
   --cyan: #0e7490;
   --violet: #6d28d9;
   --amber: #b45309;
@@ -192,11 +192,12 @@ textarea:focus-visible {
   width: 34px;
   height: 34px;
   border-radius: 7px;
-  background: var(--brand-icon-bg);
+  background: transparent;
   color: var(--brand-icon-ink);
 }
 
-.brand-mark svg {
+.brand-mark svg,
+.brand-logo {
   display: block;
   width: 100%;
   height: 100%;
@@ -1870,6 +1871,100 @@ input[type="checkbox"] {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.settings-row-value {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  min-width: 0;
+  text-align: right;
+}
+
+.settings-row-value small {
+  max-width: min(420px, 52vw);
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.settings-toggle-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.codex-oauth-panel {
+  overflow: hidden;
+}
+
+.oauth-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.oauth-card,
+.oauth-toggle {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-strong);
+  padding: 13px;
+}
+
+.oauth-card {
+  display: grid;
+  gap: 6px;
+}
+
+.oauth-card strong,
+.oauth-toggle strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.oauth-card span {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.oauth-card small,
+.oauth-toggle small {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.oauth-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 11px;
+}
+
+.oauth-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.oauth-toggle span {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.oauth-confirm-panel {
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+  background: color-mix(in srgb, var(--amber) 9%, var(--surface));
+}
+
+.oauth-diff {
+  margin: 12px;
 }
 
 .about-panel {

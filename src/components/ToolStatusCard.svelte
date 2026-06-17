@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { ArrowUpCircle, LoaderCircle, Settings, Terminal, Wrench } from "@lucide/svelte";
   import { t } from "../lib/i18n";
   import type { ToolStatus } from "../types";
+  import AppIcon from "./AppIcon.svelte";
   import StatusPill from "./StatusPill.svelte";
   import ToolIcon from "./ToolIcon.svelte";
 
@@ -51,9 +51,9 @@
         on:click={() => onRepairPath(tool)}
       >
         {#if repairing}
-          <LoaderCircle size={16} class="spin" />
+          <AppIcon name="loading" size={16} class="spin" />
         {:else}
-          <Wrench size={16} />
+          <AppIcon name="repair" size={16} />
         {/if}
         {repairing ? $t("tool.repairingPath") : $t("tool.repairPath")}
       </button>
@@ -66,9 +66,9 @@
         on:click={() => onInstall(tool)}
       >
         {#if installing}
-          <LoaderCircle size={16} class="spin" />
+          <AppIcon name="loading" size={16} class="spin" />
         {:else}
-          <Terminal size={16} />
+          <AppIcon name="install" size={16} />
         {/if}
         {installing ? $t("tool.installing") : $t("common.install")}
       </button>
@@ -81,15 +81,15 @@
           on:click={() => onUpdate(tool)}
         >
           {#if updating}
-            <LoaderCircle size={16} class="spin" />
+            <AppIcon name="loading" size={16} class="spin" />
           {:else}
-            <ArrowUpCircle size={16} />
+            <AppIcon name="update" size={16} />
           {/if}
           {updating ? $t("tool.updating") : $t("common.update")}
         </button>
       {/if}
       <button class="secondary-button" title={$t("tool.createConfig", { name: tool.name })} disabled={updating} on:click={() => onConfigure(tool)}>
-        <Settings size={16} />
+        <AppIcon name="settings" size={16} />
         {$t("common.createConfig")}
       </button>
     {:else if tool.updateAvailable}
@@ -100,9 +100,9 @@
         on:click={() => onUpdate(tool)}
       >
         {#if updating}
-          <LoaderCircle size={16} class="spin" />
+          <AppIcon name="loading" size={16} class="spin" />
         {:else}
-          <ArrowUpCircle size={16} />
+          <AppIcon name="update" size={16} />
         {/if}
         {updating ? $t("tool.updating") : $t("common.update")}
       </button>

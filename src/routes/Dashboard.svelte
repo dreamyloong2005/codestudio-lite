@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowUpCircle, Copy, LoaderCircle, Terminal, Wrench } from "@lucide/svelte";
+  import AppIcon from "../components/AppIcon.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
   import ToolStatusCard from "../components/ToolStatusCard.svelte";
@@ -244,9 +244,9 @@
         </div>
         <button class="secondary-button" disabled={clearingClaudeEnv} on:click={clearClaudeEnvConflicts}>
           {#if clearingClaudeEnv}
-            <LoaderCircle size={16} class="spin" />
+            <AppIcon name="loading" size={16} class="spin" />
           {:else}
-            <Wrench size={16} />
+            <AppIcon name="repair" size={16} />
           {/if}
           {$t("envConflict.clearAction")}
         </button>
@@ -312,9 +312,9 @@
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
-                    <LoaderCircle size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class="spin" />
                   {:else}
-                    <Wrench size={16} />
+                    <AppIcon name="repair" size={16} />
                   {/if}
                   {repairingToolId === tool.id ? $t("tool.repairingPath") : $t("tool.repairPath")}
                 </button>
@@ -326,9 +326,9 @@
                 on:click={() => openInstallPlan(tool)}
               >
                 {#if planningToolId === tool.id || installingToolId === tool.id}
-                  <LoaderCircle size={16} class="spin" />
+                  <AppIcon name="loading" size={16} class="spin" />
                 {:else}
-                  <Terminal size={16} />
+                  <AppIcon name="install" size={16} />
                 {/if}
                 {planningToolId === tool.id || installingToolId === tool.id ? $t("tool.installing") : $t("common.install")}
               </button>
@@ -341,9 +341,9 @@
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
-                    <LoaderCircle size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class="spin" />
                   {:else}
-                    <Wrench size={16} />
+                    <AppIcon name="repair" size={16} />
                   {/if}
                   {repairingToolId === tool.id ? $t("tool.repairingPath") : $t("tool.repairPath")}
                 </button>
@@ -355,9 +355,9 @@
                 on:click={() => confirmUpdate(tool)}
               >
                 {#if updatingToolId === tool.id}
-                  <LoaderCircle size={16} class="spin" />
+                  <AppIcon name="loading" size={16} class="spin" />
                 {:else}
-                  <ArrowUpCircle size={16} />
+                  <AppIcon name="update" size={16} />
                 {/if}
                 {updatingToolId === tool.id ? $t("tool.updating") : $t("common.update")}
               </button>
@@ -370,9 +370,9 @@
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
-                    <LoaderCircle size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class="spin" />
                   {:else}
-                    <Wrench size={16} />
+                    <AppIcon name="repair" size={16} />
                   {/if}
                   {repairingToolId === tool.id ? $t("tool.repairingPath") : $t("tool.repairPath")}
                 </button>
@@ -426,7 +426,7 @@
             {/each}
           </div>
           <button class="icon-button" title={$t("toolInstall.copyCommand")} on:click={copyInstallCommand}>
-            <Copy size={18} />
+            <AppIcon name="copy" size={18} />
           </button>
         </div>
 
@@ -541,10 +541,10 @@
             disabled={!installPlan.canInstall || Boolean(installingToolId)}
           >
             {#if installingToolId}
-              <LoaderCircle size={16} class="spin" />
+              <AppIcon name="loading" size={16} class="spin" />
               {$t("tool.installing")}
             {:else}
-              <Terminal size={16} />
+              <AppIcon name="install" size={16} />
               {$t(installPlan.requiresPrerequisites ? "toolInstall.confirmInstallWithPrerequisites" : "toolInstall.confirmInstall")}
             {/if}
           </button>

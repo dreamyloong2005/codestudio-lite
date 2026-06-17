@@ -10,15 +10,15 @@ use crate::core::platform::{hidden_command, resolve_command, run_powershell};
 use crate::core::process_control;
 use crate::core::tool_registry;
 use crate::core::types::{
-    ActiveProfilesByMode, AppSettings, ApplyProfileRequest, ApplyProfileResult, ConfigState,
-    DuplicateProfileDraftRequest, ExportProfilesResult, ImportProfilesRequest,
-    ImportProfilesResult, InstallState, NativeConfigDiffLine, NativeConfigPreview,
-    PreviewProfileApplyRequest, PreviewProfileApplyResult, PreviewProfileWriteRequest,
-    PreviewProfileWriteResult, ProfileApplyPreviewItem, ProfileConnectionCheck, ProfileDraft,
-    ProfileExportBundle, ProfileSummary, ProfileWritePreviewItem, ProviderApplyMode,
-    ProviderApplyModePreview, SaveProfileDraftRequest, Severity, SwitchActiveProfileRequest,
-    TestProfileConnectionRequest, TestProfileConnectionResult, UpdateAppSettingsRequest,
-    UpdateProfileDraftRequest,
+    ActiveProfilesByMode, AppSettings, ApplyProfileRequest, ApplyProfileResult, CodexAuthMethod,
+    CodexAuthStatus, CodexAuthStorage, ConfigState, DuplicateProfileDraftRequest,
+    ExportProfilesResult, ImportProfilesRequest, ImportProfilesResult, InstallState,
+    NativeConfigDiffLine, NativeConfigPreview, PreviewProfileApplyRequest,
+    PreviewProfileApplyResult, PreviewProfileWriteRequest, PreviewProfileWriteResult,
+    ProfileApplyPreviewItem, ProfileConnectionCheck, ProfileDraft, ProfileExportBundle,
+    ProfileSummary, ProfileWritePreviewItem, ProviderApplyMode, ProviderApplyModePreview,
+    SaveProfileDraftRequest, Severity, SwitchActiveProfileRequest, TestProfileConnectionRequest,
+    TestProfileConnectionResult, UpdateAppSettingsRequest, UpdateProfileDraftRequest,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -96,6 +96,8 @@ struct SecurityConfig {
     redact_secrets: bool,
     confirm_install_commands: bool,
     confirm_config_writes: bool,
+    #[serde(default = "default_true")]
+    preserve_codex_official_auth: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -184,6 +186,10 @@ const BUILTIN_OFFICIAL_PROFILES: [(&str, &str, &str); 8] = [
     ("hermes", "Hermes 官方", PROTOCOL_OPENAI_CHAT_COMPLETIONS),
 ];
 
+fn default_true() -> bool {
+    true
+}
+
 pub fn ensure_app_dirs() -> Result<(), String> {
     let paths = app_paths().map_err(|err| err.to_string())?;
     ensure_dirs(&paths).map_err(|err| err.to_string())?;
@@ -200,6 +206,7 @@ pub fn ensure_app_dirs() -> Result<(), String> {
                 redact_secrets: true,
                 confirm_install_commands: true,
                 confirm_config_writes: true,
+                preserve_codex_official_auth: true,
             },
             paths: PathConfig {
                 profiles_dir: "~/.codestudio-lite/profiles".to_string(),
@@ -240,6 +247,7 @@ pub fn load_profile_summary() -> Result<ProfileSummary, String> {
         active_profile,
         active_profile_name,
         active_profiles_by_mode: config.active_profiles_by_mode,
+        codex_auth: codex_auth_status(),
         drafts,
     })
 }
@@ -248,6 +256,16 @@ pub fn load_app_settings() -> Result<AppSettings, String> {
     ensure_app_dirs()?;
     let config = read_app_config()?;
     Ok(settings_from_config(&config))
+}
+
+pub fn codex_auth_status() -> CodexAuthStatus {
+    detect_codex_auth_status().unwrap_or_else(|err| CodexAuthStatus {
+        available: false,
+        method: CodexAuthMethod::Unknown,
+        storage: CodexAuthStorage::Unknown,
+        path: None,
+        detail: format!("Codex auth status could not be inspected: {err}"),
+    })
 }
 
 pub fn update_app_settings(request: UpdateAppSettingsRequest) -> Result<AppSettings, String> {
@@ -260,13 +278,16 @@ pub fn update_app_settings(request: UpdateAppSettingsRequest) -> Result<AppSetti
     if let Some(language) = request.language {
         config.ui.language = normalize_language(&language)?;
     }
+    if let Some(preserve_codex_official_auth) = request.preserve_codex_official_auth {
+        config.security.preserve_codex_official_auth = preserve_codex_official_auth;
+    }
 
     write_app_config(&config)?;
     activity_log::append(
         Severity::Info,
         format!(
-            "Updated application settings: language={}, theme={}.",
-            config.ui.language, config.ui.theme
+            "Updated application settings: language={}, theme={}, preserve_codex_official_auth={}.",
+            config.ui.language, config.ui.theme, config.security.preserve_codex_official_auth
         ),
     )?;
 
@@ -2416,6 +2437,179 @@ fn settings_from_config(config: &AppConfig) -> AppSettings {
         redact_secrets: config.security.redact_secrets,
         confirm_install_commands: config.security.confirm_install_commands,
         confirm_config_writes: config.security.confirm_config_writes,
+        preserve_codex_official_auth: config.security.preserve_codex_official_auth,
+    }
+}
+
+fn detect_codex_auth_status() -> Result<CodexAuthStatus, String> {
+    let paths = app_paths().map_err(|err| err.to_string())?;
+    let codex_dir = paths.home_dir.join(".codex");
+    let config_path = codex_dir.join("config.toml");
+    let auth_path = codex_dir.join("auth.json");
+    let configured_store = read_codex_credentials_store(&config_path);
+    let configured_store = configured_store.as_deref();
+
+    if auth_path.exists() {
+        return Ok(codex_auth_status_from_file(
+            &auth_path,
+            configured_store.unwrap_or("file"),
+        ));
+    }
+
+    if let Some(storage) = codex_credentials_store_from_str(configured_store) {
+        if matches!(
+            storage,
+            CodexAuthStorage::Keyring | CodexAuthStorage::Auto | CodexAuthStorage::Unknown
+        ) {
+            return Ok(CodexAuthStatus {
+                available: false,
+                method: CodexAuthMethod::Unknown,
+                storage,
+                path: None,
+                detail:
+                    "Codex is configured to use the OS credential store; CodeStudio Lite cannot verify keyring contents safely."
+                        .to_string(),
+            });
+        }
+    }
+
+    Ok(CodexAuthStatus {
+        available: false,
+        method: CodexAuthMethod::None,
+        storage: CodexAuthStorage::None,
+        path: Some(display_path(&auth_path)),
+        detail: "No Codex auth.json login cache was found.".to_string(),
+    })
+}
+
+fn codex_auth_status_from_file(auth_path: &Path, configured_store: &str) -> CodexAuthStatus {
+    let storage = codex_credentials_store_from_str(Some(configured_store))
+        .unwrap_or(CodexAuthStorage::AuthJson);
+    let path = Some(display_path(auth_path));
+
+    let Ok(content) = fs::read_to_string(auth_path) else {
+        return CodexAuthStatus {
+            available: true,
+            method: CodexAuthMethod::Unknown,
+            storage,
+            path,
+            detail: "Codex auth.json exists, but CodeStudio Lite could not read it.".to_string(),
+        };
+    };
+
+    codex_auth_status_from_file_content(auth_path, configured_store, &content)
+}
+
+fn codex_auth_status_from_file_content(
+    auth_path: &Path,
+    configured_store: &str,
+    content: &str,
+) -> CodexAuthStatus {
+    let storage = codex_credentials_store_from_str(Some(configured_store))
+        .unwrap_or(CodexAuthStorage::AuthJson);
+    let path = Some(display_path(auth_path));
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return CodexAuthStatus {
+            available: true,
+            method: CodexAuthMethod::Unknown,
+            storage,
+            path,
+            detail: "Codex auth.json exists, but its shape could not be parsed.".to_string(),
+        };
+    };
+
+    let method = infer_codex_auth_method(&value);
+    let detail = match method {
+        CodexAuthMethod::ChatGpt => {
+            "Codex ChatGPT/OAuth login cache detected in auth.json.".to_string()
+        }
+        CodexAuthMethod::ApiKey => "Codex API-key login cache detected in auth.json.".to_string(),
+        CodexAuthMethod::AccessToken => {
+            "Codex access-token login cache detected in auth.json.".to_string()
+        }
+        CodexAuthMethod::Unknown => {
+            "Codex auth.json exists; credential type could not be identified without reading secret values."
+                .to_string()
+        }
+        CodexAuthMethod::None => "Codex auth.json exists but no credential markers were found."
+            .to_string(),
+    };
+
+    CodexAuthStatus {
+        available: !matches!(method, CodexAuthMethod::None),
+        method,
+        storage,
+        path,
+        detail,
+    }
+}
+
+fn read_codex_credentials_store(config_path: &Path) -> Option<String> {
+    let content = fs::read_to_string(config_path).ok()?;
+    let value = toml::from_str::<toml::Value>(&content).ok()?;
+    read_toml_string(&value, "cli_auth_credentials_store")
+}
+
+fn codex_credentials_store_from_str(value: Option<&str>) -> Option<CodexAuthStorage> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("file") => Some(CodexAuthStorage::AuthJson),
+        Some("keyring") => Some(CodexAuthStorage::Keyring),
+        Some("auto") => Some(CodexAuthStorage::Auto),
+        Some(_) => Some(CodexAuthStorage::Unknown),
+        None => None,
+    }
+}
+
+fn infer_codex_auth_method(value: &serde_json::Value) -> CodexAuthMethod {
+    let mut keys = Vec::new();
+    collect_json_key_paths(value, String::new(), &mut keys);
+
+    if keys.iter().any(|key| {
+        key.contains("chatgpt")
+            || key.contains("refresh_token")
+            || key.contains("id_token")
+            || key.contains("account_id")
+            || key.contains("expires_at")
+    }) {
+        return CodexAuthMethod::ChatGpt;
+    }
+
+    if keys.iter().any(|key| key.contains("access_token")) {
+        return CodexAuthMethod::AccessToken;
+    }
+
+    if keys.iter().any(|key| key.contains("api_key") || key.contains("apikey")) {
+        return CodexAuthMethod::ApiKey;
+    }
+
+    if keys.is_empty() {
+        CodexAuthMethod::None
+    } else {
+        CodexAuthMethod::Unknown
+    }
+}
+
+fn collect_json_key_paths(value: &serde_json::Value, prefix: String, keys: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let lowered = key.to_ascii_lowercase();
+                let next = if prefix.is_empty() {
+                    lowered
+                } else {
+                    format!("{prefix}.{lowered}")
+                };
+                keys.push(next.clone());
+                collect_json_key_paths(child, next, keys);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_json_key_paths(child, prefix.clone(), keys);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3482,6 +3676,9 @@ pub(crate) fn codex_native_config_content(current: &str, tool_id: &str) -> Resul
     document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(true);
     document["model_providers"][&provider_id]["experimental_bearer_token"] =
         toml_edit::value(client.token);
+    if codex_official_auth_preservation_enabled() {
+        repair_codex_preserved_auth_config(&mut document);
+    }
 
     let updated = document.to_string();
     toml::from_str::<toml::Value>(&updated)
@@ -3516,11 +3713,51 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
     document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(false);
     document["model_providers"][&provider_id]["experimental_bearer_token"] =
         toml_edit::value(api_key);
+    if codex_official_auth_preservation_enabled() {
+        repair_codex_preserved_auth_config(&mut document);
+    }
 
     let updated = document.to_string();
     toml::from_str::<toml::Value>(&updated)
         .map_err(|err| format!("Generated Codex config is invalid: {err}"))?;
     Ok(updated)
+}
+
+fn codex_official_auth_preservation_enabled() -> bool {
+    read_app_config()
+        .map(|config| config.security.preserve_codex_official_auth)
+        .unwrap_or(true)
+}
+
+fn repair_codex_preserved_auth_config(document: &mut toml_edit::DocumentMut) {
+    document.as_table_mut().remove("experimental_bearer_token");
+    remove_codex_legacy_key_from_table(document, "auth", &["OPENAI_API_KEY", "api_key"]);
+    remove_codex_legacy_key_from_table(document, "env", &["OPENAI_API_KEY"]);
+}
+
+fn remove_codex_legacy_key_from_table(
+    document: &mut toml_edit::DocumentMut,
+    table_name: &str,
+    keys: &[&str],
+) {
+    let should_remove_table = {
+        let Some(table) = document
+            .get_mut(table_name)
+            .and_then(|item| item.as_table_like_mut())
+        else {
+            return;
+        };
+
+        for key in keys {
+            table.remove(key);
+        }
+
+        table.is_empty()
+    };
+
+    if should_remove_table {
+        document.as_table_mut().remove(table_name);
+    }
 }
 
 fn codex_official_config_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
@@ -3542,6 +3779,9 @@ fn codex_official_config_content(current: &str, profile: &ProfileDraft) -> Resul
     if let Some(table) = document["model_providers"][provider_id].as_table_like_mut() {
         table.remove("base_url");
         table.remove("experimental_bearer_token");
+    }
+    if codex_official_auth_preservation_enabled() {
+        repair_codex_preserved_auth_config(&mut document);
     }
 
     let updated = document.to_string();
@@ -5167,6 +5407,9 @@ fn build_native_config_preview(
                         "Sets Codex to the selected official model.",
                     ));
                 }
+                if codex_official_auth_preservation_enabled() {
+                    changes.extend(codex_preserved_auth_repair_diff_lines(&value));
+                }
                 changes
             } else {
                 let provider_id = codex_provider_id_for_profile(profile);
@@ -5177,7 +5420,7 @@ fn build_native_config_preview(
                 } else {
                     profile.model.trim()
                 };
-                vec![
+                let mut changes = vec![
                     diff_line(
                         &value,
                         "model_provider",
@@ -5220,13 +5463,17 @@ fn build_native_config_preview(
                         secret_preview(profile),
                         "Stores the selected Provider API key from the system keychain.",
                     ),
-                ]
+                ];
+                if codex_official_auth_preservation_enabled() {
+                    changes.extend(codex_preserved_auth_repair_diff_lines(&value));
+                }
+                changes
             }
         }
         ProviderApplyMode::Gateway => {
             let provider_id = client.provider_id;
             let provider_name = client.provider_name;
-            vec![
+            let mut changes = vec![
                 diff_line(
                     &value,
                     "model_provider",
@@ -5269,7 +5516,11 @@ fn build_native_config_preview(
                     &client.token_preview,
                     "Stores only the local CodeStudio token, not the real upstream Provider API key.",
                 ),
-            ]
+            ];
+            if codex_official_auth_preservation_enabled() {
+                changes.extend(codex_preserved_auth_repair_diff_lines(&value));
+            }
+            changes
         }
     };
 
@@ -6274,6 +6525,31 @@ fn diff_remove_line(root: &toml::Value, dotted_key: &str, detail: &str) -> Nativ
     )
 }
 
+fn codex_preserved_auth_repair_diff_lines(root: &toml::Value) -> Vec<NativeConfigDiffLine> {
+    vec![
+        diff_remove_line(
+            root,
+            "experimental_bearer_token",
+            "Keeps Codex API tokens scoped to the active provider so auth.json can preserve the official login.",
+        ),
+        diff_remove_line(
+            root,
+            "auth.OPENAI_API_KEY",
+            "Removes a legacy API-key mirror from Codex config.toml without touching auth.json.",
+        ),
+        diff_remove_line(
+            root,
+            "auth.api_key",
+            "Removes a legacy API-key mirror from Codex config.toml without touching auth.json.",
+        ),
+        diff_remove_line(
+            root,
+            "env.OPENAI_API_KEY",
+            "Removes a legacy environment-style API key from Codex config.toml.",
+        ),
+    ]
+}
+
 fn toml_lookup<'a>(root: &'a toml::Value, dotted_key: &str) -> Option<&'a toml::Value> {
     let mut current = root;
     for segment in dotted_key.split('.') {
@@ -6398,6 +6674,7 @@ mod tests {
                 redact_secrets: true,
                 confirm_install_commands: true,
                 confirm_config_writes: true,
+                preserve_codex_official_auth: true,
             },
             paths: PathConfig {
                 profiles_dir: "~/.codestudio-lite/profiles".to_string(),
@@ -6485,6 +6762,120 @@ requires_openai_auth = true
             toml_lookup(&value, "model_providers.codestudio-local.base_url")
                 .and_then(|item| item.as_str()),
             Some("http://127.0.0.1:43112/tools/codex/v1")
+        );
+    }
+
+    #[test]
+    fn codex_official_config_uses_openai_auth_without_token() {
+        let profile = builtin_official_profiles()
+            .into_iter()
+            .find(|profile| profile.app == "codex")
+            .expect("codex official profile");
+        let config = codex_official_config_content(
+            r#"
+experimental_bearer_token = "legacy-top-level"
+
+[auth]
+api_key = "legacy-auth-key"
+
+[model_providers.openai]
+base_url = "https://example.invalid/v1"
+experimental_bearer_token = "legacy-provider-key"
+"#,
+            &profile,
+        )
+        .expect("config should render");
+        let value: toml::Value = toml::from_str(&config).expect("config should parse");
+
+        assert_eq!(
+            read_toml_string(&value, "model_provider").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            toml_lookup(&value, "model_providers.openai.requires_openai_auth")
+                .and_then(|item| item.as_bool()),
+            Some(true)
+        );
+        assert!(toml_lookup(&value, "experimental_bearer_token").is_none());
+        assert!(toml_lookup(&value, "auth.api_key").is_none());
+        assert!(toml_lookup(&value, "model_providers.openai.base_url").is_none());
+        assert!(
+            toml_lookup(&value, "model_providers.openai.experimental_bearer_token").is_none()
+        );
+    }
+
+    #[test]
+    fn codex_auth_status_infers_chatgpt_cache_without_exposing_values() {
+        let auth_path = Path::new("auth.json");
+        let status = codex_auth_status_from_file_content(
+            auth_path,
+            "file",
+            r#"{
+  "tokens": {
+    "access_token": "secret-access-token",
+    "refresh_token": "secret-refresh-token"
+  },
+  "account_id": "acct-secret"
+}"#,
+        );
+
+        assert!(status.available);
+        assert!(matches!(status.method, CodexAuthMethod::ChatGpt));
+        assert!(matches!(status.storage, CodexAuthStorage::AuthJson));
+        assert!(!status.detail.contains("secret-access-token"));
+        assert!(!status.detail.contains("secret-refresh-token"));
+    }
+
+    #[test]
+    fn codex_auth_status_infers_api_key_cache_without_exposing_values() {
+        let auth_path = Path::new("auth.json");
+        let status = codex_auth_status_from_file_content(
+            auth_path,
+            "file",
+            r#"{
+  "openai_api_key": "sk-secret"
+}"#,
+        );
+
+        assert!(status.available);
+        assert!(matches!(status.method, CodexAuthMethod::ApiKey));
+        assert!(!status.detail.contains("sk-secret"));
+    }
+
+    #[test]
+    fn codex_preserved_auth_repair_removes_legacy_key_locations() {
+        let mut document = r#"
+experimental_bearer_token = "top-level-key"
+
+[auth]
+OPENAI_API_KEY = "auth-key"
+api_key = "auth-key-legacy"
+
+[env]
+OPENAI_API_KEY = "env-key"
+OTHER = "keep"
+
+[model_providers.custom]
+experimental_bearer_token = "provider-key"
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .expect("config should parse");
+
+        repair_codex_preserved_auth_config(&mut document);
+        let value: toml::Value = toml::from_str(&document.to_string()).expect("config toml");
+
+        assert!(toml_lookup(&value, "experimental_bearer_token").is_none());
+        assert!(toml_lookup(&value, "auth.OPENAI_API_KEY").is_none());
+        assert!(toml_lookup(&value, "auth.api_key").is_none());
+        assert!(toml_lookup(&value, "env.OPENAI_API_KEY").is_none());
+        assert_eq!(
+            toml_lookup(&value, "env.OTHER").and_then(|item| item.as_str()),
+            Some("keep")
+        );
+        assert_eq!(
+            toml_lookup(&value, "model_providers.custom.experimental_bearer_token")
+                .and_then(|item| item.as_str()),
+            Some("provider-key")
         );
     }
 

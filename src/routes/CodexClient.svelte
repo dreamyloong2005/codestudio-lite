@@ -1,13 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    Download,
-    FolderOpen,
-    Play,
-    Rocket,
-    Trash2
-  } from "@lucide/svelte";
-  import {
     openCodexClientPath,
   } from "../lib/api";
   import {
@@ -22,6 +15,7 @@
     updateCodexClientDraft
   } from "../lib/codexClientStore";
   import { t } from "../lib/i18n";
+  import AppIcon from "../components/AppIcon.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import type {
     CodexClientProgress,
@@ -125,7 +119,7 @@
     </div>
     <div class="top-actions">
       <button class="primary-button" disabled={!canLaunch || busyAction !== null} on:click={launchCodex}>
-        <Play size={16} />
+        <AppIcon name="play" size={16} />
         {$t("codexClient.launch")}
       </button>
     </div>
@@ -165,19 +159,19 @@
     </div>
     <div class="gateway-actions codex-client-actions">
       <button class="secondary-button" disabled={!canStage || busyAction !== null} on:click={stagePackage}>
-        <Download size={16} />
+        <AppIcon name="download" size={16} />
         {busyAction === "stage" ? $t("codexClient.staging") : $t("codexClient.stage")}
       </button>
       <button class="secondary-button" on:click={() => openCodexClientPath("staging")}>
-        <FolderOpen size={16} />
+        <AppIcon name="folder" size={16} />
         {$t("codexClient.openStagingPath")}
       </button>
       <button class="primary-button" disabled={!canInstall || busyAction !== null} on:click={installOrUpdate}>
-        <Rocket size={16} />
+        <AppIcon name="rocket" size={16} />
         {busyAction === "install" ? $t("codexClient.installing") : installed ? $t("codexClient.update") : $t("codexClient.install")}
       </button>
       <button class="secondary-button" disabled={!canUninstall || busyAction !== null} on:click={() => setCodexClientConfirmUninstall(true)}>
-        <Trash2 size={16} />
+        <AppIcon name="delete" size={16} />
         {$t("common.delete")}
       </button>
     </div>
@@ -364,7 +358,7 @@
       <div class="modal-actions">
         <button class="secondary-button" on:click={() => setCodexClientConfirmUninstall(false)}>{$t("common.cancel")}</button>
         <button class="primary-button" disabled={busyAction !== null} on:click={removeCodex}>
-          <Trash2 size={16} />
+          <AppIcon name="delete" size={16} />
           {busyAction === "uninstall" ? $t("codexClient.uninstalling") : $t("codexClient.confirmUninstall")}
         </button>
       </div>
