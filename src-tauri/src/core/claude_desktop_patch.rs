@@ -305,15 +305,19 @@ struct ClaudeInstall {
 }
 
 /// Resolve the installed Claude Desktop for in-place localization patching,
-/// supporting both the MSIX layout (`<pkg>/app/Claude.exe` +
-/// `<pkg>/app/resources/app.asar`) and the native electron-builder `.exe`
-/// layout (`<root>/Claude.exe` + `<root>/resources/app.asar`). MSIX is
-/// preferred so an existing AppContainer install keeps its identity launch.
+/// supporting both the native electron-builder `.exe` layout
+/// (`<root>/Claude.exe` + `<root>/resources/app.asar`) and the MSIX layout
+/// (`<pkg>/app/Claude.exe` + `<pkg>/app/resources/app.asar`). The user-profile
+/// native install is preferred because it can be patched directly without UAC;
+/// only when it is not found do we fall back to the MSIX + elevation path.
 fn resolve_claude_install_for_patch() -> Result<ClaudeInstall, String> {
     if !cfg!(target_os = "windows") {
         return Err(
             "Claude Desktop localization patching is only supported on Windows.".to_string(),
         );
+    }
+    if let Some(install) = resolve_native_claude_install_for_patch()? {
+        return Ok(install);
     }
     let identities = claude_desktop_windows_package_identities();
     if let Some(installed) = package::detect_first_msix_package(identities) {
@@ -329,8 +333,12 @@ fn resolve_claude_install_for_patch() -> Result<ClaudeInstall, String> {
             ion_locale: resources.join(CLAUDE_ION_ZH_LOCALE_RELATIVE_PATH),
         });
     }
-    // No MSIX package: fall back to the native electron-builder/Squirrel
-    // install (winget's `.exe` installer). Its layout is:
+    Err("Claude Desktop was not found; localization requires the installed app.".to_string())
+}
+
+fn resolve_native_claude_install_for_patch() -> Result<Option<ClaudeInstall>, String> {
+    // Native electron-builder/Squirrel install (winget's `.exe` installer).
+    // Its layout is:
     //   <root>/claude.exe            (tiny Squirrel launcher, no Electron fuse)
     //   <root>/app-<version>/claude.exe  (real Electron image + fuse)
     //   <root>/app-<version>/resources/app.asar
@@ -352,12 +360,7 @@ fn resolve_claude_install_for_patch() -> Result<ClaudeInstall, String> {
                 })?;
                 resolve_patch_paths_from_launcher(&found, &root)?
             }
-            None => {
-                return Err(
-                    "Claude Desktop was not found; localization requires the installed app."
-                        .to_string(),
-                );
-            }
+            None => return Ok(None),
         },
     };
     // Verify the resolved patch target and asar actually exist on disk before
@@ -375,14 +378,14 @@ fn resolve_claude_install_for_patch() -> Result<ClaudeInstall, String> {
             resources.join("app.asar").display()
         ));
     }
-    Ok(ClaudeInstall {
+    Ok(Some(ClaudeInstall {
         kind: ClaudeInstallKind::Exe,
         patch_exe,
         launcher_exe: launcher,
         asar: resources.join("app.asar"),
         shell_locale: resources.join(CLAUDE_SHELL_ZH_LOCALE_FILE),
         ion_locale: resources.join(CLAUDE_ION_ZH_LOCALE_RELATIVE_PATH),
-    })
+    }))
 }
 
 /// Resolve patch/launcher/resources paths from a detection result that already
@@ -1185,45 +1188,63 @@ fn elevated_patch_script(
     ion_locale: &Path,
     patched_ion_locale: &Path,
 ) -> String {
-    let exe_str = ps_single_quote(&exe.to_string_lossy());
-    let asar_str = ps_single_quote(&asar.to_string_lossy());
-    let patched_exe_str = ps_single_quote(&patched_exe.to_string_lossy());
-    let patched_asar_str = ps_single_quote(&patched_asar.to_string_lossy());
-    let shell_locale_str = ps_single_quote(&shell_locale.to_string_lossy());
-    let patched_shell_locale_str = ps_single_quote(&patched_shell_locale.to_string_lossy());
-    let ion_locale_str = ps_single_quote(&ion_locale.to_string_lossy());
-    let patched_ion_locale_str = ps_single_quote(&patched_ion_locale.to_string_lossy());
-    let ion_locale_dir = ps_single_quote(
-        &ion_locale
-            .parent()
-            .map(|p| p.to_string_lossy())
-            .unwrap_or_default(),
-    );
+    let exe_str = ps_path_literal(exe);
+    let asar_str = ps_path_literal(asar);
+    let patched_exe_str = ps_path_literal(patched_exe);
+    let patched_asar_str = ps_path_literal(patched_asar);
+    let shell_locale_str = ps_path_literal(shell_locale);
+    let patched_shell_locale_str = ps_path_literal(patched_shell_locale);
+    let ion_locale_str = ps_path_literal(ion_locale);
+    let patched_ion_locale_str = ps_path_literal(patched_ion_locale);
+    let log_path = patched_asar
+        .parent()
+        .map(|p| p.join("apply-claude-patch.log"))
+        .unwrap_or_else(|| PathBuf::from("apply-claude-patch.log"));
+    let log_path_str = ps_path_literal(&log_path);
+    let ion_locale_dir = ion_locale
+        .parent()
+        .map(ps_path_literal)
+        .unwrap_or_else(|| "''".to_string());
     format!(
         r#"$ErrorActionPreference = 'Stop'
-$exitReason = ''
+$logPath = {log_path_str}
+$script:exitReason = ''
+Set-Content -LiteralPath $logPath -Value "CodeStudio Lite Claude patch started: $(Get-Date -Format o)" -Encoding UTF8
+function Write-Log($message) {{
+  Add-Content -LiteralPath $logPath -Value $message -Encoding UTF8
+}}
 function Grant-Write($path) {{
   if (Test-Path $path) {{
-    takeown /F $path /A | Out-Null
-    icacls $path /grant 'Administrators:F' | Out-Null
+    Write-Log "Grant-Write $path"
+    takeown /F $path /A *>> $logPath
+    icacls $path /grant 'Administrators:F' *>> $logPath
   }} else {{
     $parent = Split-Path -Parent $path
     if (Test-Path $parent) {{
-      takeown /F $parent /A | Out-Null
-      icacls $parent /grant 'Administrators:F' | Out-Null
+      Write-Log "Grant-Write parent $parent"
+      takeown /F $parent /A *>> $logPath
+      icacls $parent /grant 'Administrators:F' *>> $logPath
     }}
   }}
 }}
 function Restore-Acl($path) {{
-  if (Test-Path $path) {{ icacls $path /remove 'Administrators' | Out-Null }}
+  if (Test-Path $path) {{
+    try {{ icacls $path /remove 'Administrators' *>> $logPath }} catch {{ Write-Log "Restore-Acl ignored: $($_.Exception.Message)" }}
+  }}
 }}
 function Copy-WithRetry($src, $dst, $retries) {{
+  $parent = Split-Path -Parent $dst
+  if ($parent -and -not (Test-Path $parent)) {{
+    New-Item -ItemType Directory -Path $parent -Force *>> $logPath | Out-Null
+  }}
   for ($i = 0; $i -lt $retries; $i++) {{
     try {{
+      Write-Log "Copy-Item $src -> $dst attempt $($i+1)/$retries"
       Copy-Item -LiteralPath $src -Destination $dst -Force
       return $true
     }} catch {{
-      $exitReason = "Copy-Item $src -> $dst failed (attempt $($i+1)/$retries): $($_.Exception.Message)"
+      $script:exitReason = "Copy-Item $src -> $dst failed (attempt $($i+1)/$retries): $($_.Exception.Message)"
+      Write-Log $script:exitReason
       if ($i -lt $retries - 1) {{ Start-Sleep -Milliseconds 500 }}
     }}
   }}
@@ -1239,15 +1260,16 @@ try {{
   $ok3 = Copy-WithRetry {patched_shell_locale_str} {shell_locale_str} 5
   $ok4 = Copy-WithRetry {patched_ion_locale_str} {ion_locale_str} 5
   if (-not ($ok1 -and $ok2 -and $ok3 -and $ok4)) {{
-    Write-Error $exitReason
+    Write-Log "FAILED: $script:exitReason"
     exit 2
   }}
   Restore-Acl {asar_str}
   Restore-Acl {exe_str}
   Restore-Acl {shell_locale_str}
   Restore-Acl {ion_locale_dir}
+  Write-Log "CodeStudio Lite Claude patch completed."
 }} catch {{
-  Write-Error $_.Exception.Message
+  Write-Log "ERROR: $($_.Exception.Message)"
   exit 3
 }}
 "#
@@ -1258,24 +1280,24 @@ try {{
 /// Desktop: the asar-integrity fuse on Claude.exe is disabled and app.asar
 /// is rewritten so its entry point opens the Node inspector. Both edits are
 /// in place (zero extra footprint once applied). If the patch is already in
-/// place, this is a no-op. Writing the protected WindowsApps files requires
-/// elevation, so the actual write happens through an elevated PowerShell
-/// script; the patched bytes are prepared in a temp dir first.
-/// Try to copy the patched files directly without elevation. Returns
-/// true on success, false on any error (caller falls back to elevated script).
+/// place, this is a no-op. User-profile native installs are patched directly;
+/// protected MSIX files fall back to an elevated PowerShell script.
+/// Try to copy the patched files directly without elevation.
 fn try_direct_patch_write(
     paths: &ClaudePatchPaths,
     temp_exe: &Path,
     temp_asar: &Path,
     temp_shell_locale: &Path,
     temp_ion_locale: &Path,
-) -> bool {
+) -> Result<(), String> {
     // Ensure the ion locale directory exists.
     if let Some(parent) = paths.ion_locale.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create {}: {err}", parent.display()))?;
     }
     if let Some(parent) = paths.shell_locale.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create {}: {err}", parent.display()))?;
     }
     let copies = [
         (temp_exe, &paths.exe),
@@ -1284,11 +1306,14 @@ fn try_direct_patch_write(
         (temp_ion_locale, &paths.ion_locale),
     ];
     for (src, dst) in &copies {
-        if let Err(_) = fs::copy(src, dst) {
-            return false;
-        }
+        fs::copy(src, dst).map_err(|err| {
+            format!(
+                "Failed to write Claude localization patch file {}: {err}",
+                dst.display()
+            )
+        })?;
     }
-    true
+    Ok(())
 }
 
 fn apply_localization_patch() -> Result<(), String> {
@@ -1367,33 +1392,70 @@ fn apply_localization_patch() -> Result<(), String> {
     fs::write(&temp_ion_locale, CLAUDE_ION_ZH_LOCALE)
         .map_err(|err| format!("Failed to write zh-CN ion locale: {err}"))?;
 
-    // Try a direct copy first — no UAC prompt needed. For EXE (non-MSIX)
-    // installs the files live in a user-writable directory (e.g.
-    // %LOCALAPPDATA%\Programs\Claude) so this usually succeeds. For MSIX
-    // installs the files are under the TrustedInstaller-owned WindowsApps
-    // directory, so the direct write fails and we fall back to the elevated
-    // PowerShell script. This unifies both install kinds behind a single
-    // "try direct, then elevate" path.
-    let direct_write_ok =
-        try_direct_patch_write(&paths, &temp_exe, &temp_asar, &temp_shell_locale, &temp_ion_locale);
-    if !direct_write_ok {
-        let script_path = patch_dir.join("apply-claude-patch.ps1");
-        write_if_changed(
-            &script_path,
-            &elevated_patch_script(
-                &paths.exe,
-                &paths.asar,
+    match install.kind {
+        ClaudeInstallKind::Exe => {
+            // User-profile installs must not use UAC: writing directly keeps
+            // the normal per-user install context and returns the real IO
+            // error to the UI if Claude is still locking a file.
+            try_direct_patch_write(
+                &paths,
                 &temp_exe,
                 &temp_asar,
-                &paths.shell_locale,
                 &temp_shell_locale,
-                &paths.ion_locale,
                 &temp_ion_locale,
-            ),
-        )?;
-        run_elevated_powershell_script(&script_path)?;
+            )?;
+        }
+        ClaudeInstallKind::Msix => {
+            // MSIX lives under WindowsApps. Try direct first in case the files
+            // are already writable; otherwise keep the existing UAC path and
+            // its explicit failure messages.
+            if try_direct_patch_write(
+                &paths,
+                &temp_exe,
+                &temp_asar,
+                &temp_shell_locale,
+                &temp_ion_locale,
+            )
+            .is_err()
+            {
+                let script_path = patch_dir.join("apply-claude-patch.ps1");
+                write_if_changed(
+                    &script_path,
+                    &elevated_patch_script(
+                        &paths.exe,
+                        &paths.asar,
+                        &temp_exe,
+                        &temp_asar,
+                        &paths.shell_locale,
+                        &temp_shell_locale,
+                        &paths.ion_locale,
+                        &temp_ion_locale,
+                    ),
+                )?;
+                if let Err(err) = run_elevated_powershell_script(&script_path) {
+                    // Some WindowsApps repairs complete the file copy but the
+                    // elevated PowerShell host still exits non-zero. Trust the
+                    // on-disk verification below when it proves the patch
+                    // landed; otherwise surface the original elevation error.
+                    verify_localization_patch_landed(&paths).map_err(|verify_err| {
+                        format!("{err}\nVerification after elevation also failed: {verify_err}")
+                    })?;
+                }
+            }
+        }
     }
 
+    verify_localization_patch_landed(&paths)?;
+
+    // Clean up the temp blobs; the real files are patched in place.
+    let _ = fs::remove_file(&temp_exe);
+    let _ = fs::remove_file(&temp_asar);
+    let _ = fs::remove_file(&temp_shell_locale);
+    let _ = fs::remove_file(&temp_ion_locale);
+    Ok(())
+}
+
+fn verify_localization_patch_landed(paths: &ClaudePatchPaths) -> Result<(), String> {
     // Re-read the patched files from disk and verify the patch actually
     // landed: the elevated copy is synchronous now, but MSIX-managed
     // WindowsApps files can still roll back or be locked, and a stale read
@@ -1415,12 +1477,12 @@ fn apply_localization_patch() -> Result<(), String> {
                 .to_string(),
         );
     }
-
-    // Clean up the temp blobs; the real files are patched in place.
-    let _ = fs::remove_file(&temp_exe);
-    let _ = fs::remove_file(&temp_asar);
-    let _ = fs::remove_file(&temp_shell_locale);
-    let _ = fs::remove_file(&temp_ion_locale);
+    if !locale_file_matches(&paths.shell_locale, CLAUDE_SHELL_ZH_LOCALE) {
+        return Err("Claude zh-CN shell locale was not written after patching.".to_string());
+    }
+    if !locale_file_matches(&paths.ion_locale, CLAUDE_ION_ZH_LOCALE) {
+        return Err("Claude zh-CN ion locale was not written after patching.".to_string());
+    }
     Ok(())
 }
 
@@ -1487,6 +1549,10 @@ fn windows_shell_quote(value: &str) -> String {
 
 fn ps_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn ps_path_literal(path: &Path) -> String {
+    ps_single_quote(&path.to_string_lossy().replace('/', "\\"))
 }
 
 fn windows_launch_script(localize: bool) -> String {
@@ -1798,6 +1864,9 @@ fn run_elevated_powershell_script_windows(script_path: &Path) -> Result<(), Stri
 
     let operation = wide(OsStr::new("runas"));
     let file = wide(OsStr::new("powershell.exe"));
+    let log_path = script_path
+        .parent()
+        .map(|p| p.join("apply-claude-patch.log"));
     let args = format!(
         "-NoLogo -NoProfile -ExecutionPolicy Bypass -File {}",
         windows_shell_quote(&script_path.to_string_lossy())
@@ -1860,13 +1929,18 @@ fn run_elevated_powershell_script_windows(script_path: &Path) -> Result<(), Stri
         return Err("Could not read elevated patch process exit code.".to_string());
     }
     if exit_code != 0 {
+        let log_tail = log_path
+            .as_deref()
+            .and_then(read_patch_log_tail)
+            .map(|tail| format!(" Patch log: {tail}"))
+            .unwrap_or_default();
         let hint = match exit_code {
             2 => "a protected file copy failed after retries (Claude may still be running or WindowsApps is locked).".to_string(),
             3 => "the elevated PowerShell script threw an error (check takeown/icacls permissions).".to_string(),
             _ => "UAC may have been declined or the elevated process was terminated.".to_string(),
         };
         return Err(format!(
-            "Claude in-place patch failed with exit code {exit_code}: {hint}"
+            "Claude in-place patch failed with exit code {exit_code}: {hint}{log_tail}"
         ));
     }
     Ok(())
@@ -1875,6 +1949,20 @@ fn run_elevated_powershell_script_windows(script_path: &Path) -> Result<(), Stri
 #[cfg(not(windows))]
 fn run_elevated_powershell_script_windows(_script_path: &Path) -> Result<(), String> {
     Err("Elevated PowerShell is only supported on Windows.".to_string())
+}
+
+fn read_patch_log_tail(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(8);
+    Some(lines[start..].join(" | "))
 }
 
 #[allow(dead_code)]
@@ -2474,11 +2562,42 @@ mod tests {
         assert!(source.contains("find_squirrel_app_version_dir"));
         assert!(source.contains("patch_exe"));
         assert!(source.contains("launcher_exe"));
-        // The unified resolver prefers MSIX, then the broad version-aware
-        // scan detection uses, then the explicit exe candidate list.
+        // The resolver now prefers the user-profile native install first so
+        // it can patch directly without UAC, then falls back to MSIX.
         assert!(source.contains("resolve_claude_install_for_patch"));
+        assert!(source.contains("resolve_native_claude_install_for_patch"));
         assert!(source.contains("claude_desktop_windows_native_install_path"));
         assert!(source.contains("resolve_patch_paths_from_detected"));
+        let resolver_body = source
+            .split("fn resolve_claude_install_for_patch()")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn resolve_native_claude_install_for_patch()")
+                    .next()
+            })
+            .expect("resolver body should exist");
+        assert!(
+            resolver_body
+                .find("resolve_native_claude_install_for_patch")
+                .expect("native resolver should be referenced")
+                < resolver_body
+                    .find("detect_first_msix_package")
+                    .expect("msix resolver should still exist")
+        );
+    }
+
+    #[test]
+    fn exe_localization_patch_uses_direct_write_without_uac() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let exe_branch = source
+            .split("ClaudeInstallKind::Exe => {")
+            .nth(1)
+            .and_then(|tail| tail.split("ClaudeInstallKind::Msix => {").next())
+            .expect("exe patch branch should exist");
+
+        assert!(exe_branch.contains("try_direct_patch_write"));
+        assert!(!exe_branch.contains("run_elevated_powershell_script"));
+        assert!(!exe_branch.contains("apply-claude-patch.ps1"));
     }
 
     #[test]
@@ -2673,7 +2792,9 @@ mod tests {
         let shim = build_inspector_shim(".vite/build/index.pre.js");
 
         assert!(shim.contains("function runtimeLaunchZhFlag"));
-        assert!(shim.contains("app.getLocale = function () { return currentLocale || \"en-US\"; };"));
+        assert!(
+            shim.contains("app.getLocale = function () { return currentLocale || \"en-US\"; };")
+        );
         assert!(!shim.contains("app.getLocale = function () { return \"zh-CN\"; };"));
         assert!(!shim.contains("var __CSL_LL=\" + (localizedLaunchDefaultZh ? \"!0\" : \"!1\")"));
     }
@@ -2825,7 +2946,8 @@ mod tests {
         assert!(!script.contains("remote-debugging-port"));
         assert!(!script.contains("_debugProcess"));
         assert!(script.contains("zh-CN.json"));
-        assert!(script.contains("ion-dist"));
+        assert!(script.contains(r"ion-dist\i18n\zh-CN.json"));
+        assert!(!script.contains("ion-dist/i18n"));
         let source = include_str!("claude_desktop_patch.rs");
         // Elevation waits for the elevated process so the patch is written
         // before Claude is activated; assert the synchronous variant.
