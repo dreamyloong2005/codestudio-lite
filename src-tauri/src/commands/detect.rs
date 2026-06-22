@@ -1,5 +1,8 @@
-use crate::core::detector;
-use crate::core::types::DetectionSnapshot;
+use crate::core::platform::package;
+use crate::core::{codex_client, detector};
+use crate::core::types::{
+    ClaudeDesktopInstallKinds, CodexClientInstallKinds, DetectionSnapshot,
+};
 
 #[tauri::command]
 pub async fn detect_environment() -> Result<DetectionSnapshot, String> {
@@ -30,4 +33,45 @@ pub async fn detect_environment_fresh() -> Result<DetectionSnapshot, String> {
     })
     .await
     .map_err(|err| err.to_string())?
+}
+
+/// Per-kind install detection for the Claude Desktop page tabs: resolves the
+/// MSIX (Windows App) and native .exe installs independently so the UI can
+/// show a tab per install kind. A user may have both installed at once.
+#[tauri::command]
+pub async fn detect_claude_install_kinds() -> Result<ClaudeDesktopInstallKinds, String> {
+    tauri::async_runtime::spawn_blocking(detector::claude_desktop_install_kinds)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Per-kind install detection for the Codex desktop client page tabs:
+/// resolves the MSIX (Windows App) and portable installs independently so
+/// the UI can show a tab per install kind.
+#[tauri::command]
+pub async fn detect_codex_install_kinds() -> Result<CodexClientInstallKinds, String> {
+    tauri::async_runtime::spawn_blocking(codex_client::codex_client_install_kinds)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Local MSIX-runtime capability check for the Claude Desktop page (mirrors
+/// the Codex client capability panel): probes Add-AppxPackage, AppXSvc and
+/// the MSIX runtime so the user can see whether the Windows App install path
+/// is available on this machine.
+#[tauri::command]
+pub async fn detect_claude_capabilities() -> Result<Vec<codex_client::CodexClientCapability>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        package::probe_msix_capabilities()
+            .into_iter()
+            .map(|cap| codex_client::CodexClientCapability {
+                id: cap.id,
+                label: cap.label,
+                status: cap.status,
+                detail: cap.detail,
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|err| err.to_string())
 }

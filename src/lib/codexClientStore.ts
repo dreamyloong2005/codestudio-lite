@@ -1,8 +1,10 @@
 import { get, writable } from "svelte/store";
 import {
+  detectCodexInstallKinds,
   inspectCodexClient,
   installCodexClient,
   loadCachedCodexClientState,
+  loadCachedDetection,
   launchCodexClient,
   listenCodexClientProgress,
   planCodexClientUpdate,
@@ -11,6 +13,7 @@ import {
   updateCodexClientSettings
 } from "./api";
 import type {
+  CodexClientInstallKinds,
   CodexClientOperationResult,
   CodexClientProgress,
   CodexClientSettings,
@@ -36,6 +39,10 @@ interface CodexClientViewState {
   operationResult: CodexClientOperationResult | null;
   progress: CodexClientProgress | null;
   confirmUninstall: boolean;
+  // Per-kind install detection (MSIX vs portable) for the page tabs.
+  installKinds: CodexClientInstallKinds | null;
+  // Which install-kind tab is selected: "msix" (Windows App) or "portable".
+  selectedKind: "msix" | "portable";
 }
 
 const initialState: CodexClientViewState = {
@@ -54,7 +61,9 @@ const initialState: CodexClientViewState = {
   stageReport: null,
   operationResult: null,
   progress: null,
-  confirmUninstall: false
+  confirmUninstall: false,
+  installKinds: null,
+  selectedKind: "msix"
 };
 
 export const codexClientView = writable<CodexClientViewState>(initialState);
@@ -197,6 +206,16 @@ async function hydrateCodexClientFromCache(): Promise<boolean> {
       // instead of preserving the default-seeded draft launch options.
       patch({ loaded: true });
       applyState(cached);
+      // Restore per-kind install detection from the cached detection snapshot
+      // so the tabs render instantly before the async re-scan completes.
+      try {
+        const det = await loadCachedDetection();
+        if (det?.codexInstallKinds) {
+          patch({ installKinds: det.codexInstallKinds });
+        }
+      } catch {
+        // Non-fatal: the async re-scan will populate installKinds.
+      }
       return true;
     }
   } catch {
@@ -246,6 +265,8 @@ export async function refreshCodexClient(withNetwork = true, force = false) {
       nextState = await planCodexClientUpdate();
       applyState(nextState);
     }
+    const installKinds = await detectCodexInstallKinds().catch(() => null);
+    patch({ installKinds });
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });
   } finally {
@@ -297,6 +318,11 @@ export function updateCodexClientDraft(patchValue: Partial<CodexClientSettings>)
 
 export function setCodexClientConfirmUninstall(confirmUninstall: boolean) {
   patch({ confirmUninstall });
+}
+
+/// Select the install-kind tab ("msix" or "portable") on the Codex client page.
+export function setCodexClientSelectedKind(kind: "msix" | "portable") {
+  patch({ selectedKind: kind });
 }
 
 function scheduleSettingsAutoSave() {
@@ -380,17 +406,22 @@ export async function stageCodexClientPackage() {
 }
 
 export async function installOrUpdateCodexClient() {
-  const plan = get(codexClientView).state?.plan ?? null;
+  const snapshot = get(codexClientView);
+  const plan = snapshot.state?.plan ?? null;
   patch({
     progress: progressSeed("codexClient.progressInstallPreparing", plan?.downloadSize, 7)
   });
+  // Drive the install route from the page-tab selection rather than the
+  // persisted windows_install_mode setting.
+  const installKind = snapshot.selectedKind;
   await runAction(
     "install",
     () => installCodexClient({
       confirm: true,
       expectedCurrentVersion: plan?.currentVersion ?? null,
       expectedLatestVersion: plan?.latestVersion ?? null,
-      expectedRoute: plan?.route ?? null
+      expectedRoute: plan?.route ?? null,
+      installKind
     }),
     async (result) => {
       applyInstallResult(result);
@@ -408,12 +439,20 @@ export async function installOrUpdateCodexClient() {
 }
 
 export async function removeCodexClient() {
-  const draft = get(codexClientView).settingsDraft;
+  const snapshot = get(codexClientView);
+  const draft = snapshot.settingsDraft;
+  // Uninstall the install kind the user is currently viewing on the page
+  // tab. Fall back to the detected kind if the selected tab has no install.
+  let installKind = snapshot.selectedKind;
+  if (installKind === "portable" && !snapshot.installKinds?.portable?.installed) {
+    installKind = "msix";
+  }
   await runAction(
     "uninstall",
     () => uninstallCodexClient({
       confirm: true,
-      purgeUserData: !(draft?.keepUserDataOnUninstall ?? true)
+      purgeUserData: !(draft?.keepUserDataOnUninstall ?? true),
+      installKind
     }),
     async (result) => {
       patch({

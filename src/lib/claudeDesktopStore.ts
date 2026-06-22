@@ -1,5 +1,6 @@
 import { get, writable } from "svelte/store";
 import {
+  detectClaudeCapabilities,
   detectEnvironmentFresh,
   installTool,
   launchClaudeDesktop,
@@ -11,6 +12,8 @@ import {
   updateTool
 } from "./api";
 import type {
+  ClaudeDesktopInstallKinds,
+  CodexClientCapability,
   DetectionSnapshot,
   ToolInstallPlan,
   ToolInstallProgress,
@@ -38,15 +41,42 @@ interface ClaudeDesktopViewState {
   // patch. Stored in the view store rather than component-local state so it is
   // not reset to its default when the page unmounts/remounts on navigation.
   localizeLaunch: boolean;
+  // Per-kind install detection (MSIX vs native .exe) for the page tabs.
+  installKinds: ClaudeDesktopInstallKinds | null;
+  // Which install-kind tab is selected: "msix" (Windows App) or "exe".
+  selectedKind: "msix" | "exe";
+  // Local MSIX-runtime capability checks for the Windows App tab.
+  capabilities: CodexClientCapability[];
 }
 
 const LOCALIZE_LAUNCH_STORAGE_KEY = "codestudio-lite-claude-localize-launch";
+
+const LOCALIZE_LAUNCH_INITIALIZED_KEY = "codestudio-lite-claude-localize-launch-initialized";
 
 function readPersistedLocalizeLaunch(): boolean {
   if (typeof localStorage === "undefined") {
     return false;
   }
-  return localStorage.getItem(LOCALIZE_LAUNCH_STORAGE_KEY) === "1";
+  const stored = localStorage.getItem(LOCALIZE_LAUNCH_STORAGE_KEY);
+  if (stored !== null) {
+    return stored === "1";
+  }
+  // First launch: auto-enable localization when the system language is
+  // Chinese (zh-CN or zh-TW). A separate "initialized" flag ensures this
+  // only runs once — once the user manually toggles the option (on or
+  // off) the persisted value takes precedence on all subsequent launches.
+  if (localStorage.getItem(LOCALIZE_LAUNCH_INITIALIZED_KEY) !== "1") {
+    const lang = navigator.language || "";
+    if (lang.toLowerCase().startsWith("zh")) {
+      localStorage.setItem(LOCALIZE_LAUNCH_STORAGE_KEY, "1");
+      localStorage.setItem(LOCALIZE_LAUNCH_INITIALIZED_KEY, "1");
+      return true;
+    }
+    localStorage.setItem(LOCALIZE_LAUNCH_STORAGE_KEY, "0");
+    localStorage.setItem(LOCALIZE_LAUNCH_INITIALIZED_KEY, "1");
+    return false;
+  }
+  return false;
 }
 
 const initialState: ClaudeDesktopViewState = {
@@ -62,7 +92,10 @@ const initialState: ClaudeDesktopViewState = {
   result: null,
   progressLogs: [],
   confirmUninstall: false,
-  localizeLaunch: readPersistedLocalizeLaunch()
+  localizeLaunch: readPersistedLocalizeLaunch(),
+  installKinds: null,
+  selectedKind: "msix",
+  capabilities: []
 };
 
 export const claudeDesktopView = writable<ClaudeDesktopViewState>(initialState);
@@ -157,7 +190,14 @@ async function hydrateClaudeDesktopFromCache() {
     const cached = await loadCachedDetection();
     if (cached) {
       const status = findClaudeDesktop(cached);
-      patch({ snapshot: cached, status, loaded: true });
+      patch({
+        snapshot: cached,
+        status,
+        // Restore the per-kind install detection from the cached snapshot so
+        // the tabs render instantly before the async re-scan completes.
+        installKinds: cached.claudeInstallKinds ?? null,
+        loaded: true
+      });
     }
   } catch {
     // Cache read failures are non-fatal: the async re-scan will populate.
@@ -181,11 +221,14 @@ export async function refreshClaudeDesktop() {
       planToolInstall(CLAUDE_DESKTOP_TOOL_ID).catch(() => null),
       planToolUpdate(CLAUDE_DESKTOP_TOOL_ID).catch(() => null)
     ]);
+    const capabilities = await detectClaudeCapabilities().catch(() => []);
     patch({
       snapshot,
       status,
       installPlan,
       updatePlan,
+      installKinds: snapshot.claudeInstallKinds ?? null,
+      capabilities,
       loaded: true
     });
   } catch (err) {
@@ -252,10 +295,18 @@ export async function installOrUpdateClaudeDesktop(mode?: "install" | "update") 
 }
 
 export async function removeClaudeDesktop() {
+  const view = get(claudeDesktopView);
+  // Uninstall the install kind the user is currently viewing on the page
+  // tab. Fall back to the detected kind if the selected tab has no install.
+  let installKind = view.selectedKind;
+  if (installKind === "exe" && !view.installKinds?.exe?.installed) {
+    installKind = "msix";
+  }
   return runAction("uninstall", () =>
     uninstallTool({
       toolId: CLAUDE_DESKTOP_TOOL_ID,
-      confirm: true
+      confirm: true,
+      installKind
     })
   ).finally(() => {
     patch({ confirmUninstall: false });
@@ -285,5 +336,10 @@ export function dismissClaudeDesktopError() {
 
 export function dismissClaudeDesktopSuccess() {
   patch({ success: null });
+}
+
+/// Select the install-kind tab ("msix" or "exe") on the Claude Desktop page.
+export function setClaudeDesktopSelectedKind(kind: "msix" | "exe") {
+  patch({ selectedKind: kind });
 }
 

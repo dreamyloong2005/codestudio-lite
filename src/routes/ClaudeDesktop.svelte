@@ -18,12 +18,21 @@
     removeClaudeDesktop,
     setClaudeDesktopConfirmUninstall,
     setClaudeDesktopLocalizeLaunch,
+    setClaudeDesktopSelectedKind,
     startClaudeDesktopProgressListener
   } from "../lib/claudeDesktopStore";
   import type { Severity, ToolInstallProgress } from "../types";
 
   $: view = $claudeDesktopView;
   $: status = view.status;
+  $: installKinds = view.installKinds;
+  $: selectedKind = view.selectedKind;
+  $: isWindowsKind = view.snapshot?.platform === "windows";
+  $: exeKindInstalled = Boolean(installKinds?.exe?.installed);
+  // The EXE tab is hidden unless an EXE install is detected; if the user had
+  // it selected and the EXE install later disappears, fall back to MSIX for
+  // display without mutating the persisted selection.
+  $: effectiveSelectedKind = selectedKind === "exe" && !exeKindInstalled ? "msix" : selectedKind;
   $: installPlan = view.installPlan;
   $: updatePlan = view.updatePlan;
   $: busyAction = view.busyAction;
@@ -48,6 +57,10 @@
       : (status?.latestVersion ? $t("codexClient.upToDate") : $t("common.unknown"));
 
   $: localizeClaudeLaunch = view.localizeLaunch;
+  $: exeInstallDetected = installed && status?.installKind === "exe";
+  let exeWarningDismissed = false;
+  $: capabilities = view.capabilities;
+  $: isWindowsAppTab = isWindowsKind && effectiveSelectedKind === "msix";
   let installLogViewport: HTMLDivElement | null = null;
   let launchError: string | null = null;
   let launching = false;
@@ -75,7 +88,7 @@
       return $t("common.update");
     }
     if (stage === "uninstall") {
-      return $t("common.delete");
+      return $t("common.uninstall");
     }
     if (stage === "prerequisite") {
       return $t("toolInstall.stage.prerequisite");
@@ -216,6 +229,24 @@
     </div>
   </section>
 
+  {#if isWindowsKind && installKinds}
+    <div class="install-kind-tabs">
+      <button class:active={effectiveSelectedKind === "msix"} on:click={() => setClaudeDesktopSelectedKind("msix")}>
+        {$t("desktopClient.kind.windowsApp")}
+        
+      </button>
+      {#if exeKindInstalled}
+        <button class:active={effectiveSelectedKind === "exe"} on:click={() => setClaudeDesktopSelectedKind("exe")}>
+          {$t("desktopClient.kind.exe")}
+          </button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if exeInstallDetected && !exeWarningDismissed}
+    <DismissibleNotice tone="error" message={$t("claudeDesktop.exeInstallWarning")} on:dismiss={() => { exeWarningDismissed = true; }} />
+  {/if}
+
   <section class="panel-band">
     <div class="section-heading">
       <div>
@@ -259,10 +290,34 @@
       </button>
       <button class="secondary-button" disabled={!canUninstall} on:click={() => setClaudeDesktopConfirmUninstall(true)}>
         <AppIcon name="delete" size={16} />
-        {$t("common.delete")}
+        {$t("common.uninstall")}
       </button>
     </div>
   </section>
+
+  {#if isWindowsAppTab}
+    <section class="panel-band">
+      <div class="section-heading">
+        <div>
+          <h2>{$t("claudeDesktop.capabilities")}</h2>
+          <p>{$t("claudeDesktop.capabilityHint")}</p>
+        </div>
+      </div>
+      <div class="doctor-list">
+        {#each capabilities as capability}
+          <div class="doctor-row">
+            <StatusPill status={capability.status} label={$t(`status.${capability.status}` as Parameters<typeof $t>[0])} />
+            <div>
+              <h3>{capability.label}</h3>
+              <p>{capability.detail}</p>
+            </div>
+          </div>
+        {:else}
+          <div class="empty-row">{$t("claudeDesktop.capabilityEmpty")}</div>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   {#if busyAction || hasLogs}
     <section class="panel-band">

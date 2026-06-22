@@ -19,6 +19,7 @@ export interface ToolStatus {
   installPath: string | null;
   installCommand: string | null;
   details: string | null;
+  installKind?: string | null;
   running: boolean;
 }
 
@@ -95,6 +96,7 @@ export interface ToolInstallRequest {
 export interface ToolUninstallRequest {
   toolId: string;
   confirm: boolean;
+  installKind?: "msix" | "exe" | null;
 }
 
 export interface ToolInstallProgress {
@@ -270,6 +272,8 @@ export interface DetectionSnapshot {
   system: ToolStatus[];
   problems: Problem[];
   envConflicts: EnvironmentVariableConflict[];
+  claudeInstallKinds?: ClaudeDesktopInstallKinds | null;
+  codexInstallKinds?: CodexClientInstallKinds | null;
 }
 
 export type CodexAuthMethod = "chat_gpt" | "api_key" | "access_token" | "unknown" | "none";
@@ -764,11 +768,13 @@ export interface CodexClientInstallRequest {
   expectedCurrentVersion?: string | null;
   expectedLatestVersion?: string | null;
   expectedRoute?: string | null;
+  installKind?: "msix" | "portable" | null;
 }
 
 export interface CodexClientUninstallRequest {
   confirm: boolean;
   purgeUserData: boolean;
+  installKind?: "msix" | "portable" | null;
 }
 
 export interface CodexClientOperationResult {
@@ -778,4 +784,20 @@ export interface CodexClientOperationResult {
   installed: InstalledCodexClient | null;
   stage: CodexClientStageReport | null;
   notes: string[];
+}
+
+export interface DesktopInstallKindInfo {
+  installed: boolean;
+  version: string | null;
+  path: string | null;
+}
+
+export interface ClaudeDesktopInstallKinds {
+  msix: DesktopInstallKindInfo;
+  exe: DesktopInstallKindInfo;
+}
+
+export interface CodexClientInstallKinds {
+  msix: DesktopInstallKindInfo;
+  portable: DesktopInstallKindInfo;
 }

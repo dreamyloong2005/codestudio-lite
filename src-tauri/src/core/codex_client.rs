@@ -4,7 +4,10 @@ use crate::core::codex_provider_sync;
 use crate::core::platform::{hidden_command, package, run_powershell};
 use crate::core::process_control;
 use crate::core::storage;
-use crate::core::types::{ConfigState, InstallState, Severity, ToolCategory, ToolStatus};
+use crate::core::types::{
+    CodexClientInstallKinds, ConfigState, DesktopInstallKindInfo, InstallState, Severity,
+    ToolCategory, ToolStatus,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -191,6 +194,10 @@ pub struct CodexClientUninstallRequest {
     pub confirm: bool,
     #[serde(default)]
     pub purge_user_data: bool,
+    /// Which install kind to uninstall ("msix" or "portable"). When None,
+    /// the backend falls back to the detected install kind.
+    #[serde(default)]
+    pub install_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +210,11 @@ pub struct CodexClientInstallRequest {
     pub expected_latest_version: Option<String>,
     #[serde(default)]
     pub expected_route: Option<String>,
+    /// Which install kind to use ("msix" or "portable"). Overrides the
+    /// persisted windows_install_mode setting so the page tab selection drives
+    /// the install route. When None, the persisted setting is used as before.
+    #[serde(default)]
+    pub install_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,8 +484,15 @@ where
         Some(1),
         Some(7),
     );
-    let settings = load_settings()?;
+    let mut settings = load_settings()?;
     validate_install_target(&settings)?;
+    // Let the page-tab selection drive the install route instead of the
+    // persisted windows_install_mode setting.
+    if let Some(kind) = request.install_kind.as_deref() {
+        if kind == "portable" || kind == "msix" {
+            settings.windows_install_mode = kind.to_string();
+        }
+    }
     let release = load_release(&settings)?;
     let installed_before = detect_installed(&settings);
     let plan = build_plan(&settings, installed_before.as_ref(), &release)?;
@@ -731,7 +750,15 @@ pub fn uninstall(
     }
 
     let settings = load_settings()?;
-    let installed = detect_installed(&settings);
+    // When the caller specifies an install kind (from the page tab), detect
+    // only that kind so uninstalling targets the version the user is viewing.
+    let installed = match request.install_kind.as_deref() {
+        Some("portable") => expand_env_path(&settings.install_root)
+            .ok()
+            .and_then(|root| detect_portable_install(&root)),
+        Some("msix") => package::detect_msix_package(PACKAGE_IDENTITY).map(installed_from_msix),
+        _ => detect_installed(&settings),
+    };
     let Some(installed_before) = installed else {
         return Ok(CodexClientOperationResult {
             success: true,
@@ -937,6 +964,7 @@ pub fn tool_status() -> ToolStatus {
             .as_ref()
             .map(|item| format!("{} / {}", item.source, item.path))
             .or_else(|| Some("Official Codex desktop client was not detected".to_string())),
+        install_kind: None,
         running: process_control::is_process_running("Codex"),
     }
 }
@@ -1269,6 +1297,36 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
         macos_arm64_version,
         macos_x64_version,
     })
+}
+
+/// Detect both install kinds (MSIX and portable) of the Codex desktop client
+/// simultaneously so the UI can show a per-kind tab. Each kind is resolved
+/// independently; a user may have both installed at once.
+pub fn codex_client_install_kinds() -> CodexClientInstallKinds {
+    if !cfg!(target_os = "windows") {
+        return CodexClientInstallKinds {
+            msix: DesktopInstallKindInfo { installed: false, version: None, path: None },
+            portable: DesktopInstallKindInfo { installed: false, version: None, path: None },
+        };
+    }
+    let settings = load_settings().unwrap_or_default();
+    let msix = package::detect_msix_package(PACKAGE_IDENTITY)
+        .map(|pkg| DesktopInstallKindInfo {
+            installed: true,
+            version: Some(pkg.version),
+            path: Some(pkg.path),
+        })
+        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+    let portable = expand_env_path(&settings.install_root)
+        .ok()
+        .and_then(|root| detect_portable_install(&root))
+        .map(|inst| DesktopInstallKindInfo {
+            installed: true,
+            version: Some(inst.version),
+            path: Some(inst.path),
+        })
+        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+    CodexClientInstallKinds { msix, portable }
 }
 
 fn detect_installed(settings: &CodexClientSettings) -> Option<InstalledCodexClient> {

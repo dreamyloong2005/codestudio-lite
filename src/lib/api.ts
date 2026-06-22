@@ -7,8 +7,11 @@ import type {
   ApplyProfileResult,
   BackupManifest,
   ClaudeDesktopLaunchRequest,
+  ClaudeDesktopInstallKinds,
   ClearEnvironmentVariablesRequest,
   ClearEnvironmentVariablesResult,
+  CodexClientInstallKinds,
+  CodexClientCapability,
   CodexClientInstallRequest,
   CodexClientOperationResult,
   CodexClientProgress,
@@ -120,6 +123,38 @@ export async function detectEnvironmentFresh(): Promise<DetectionSnapshot> {
   const snapshot = mockDetection();
   writeMockDetectionCache(snapshot);
   return snapshot;
+}
+/// Per-kind install detection for the Claude Desktop page tabs (MSIX vs
+/// native .exe). Resolves both kinds independently so a user with both
+/// installed can manage each via its own tab.
+export async function detectClaudeInstallKinds(): Promise<ClaudeDesktopInstallKinds> {
+  if (isTauri()) {
+    return invoke("detect_claude_install_kinds");
+  }
+  return {
+    msix: { installed: false, version: null, path: null },
+    exe: { installed: false, version: null, path: null }
+  };
+}
+/// Local MSIX-runtime capability check for the Claude Desktop page, mirroring
+/// the Codex client capability panel.
+export async function detectClaudeCapabilities(): Promise<CodexClientCapability[]> {
+  if (isTauri()) {
+    return invoke("detect_claude_capabilities");
+  }
+  return [];
+}
+
+/// Per-kind install detection for the Codex desktop client page tabs (MSIX
+/// vs portable). Resolves both kinds independently.
+export async function detectCodexInstallKinds(): Promise<CodexClientInstallKinds> {
+  if (isTauri()) {
+    return invoke("detect_codex_install_kinds");
+  }
+  return {
+    msix: { installed: false, version: null, path: null },
+    portable: { installed: false, version: null, path: null }
+  };
 }
 
 export async function planToolInstall(toolId: string): Promise<ToolInstallPlan> {
@@ -2361,6 +2396,8 @@ function mockDetection(): DetectionSnapshot {
     tools: mockVisibleTools(tools),
     system,
     envConflicts: mockClaudeEnvConflicts,
+    claudeInstallKinds: { msix: { installed: true, version: "1.0.0", path: "C:/Program Files/WindowsApps/Claude" }, exe: { installed: false, version: null, path: null } },
+    codexInstallKinds: { msix: { installed: true, version: "0.0.0", path: "C:/Program Files/WindowsApps/Codex" }, portable: { installed: false, version: null, path: null } },
     problems: [
       {
         id: "missing-pnpm",

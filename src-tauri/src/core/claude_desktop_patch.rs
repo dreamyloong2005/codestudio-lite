@@ -274,6 +274,7 @@ fn claude_launch_args(_localize: bool) -> Vec<String> {
 }
 
 /// How the installed Claude Desktop is packaged on Windows.
+#[derive(PartialEq)]
 enum ClaudeInstallKind {
     /// MSIX/AppX package under WindowsApps, activated by app identity.
     Msix,
@@ -607,6 +608,9 @@ fn build_inspector_shim_with_payloads(
     }} catch (e) {{ return false; }}
   }}
   var localizedLaunchDefaultZh = consumeLocalizedLaunchMarker();
+  var currentLocale = localizedLaunchDefaultZh ? "zh-CN" : "en-US";
+  function activeLocaleLaunchFlag() {{ return currentLocale === "zh-CN"; }}
+  function runtimeLaunchZhFlag() {{ return activeLocaleLaunchFlag() ? "!0" : "!1"; }}
   function forceInitialLocale() {{
     try {{
       var electronFL = require('electron');
@@ -616,9 +620,9 @@ fn build_inspector_shim_with_payloads(
       if (typeof app.commandLine === "object" && app.commandLine && typeof app.commandLine.appendSwitch === "function") {{
         try {{ app.commandLine.appendSwitch("lang", "zh-CN"); }} catch (e) {{}}
       }}
-      if (typeof app.getLocale === "function") app.getLocale = function () {{ return "zh-CN"; }};
-      if (typeof app.getSystemLocale === "function") app.getSystemLocale = function () {{ return "zh-CN"; }};
-      if (typeof app.getPreferredSystemLanguages === "function") app.getPreferredSystemLanguages = function () {{ return zhList.slice(); }};
+      if (typeof app.getLocale === "function") app.getLocale = function () {{ return currentLocale || "en-US"; }};
+      if (typeof app.getSystemLocale === "function") app.getSystemLocale = function () {{ return currentLocale || "en-US"; }};
+      if (typeof app.getPreferredSystemLanguages === "function") app.getPreferredSystemLanguages = function () {{ return activeLocaleLaunchFlag() ? zhList.slice() : ["en-US"]; }};
     }} catch (e) {{}}
   }}
   forceInitialLocale();
@@ -696,7 +700,7 @@ fn build_inspector_shim_with_payloads(
   try {{
     await contents.debugger.sendCommand("Page.enable", {{}});
     await contents.debugger.sendCommand("Fetch.enable", {{ patterns: PATTERNS }});
-    await contents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {{ source: "var __CSL_LL=" + (localizedLaunchDefaultZh ? "!0" : "!1") + ";if(__CSL_LL&&!sessionStorage.getItem('__CSL_LL_DONE'))try{{localStorage.removeItem('spa:locale');sessionStorage.setItem('__CSL_LL_DONE','1')}}catch(e){{}};" + RUNTIME }});
+    await contents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {{ source: "var __CSL_LL=" + runtimeLaunchZhFlag() + ";if(__CSL_LL&&!sessionStorage.getItem('__CSL_LL_DONE'))try{{localStorage.removeItem('spa:locale');sessionStorage.setItem('__CSL_LL_DONE','1')}}catch(e){{}};" + RUNTIME }});
     // The reload is essential: it forces the page to re-request its locale
     // JSON through the Fetch interceptor (which fulfills it with zh-CN) and
     // re-runs the runtime script registered above. Without it the page stays
@@ -714,7 +718,7 @@ fn build_inspector_shim_with_payloads(
       else if (parts[1] === "complete" && parts[2] === "1") skipReload = true;
     }} catch (e) {{}}
     if (!skipReload) {{ try {{ contents.reload(); }} catch (_) {{}} }}
-    else {{ try {{ await contents.executeJavaScript("var __CSL_LL=" + (localizedLaunchDefaultZh ? "!0" : "!1") + ";" + RUNTIME, true); }} catch (e) {{}} }}
+    else {{ try {{ await contents.executeJavaScript("var __CSL_LL=" + runtimeLaunchZhFlag() + ";" + RUNTIME, true); }} catch (e) {{}} }}
   }} catch (e) {{
     process.stderr.write('[csl] localize attach failed: ' + (e && e.message) + '\n');
   }}
@@ -737,7 +741,6 @@ fn build_inspector_shim_with_payloads(
   // the rebuild calls the menu hook) and by polling the renderer's
   // spa:locale as a safety net. Menu/tray/title translation runs only for
   // zh-CN; every other locale is left as Claude built it.
-  var currentLocale = localizedLaunchDefaultZh ? "zh-CN" : "en-US";
   function zhActive() {{ return currentLocale === "zh-CN"; }}
   var localeChangeListeners = [];
   function fireLocaleChange(loc) {{ for (var i = 0; i < localeChangeListeners.length; i++) {{ try {{ localeChangeListeners[i](loc); }} catch (e) {{}} }} }}
@@ -1109,6 +1112,9 @@ fn asar_shim_needs_update(asar_bytes: &[u8]) -> bool {
         || !text.contains("localized-launch.flag")
         || !text.contains("getSystemLocale")
         || !text.contains("ion-dist/i18n/en-US.json")
+        || !text.contains("gatewayProviderSubstringFallback")
+        || !text.contains("codeUiLabelFallback")
+        || !text.contains("activeLocaleLaunchFlag")
         || !text.contains("__CSL_LL")
         || !text.contains("__CSL_LL_DONE")
         || !text.contains("Set.prototype")
@@ -1255,6 +1261,36 @@ try {{
 /// place, this is a no-op. Writing the protected WindowsApps files requires
 /// elevation, so the actual write happens through an elevated PowerShell
 /// script; the patched bytes are prepared in a temp dir first.
+/// Try to copy the patched files directly without elevation. Returns
+/// true on success, false on any error (caller falls back to elevated script).
+fn try_direct_patch_write(
+    paths: &ClaudePatchPaths,
+    temp_exe: &Path,
+    temp_asar: &Path,
+    temp_shell_locale: &Path,
+    temp_ion_locale: &Path,
+) -> bool {
+    // Ensure the ion locale directory exists.
+    if let Some(parent) = paths.ion_locale.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Some(parent) = paths.shell_locale.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let copies = [
+        (temp_exe, &paths.exe),
+        (temp_asar, &paths.asar),
+        (temp_shell_locale, &paths.shell_locale),
+        (temp_ion_locale, &paths.ion_locale),
+    ];
+    for (src, dst) in &copies {
+        if let Err(_) = fs::copy(src, dst) {
+            return false;
+        }
+    }
+    true
+}
+
 fn apply_localization_patch() -> Result<(), String> {
     if !cfg!(target_os = "windows") {
         return Err(
@@ -1331,21 +1367,32 @@ fn apply_localization_patch() -> Result<(), String> {
     fs::write(&temp_ion_locale, CLAUDE_ION_ZH_LOCALE)
         .map_err(|err| format!("Failed to write zh-CN ion locale: {err}"))?;
 
-    let script_path = patch_dir.join("apply-claude-patch.ps1");
-    write_if_changed(
-        &script_path,
-        &elevated_patch_script(
-            &paths.exe,
-            &paths.asar,
-            &temp_exe,
-            &temp_asar,
-            &paths.shell_locale,
-            &temp_shell_locale,
-            &paths.ion_locale,
-            &temp_ion_locale,
-        ),
-    )?;
-    run_elevated_powershell_script(&script_path)?;
+    // Try a direct copy first — no UAC prompt needed. For EXE (non-MSIX)
+    // installs the files live in a user-writable directory (e.g.
+    // %LOCALAPPDATA%\Programs\Claude) so this usually succeeds. For MSIX
+    // installs the files are under the TrustedInstaller-owned WindowsApps
+    // directory, so the direct write fails and we fall back to the elevated
+    // PowerShell script. This unifies both install kinds behind a single
+    // "try direct, then elevate" path.
+    let direct_write_ok =
+        try_direct_patch_write(&paths, &temp_exe, &temp_asar, &temp_shell_locale, &temp_ion_locale);
+    if !direct_write_ok {
+        let script_path = patch_dir.join("apply-claude-patch.ps1");
+        write_if_changed(
+            &script_path,
+            &elevated_patch_script(
+                &paths.exe,
+                &paths.asar,
+                &temp_exe,
+                &temp_asar,
+                &paths.shell_locale,
+                &temp_shell_locale,
+                &paths.ion_locale,
+                &temp_ion_locale,
+            ),
+        )?;
+        run_elevated_powershell_script(&script_path)?;
+    }
 
     // Re-read the patched files from disk and verify the patch actually
     // landed: the elevated copy is synchronous now, but MSIX-managed
@@ -2290,6 +2337,7 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "Presentation \u00b7 PPTX": "\u6f14\u793a\u6587\u7a3f \u00b7 PPTX",
     "Document \u00b7 DOCX": "\u6587\u6863 \u00b7 DOCX",
     "Cowork": "\u534f\u4f5c",
+    "Code": "\u4ee3\u7801",
     "Currently unavailable": "\u5f53\u524d\u4e0d\u53ef\u7528",
     "For more complex tasks": "\u66f4\u590d\u6742\u4efb\u52a1",
     "For complex tasks": "\u590d\u6742\u4efb\u52a1",
@@ -2301,6 +2349,16 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   const FULL_ZH = {
     "Create new skills, modify and improve existing skills": "\u521b\u5efa\u65b0\u6280\u80fd\uff0c\u4fee\u6539\u5e76\u6539\u8fdb\u73b0\u6709\u6280\u80fd\uff0c\u5e76\u8861\u91cf\u6280\u80fd\u8868\u73b0\u3002\u5f53\u7528\u6237\u60f3\u8981\u4ece\u96f6\u5f00\u59cb\u521b\u5efa\u6280\u80fd\u3001\u7f16\u8f91\u6216\u4f18\u5316\u73b0\u6709\u6280\u80fd\u3001\u8fd0\u884c\u8bc4\u4f30\u6765\u6d4b\u8bd5\u6280\u80fd\u3001\u901a\u8fc7\u65b9\u5dee\u5206\u6790\u5bf9\u6280\u80fd\u8868\u73b0\u8fdb\u884c\u57fa\u51c6\u6d4b\u8bd5\uff0c\u6216\u4f18\u5316\u6280\u80fd\u63cf\u8ff0\u4ee5\u63d0\u5347\u89e6\u53d1\u51c6\u786e\u6027\u65f6\u4f7f\u7528\u3002",
   };
+  // Substring replacements: translate a fragment anywhere in the text
+  // node so model-card sentences keep the model name (e.g. "Claude Fable 5
+  // is currently unavailable." -> model name + 当前不可用。).
+  const gatewayProviderSubstringFallback = true;
+  const codeUiLabelFallback = true;
+  const SUBSTR_ZH = {
+    "GATEWAY": "\u7f51\u5173",
+    "Gateway": "\u7f51\u5173",
+    "is currently unavailable.": "\u5f53\u524d\u4e0d\u53ef\u7528\u3002",
+  };
   const translateTextNode = (node) => {
     if (!node || node.nodeType !== 3 || !zhOn()) return;
     // Skip text inside thinking blocks and code/pre elements: these contain
@@ -2308,7 +2366,7 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     // thinking output may be corrupted and fail to render after completion.
     if (node.parentElement) {
       var el = node.parentElement;
-      if (el.closest && el.closest('[data-thinking], [class*="thinking"], [class*="thought"], pre, code, [class*="code"], [contenteditable]')) return;
+      if (el.closest && el.closest('[data-thinking], [class*="thinking"], [class*="thought"], pre, code, [contenteditable]')) return;
     }
     const v = node.nodeValue;
     if (!v) return;
@@ -2319,6 +2377,14 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     if (zh) { node.nodeValue = v.slice(0, lead) + zh + v.slice(lead + trimmed.length); return; }
     for (var fk in FULL_ZH) if (fk.length > 15 && trimmed.indexOf(fk) === 0) { node.nodeValue = v.slice(0, lead) + FULL_ZH[fk]; return; }
     for (var k in TEXT_ZH) if (k.length > 15 && trimmed.indexOf(k) === 0) { node.nodeValue = v.slice(0, lead) + TEXT_ZH[k] + v.slice(lead + k.length); return; }
+    // Substring replacement: translate a fragment anywhere in the text,
+    // preserving the surrounding (e.g. model-name) prefix/suffix.
+    var nv = v;
+    for (var sk in SUBSTR_ZH) {
+      var pos = nv.indexOf(sk);
+      if (pos >= 0) nv = nv.slice(0, pos) + SUBSTR_ZH[sk] + nv.slice(pos + sk.length);
+    }
+    if (nv !== v) node.nodeValue = nv;
   };
   const walkText = (root) => {
     if (!root) return;
@@ -2603,6 +2669,16 @@ mod tests {
     }
 
     #[test]
+    fn localized_shim_uses_active_locale_for_new_local_windows() {
+        let shim = build_inspector_shim(".vite/build/index.pre.js");
+
+        assert!(shim.contains("function runtimeLaunchZhFlag"));
+        assert!(shim.contains("app.getLocale = function () { return currentLocale || \"en-US\"; };"));
+        assert!(!shim.contains("app.getLocale = function () { return \"zh-CN\"; };"));
+        assert!(!shim.contains("var __CSL_LL=\" + (localizedLaunchDefaultZh ? \"!0\" : \"!1\")"));
+    }
+
+    #[test]
     fn node_inspector_scans_runtime_attach_port_range() {
         assert_eq!(CLAUDE_NODE_INSPECT_PORT, 9229);
         assert!(CLAUDE_NODE_INSPECT_PORT_SCAN_END >= 9300);
@@ -2817,14 +2893,23 @@ mod tests {
         assert!(TRANSLATION_RUNTIME.contains("Currently unavailable"));
         assert!(TRANSLATION_RUNTIME.contains("For more complex tasks"));
         assert!(TRANSLATION_RUNTIME.contains("For complex tasks"));
+        assert!(TRANSLATION_RUNTIME.contains("\"Gateway\""));
+        assert!(TRANSLATION_RUNTIME.contains("\"GATEWAY\""));
         assert!(!TRANSLATION_RUNTIME.contains("Can think for more complex tasks"));
         assert!(TRANSLATION_RUNTIME.contains("\\u590d\\u6742\\u4efb\\u52a1"));
     }
 
     #[test]
+    fn locale_runtime_translates_code_ui_label_without_skipping_code_named_containers() {
+        assert!(TRANSLATION_RUNTIME.contains("\"Code\": \"\\u4ee3\\u7801\""));
+        assert!(!TRANSLATION_RUNTIME.contains("[class*=\"code\"]"));
+        assert!(TRANSLATION_RUNTIME.contains("codeUiLabelFallback"));
+    }
+
+    #[test]
     fn locale_runtime_source_stays_small() {
         let source = build_locale_runtime_source();
-        assert!(source.len() < 10_000);
+        assert!(source.len() < 11_000);
         assert!(!source.contains("__CLAUDE_ZH_ION_LOCALE__"));
         assert!(!source.contains(CLAUDE_ION_ZH_LOCALE));
     }
@@ -3219,11 +3304,9 @@ mod tests {
         .unwrap();
         assert!(asar_shim_needs_update(&nolocalsync));
 
-        // The window-locale sync shim still let local/setup windows bootstrap in
-        // English when opened while zh-CN was already active. It lacks the
-        // localized-launch marker, initial Electron locale override, and local
-        // en-US catalog fallback.
-        let preinitiallocale = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
+        // The local en-US catalog fallback shim still predates the small DOM
+        // fallback for hard-coded Gateway/GATEWAY labels in setup/account menus.
+        let preinitiallocale = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;__CSL_LL;__CSL_LL_DONE;Set.prototype;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
         let np14 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
         let noinitiallocale = asar_archive::build_patched_asar(
             &asar0,
@@ -3233,5 +3316,18 @@ mod tests {
         )
         .unwrap();
         assert!(asar_shim_needs_update(&noinitiallocale));
+
+        // The latest local-window locale shim still predates the DOM fallback
+        // for hard-coded Gateway/GATEWAY labels in setup/account menus.
+        let pregateway = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;__CSL_LL;__CSL_LL_DONE;Set.prototype;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
+        let np15 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
+        let nogateway = asar_archive::build_patched_asar(
+            &asar0,
+            np15.as_bytes(),
+            CLAUDE_INSPECTOR_SHIM_NAME,
+            pregateway.as_slice(),
+        )
+        .unwrap();
+        assert!(asar_shim_needs_update(&nogateway));
     }
 }

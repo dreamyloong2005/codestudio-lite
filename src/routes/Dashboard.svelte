@@ -51,6 +51,7 @@
   export let onToolStatusUpdated: (tool: ToolStatus) => void = () => {};
   export let onConfigureTool: (tool: ToolStatus) => void = () => {};
   export let onOpenTerminal: () => void = () => {};
+  export let onNavigateToClient: (toolId: string) => void = () => {};
 
   let installPlan: ToolInstallPlan | null = null;
   let installResult: ToolInstallResult | null = null;
@@ -463,6 +464,12 @@
     void disposeLaunchTerminal(true);
   });
 
+  function desktopClientRouteForTool(toolId: string): string | null {
+    if (toolId === "codex-app") return "codexClient";
+    if (toolId === "claude-desktop") return "claudeDesktop";
+    return null;
+  }
+
   $: connectedClients = [
     ...(snapshot?.tools.filter((tool) => {
       if (tool.category !== "ai_tool") {
@@ -693,18 +700,16 @@
   async function launchDesktopClient(tool: ToolStatus) {
     launchingToolId = tool.id;
     toolActionError = null;
-    try {
-      if (tool.id === "codex-app") {
-        await launchManagedCodexClient();
-      } else {
-        await launchClaudeDesktopFromDashboard();
-      }
+    const launchPromise = tool.id === "codex-app"
+      ? launchManagedCodexClient()
+      : launchClaudeDesktopFromDashboard();
+    launchPromise.then(() => {
       void Promise.resolve(onRefresh({ quiet: true, scheduleFollowup: false })).catch(() => {});
-    } catch (err) {
+    }).catch((err) => {
       toolActionError = err instanceof Error ? err.message : String(err);
-    } finally {
+    }).finally(() => {
       launchingToolId = null;
-    }
+    });
   }
 
   async function openToolLaunch(tool: ToolStatus) {
@@ -887,7 +892,13 @@
     </div>
     <div class="system-grid client-grid">
       {#each connectedClients as tool}
-        <article class="system-card client-card">
+        <article
+          class="system-card client-card"
+          class:clickable-card={desktopClientRouteForTool(tool.id)}
+          role={desktopClientRouteForTool(tool.id) ? "button" : undefined}
+          on:click={(event) => { if (event.target !== event.currentTarget) return; const r = desktopClientRouteForTool(tool.id); if (r) onNavigateToClient(tool.id); }}
+          on:keydown={(event) => { if (event.key === "Enter" || event.key === " ") { const r = desktopClientRouteForTool(tool.id); if (r) { event.preventDefault(); onNavigateToClient(tool.id); } } }}
+        >
           <div class="system-main">
             <ToolIcon toolId={tool.id} label={tool.name} category={tool.category} />
             <div class="system-copy">

@@ -515,7 +515,20 @@ pub fn uninstall_tool_with_progress(
         command: &command,
         progress,
     };
-    let output = run_uninstall_action_for_tool(&tool_id, &definition.action, Some(&context))?;
+    // Prefer the install kind the caller selected (per the page tab) over the
+    // detected one, so uninstalling targets the version the user is viewing.
+    let install_kind = request
+        .install_kind
+        .as_deref()
+        .or_else(|| before.as_ref().and_then(|s| s.install_kind.as_deref()));
+    let output = if tool_id == "claude-desktop"
+        && cfg!(target_os = "windows")
+        && install_kind == Some("exe")
+    {
+        run_claude_desktop_exe_uninstall(Some(&context))?
+    } else {
+        run_uninstall_action_for_tool(&tool_id, &definition.action, Some(&context))?
+    };
     if output.success {
         refresh_process_environment_after_install(&mut notes);
     }
@@ -1306,6 +1319,85 @@ if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {
 }
 "#;
 
+const CLAUDE_DESKTOP_WINDOWS_EXE_UNINSTALL_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+$roots = @(
+  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$entry = $null
+foreach ($root in $roots) {
+  $props = Get-ItemProperty $root -ErrorAction SilentlyContinue
+  foreach ($prop in $props) {
+    if ($prop.DisplayName -and $prop.DisplayName -like '*Claude*') {
+      $entry = $prop
+      break
+    }
+  }
+  if ($entry) { break }
+}
+if ($entry -and $entry.UninstallString) {
+  $uninstallString = [string]$entry.UninstallString
+  Write-Output "Found uninstaller: $uninstallString"
+  # UninstallString may be a bare path or a quoted path with args.
+  # e.g. "C:\path\Update.exe" --uninstall
+  $exe = $null
+  $extraArgs = ''
+  $trimmed = $uninstallString.Trim()
+  if ($trimmed.StartsWith('"')) {
+    $closeIdx = $trimmed.IndexOf('"', 1)
+    if ($closeIdx -gt 0) {
+      $exe = $trimmed.Substring(1, $closeIdx - 1)
+      $extraArgs = $trimmed.Substring($closeIdx + 1).Trim()
+    }
+  } else {
+    $parts = $trimmed -split ' ', 2
+    $exe = $parts[0]
+    if ($parts.Length -gt 1) { $extraArgs = $parts[1].Trim() }
+  }
+  if ($exe -and (Test-Path -LiteralPath $exe)) {
+    Write-Output "Running silent uninstall: $exe $extraArgs"
+    $allArgs = @('/S')
+    if ($extraArgs) { $allArgs += ($extraArgs -split ' ') }
+    $process = Start-Process -FilePath $exe -ArgumentList $allArgs -Wait -PassThru
+    if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {
+      Write-Output "Uninstaller exited with code $($process.ExitCode)"
+    }
+  } else {
+    Write-Output "Uninstaller not found at $exe, attempting direct removal"
+  }
+} else {
+  Write-Output "No registry uninstall entry found, attempting direct removal"
+}
+$claudeDir = Join-Path $env:LOCALAPPDATA 'AnthropicClaude'
+if (Test-Path -LiteralPath $claudeDir) {
+  Write-Output "Removing $claudeDir"
+  Remove-Item -LiteralPath $claudeDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Claude.lnk'
+if (Test-Path -LiteralPath $startMenu) {
+  Remove-Item -LiteralPath $startMenu -Force -ErrorAction SilentlyContinue
+}
+Write-Output "Done"
+"#;
+
+fn run_claude_desktop_exe_uninstall(
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    run_action_command(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            CLAUDE_DESKTOP_WINDOWS_EXE_UNINSTALL_SCRIPT,
+        ],
+        progress,
+    )
+}
+
 fn current_status(tool_id: &str) -> Result<ToolStatus, String> {
     let snapshot = detector::detect_environment()?;
     snapshot
@@ -1698,7 +1790,10 @@ fn update_supported_for_tool(tool_id: &str, action: &InstallAction) -> bool {
     tool_id == "npm" || update_supported(action)
 }
 
-fn uninstall_supported_for_tool(_tool_id: &str, action: &InstallAction) -> bool {
+fn uninstall_supported_for_tool(tool_id: &str, action: &InstallAction) -> bool {
+    if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        return true;
+    }
     matches!(
         action,
         InstallAction::NpmGlobal(_)
@@ -1956,6 +2051,7 @@ mod tests {
             install_path: None,
             install_command: Some("npm install -g @anthropic-ai/claude-code".to_string()),
             details: Some("Ready".to_string()),
+            install_kind: None,
             running: false,
         };
 

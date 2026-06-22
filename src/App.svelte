@@ -97,6 +97,14 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     route = "terminal";
   }
 
+  function navigateToClient(toolId: string) {
+    if (toolId === "codex-app") {
+      selectRoute("codexClient");
+    } else if (toolId === "claude-desktop") {
+      selectRoute("claudeDesktop");
+    }
+  }
+
   function clearBackgroundDetection() {
     for (const timer of backgroundDetectionTimers) {
       window.clearTimeout(timer);
@@ -356,6 +364,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
             onToolStatusUpdated={mergeToolStatus}
             onConfigureTool={configureTool}
             onOpenTerminal={openTerminal}
+            onNavigateToClient={navigateToClient}
           />
         {:else if route === "codexClient"}
           <CodexClient />

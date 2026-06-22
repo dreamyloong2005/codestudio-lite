@@ -31,17 +31,22 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const glossary = new Map(
   Object.entries({
     "Actual Size": "实际大小", "Add": "添加", "Advanced": "高级", "All": "全部",
-    "Allow": "允许", "Appearance": "外观", "Apply": "应用", "Avatar": "头像", "Back": "返回",
+    "Allow": "允许", "Appearance": "外观", "Apply": "应用", "Artifact": "工件",
+    "Artifacts": "工件", "artifact": "工件", "artifacts": "工件",
+    "Avatar": "头像", "Back": "返回",
     "Browse": "浏览", "Cancel": "取消", "Chat": "聊天", "Clear avatar": "清除头像", "Claude": "Claude",
     "Close": "关闭", "Code": "代码", "Connect": "连接", "Continue": "继续",
-    "Copy": "复制", "Create": "创建", "Delete": "删除", "Disable": "禁用",
+    "Copy": "复制", "Create": "创建", "Credential": "凭据", "Credentials": "凭据",
+    "credential": "凭据", "credentials": "凭据", "Delete": "删除", "Disable": "禁用",
     "Done": "完成", "Download": "下载", "Edit": "编辑", "Enable": "启用",
     "Error": "错误", "Export": "导出", "File": "文件", "Forget": "忘记",
-    "General": "通用", "Help": "帮助", "History": "历史记录", "Image": "图像",
+    "General": "通用", "Gateway": "网关", "GATEWAY": "网关",
+    "Help": "帮助", "History": "历史记录", "Image": "图像",
     "Import": "导入", "Install": "安装", "Learn more": "了解更多",
     "Loading": "加载中", "Model": "模型", "New": "新建", "New chat": "新聊天",
     "New Conversation": "新对话", "Next": "下一步", "No": "否", "OK": "确定",
-    "Open": "打开", "Paste": "粘贴", "Privacy": "隐私", "Project": "项目",
+    "Open": "打开", "Paste": "粘贴", "Privacy": "隐私", "Product": "产品",
+    "Products": "产品", "product": "产品", "products": "产品", "Project": "项目",
     "Projects": "项目", "Retry": "重试", "Save": "保存", "Search": "搜索",
     "Send": "发送", "Settings": "设置", "Sign in": "登录", "Sign out": "退出登录",
     "Skip": "跳过", "Stop": "停止", "Submit": "提交", "Team": "团队",
@@ -84,8 +89,59 @@ function placeholdersPreserved(source, translated) {
   const actual = placeholderMatches(translated).sort();
   return expected.length === actual.length && expected.every((item, index) => item === actual[index]);
 }
-function normalizeTranslation(value) {
-  return value
+function replaceOutsideUrls(value, replacer) {
+  const urlPattern = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+  let output = "";
+  let lastIndex = 0;
+  for (const match of value.matchAll(urlPattern)) {
+    output += replacer(value.slice(lastIndex, match.index));
+    output += match[0];
+    lastIndex = match.index + match[0].length;
+  }
+  output += replacer(value.slice(lastIndex));
+  return output;
+}
+function normalizeArtifactTerminology(source, value) {
+  let normalized = value;
+  if (/\bGATEWAY\b|\bGateway\b/.test(source)) {
+    normalized = normalized.replace(/\bGATEWAY\b/g, "网关").replace(/\bGateway\b/g, "网关");
+  }
+  if (/\bCredentials?\b|\bcredentials?\b/.test(source)) {
+    normalized = normalized
+      .replace(/资历/g, "凭据")
+      .replace(/资质/g, "凭据")
+      .replace(/资格证书/g, "凭据")
+      .replace(/资格证/g, "凭据")
+      .replace(/\bCredentials\b/g, "凭据")
+      .replace(/\bCredential\b/g, "凭据")
+      .replace(/\bcredentials\b/g, "凭据")
+      .replace(/\bcredential\b/g, "凭据");
+  }
+  if (/\bArtifacts?\b|\bartifacts?\b/.test(source)) {
+    return replaceOutsideUrls(normalized, (part) =>
+      part
+        .replace(/活体(?:制品|神器|工件)/g, "活工件")
+        .replace(/活制品/g, "活工件")
+        .replace(/活件/g, "活工件")
+        .replace(/(?<!复)制品/g, "工件")
+        .replace(/产物/g, "工件")
+        .replace(/神器/g, "工件")
+        .replace(/伪影/g, "工件")
+        .replace(/\bArtifacts\b/g, "工件")
+        .replace(/\bArtifact\b/g, "工件")
+        .replace(/\bartifacts\b/g, "工件")
+        .replace(/\bartifact\b/g, "工件")
+        .replace(/工件 已/g, "工件已")
+        .replace(/《工件》/g, "工件"),
+    );
+  }
+  if (/\bProducts?\b|\bproducts?\b/.test(source)) {
+    return normalized.replace(/产物/g, "产品");
+  }
+  return normalized;
+}
+function normalizeTranslation(value, source = "") {
+  return normalizeArtifactTerminology(source, value)
     .replace(/克劳德/g, "Claude").replace(/克洛德/g, "Claude")
     .replace(/人类/g, "Anthropic").replace(/谷歌/g, "Google").replace(/松弛/g, "Slack")
     .replace(/\s+([，。！？：；、）】》])/g, "$1").replace(/([（【《])\s+/g, "$1")
@@ -188,7 +244,7 @@ async function main() {
       catch (error) { console.error(`[translate] failed: ${error.message}`); break; }
       if (lines.length !== batch.length) { console.error(`[translate] mismatch`); break; }
       for (let i = 0; i < batch.length; i++) {
-        const restored = normalizeTranslation(restore(lines[i], batch[i].placeholders));
+        const restored = normalizeTranslation(restore(lines[i], batch[i].placeholders), batch[i].value);
         if (restored && restored !== batch[i].value && placeholdersPreserved(batch[i].value, restored)) {
           zhObj[keys[i]] = restored;
         } else {

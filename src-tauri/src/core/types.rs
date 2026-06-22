@@ -21,6 +21,11 @@ pub struct ToolStatus {
     pub install_path: Option<String>,
     pub install_command: Option<String>,
     pub details: Option<String>,
+    /// How the desktop app is packaged: "msix" (Windows App / AppX under
+    /// WindowsApps) or "exe" (native NSIS/Squirrel install). None when not
+    /// installed or not a desktop app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_kind: Option<String>,
     #[serde(default)]
     pub running: bool,
 }
@@ -117,6 +122,10 @@ pub struct ToolInstallRequest {
 pub struct ToolUninstallRequest {
     pub tool_id: String,
     pub confirm: bool,
+    /// Which install kind to uninstall ("msix" or "exe" for Claude Desktop).
+    /// When None, the backend falls back to the detected install kind.
+    #[serde(default)]
+    pub install_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +372,14 @@ pub struct DetectionSnapshot {
     pub problems: Vec<Problem>,
     #[serde(default)]
     pub env_conflicts: Vec<EnvironmentVariableConflict>,
+    /// Per-kind install detection for the Claude Desktop page tabs. Cached
+    /// alongside the snapshot so the tabs render instantly from the on-disk
+    /// detection cache before a fresh scan completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_install_kinds: Option<ClaudeDesktopInstallKinds>,
+    /// Per-kind install detection for the Codex desktop client page tabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_install_kinds: Option<CodexClientInstallKinds>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -933,4 +950,26 @@ pub struct GatewayControlResult {
 pub struct UpdateGatewaySettingsRequest {
     #[serde(default)]
     pub privacy_filter_mode: Option<PrivacyFilterMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopInstallKindInfo {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeDesktopInstallKinds {
+    pub msix: DesktopInstallKindInfo,
+    pub exe: DesktopInstallKindInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexClientInstallKinds {
+    pub msix: DesktopInstallKindInfo,
+    pub portable: DesktopInstallKindInfo,
 }

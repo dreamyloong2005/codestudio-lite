@@ -995,6 +995,35 @@ nav button.active svg {
   background: color-mix(in srgb, var(--accent) 10%, var(--surface-strong));
   color: var(--accent);
 }
+.install-kind-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.install-kind-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.install-kind-tabs button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.install-kind-tabs button.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-strong));
+  color: var(--accent);
+}
 
 .gateway-request-panel {
   display: grid;
@@ -1221,6 +1250,10 @@ code,
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.clickable-card {
+  cursor: pointer;
 }
 
 .system-card-state {
@@ -2946,6 +2979,7 @@ input[type="checkbox"] {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
+
 
 .settings-row {
   grid-template-columns: minmax(0, 1fr) auto;

@@ -24,6 +24,10 @@ const glossary = new Map(
     "All": "全部",
     "Allow": "允许",
     "Appearance": "外观",
+    "Artifact": "工件",
+    "Artifacts": "工件",
+    "artifact": "工件",
+    "artifacts": "工件",
     "Avatar": "头像",
     "Apply": "应用",
     "Back": "返回",
@@ -39,6 +43,10 @@ const glossary = new Map(
     "Copy": "复制",
     "Cowork": "Cowork",
     "Create": "创建",
+    "Credential": "凭据",
+    "Credentials": "凭据",
+    "credential": "凭据",
+    "credentials": "凭据",
     "Delete": "删除",
     "Disable": "禁用",
     "Done": "完成",
@@ -51,6 +59,8 @@ const glossary = new Map(
     "File": "文件",
     "Forget": "忘记",
     "General": "通用",
+    "Gateway": "网关",
+    "GATEWAY": "网关",
     "Haiku": "Haiku",
     "Help": "帮助",
     "History": "历史记录",
@@ -70,6 +80,10 @@ const glossary = new Map(
     "Opus": "Opus",
     "Paste": "粘贴",
     "Privacy": "隐私",
+    "Product": "产品",
+    "Products": "产品",
+    "product": "产品",
+    "products": "产品",
     "Project": "项目",
     "Projects": "项目",
     "Retry": "重试",
@@ -138,8 +152,61 @@ function placeholdersPreserved(source, translated) {
   return expected.length === actual.length && expected.every((item, index) => item === actual[index]);
 }
 
-function normalizeTranslation(value) {
-  return value
+function replaceOutsideUrls(value, replacer) {
+  const urlPattern = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+  let output = "";
+  let lastIndex = 0;
+  for (const match of value.matchAll(urlPattern)) {
+    output += replacer(value.slice(lastIndex, match.index));
+    output += match[0];
+    lastIndex = match.index + match[0].length;
+  }
+  output += replacer(value.slice(lastIndex));
+  return output;
+}
+
+function normalizeArtifactTerminology(source, value) {
+  let normalized = value;
+  if (/\bGATEWAY\b|\bGateway\b/.test(source)) {
+    normalized = normalized.replace(/\bGATEWAY\b/g, "网关").replace(/\bGateway\b/g, "网关");
+  }
+  if (/\bCredentials?\b|\bcredentials?\b/.test(source)) {
+    normalized = normalized
+      .replace(/资历/g, "凭据")
+      .replace(/资质/g, "凭据")
+      .replace(/资格证书/g, "凭据")
+      .replace(/资格证/g, "凭据")
+      .replace(/\bCredentials\b/g, "凭据")
+      .replace(/\bCredential\b/g, "凭据")
+      .replace(/\bcredentials\b/g, "凭据")
+      .replace(/\bcredential\b/g, "凭据");
+  }
+  if (/\bArtifacts?\b|\bartifacts?\b/.test(source)) {
+    return replaceOutsideUrls(normalized, (part) =>
+      part
+        .replace(/活体(?:制品|神器|工件)/g, "活工件")
+        .replace(/活制品/g, "活工件")
+        .replace(/活件/g, "活工件")
+        .replace(/(?<!复)制品/g, "工件")
+        .replace(/产物/g, "工件")
+        .replace(/神器/g, "工件")
+        .replace(/伪影/g, "工件")
+        .replace(/\bArtifacts\b/g, "工件")
+        .replace(/\bArtifact\b/g, "工件")
+        .replace(/\bartifacts\b/g, "工件")
+        .replace(/\bartifact\b/g, "工件")
+        .replace(/工件 已/g, "工件已")
+        .replace(/《工件》/g, "工件"),
+    );
+  }
+  if (/\bProducts?\b|\bproducts?\b/.test(source)) {
+    return normalized.replace(/产物/g, "产品");
+  }
+  return normalized;
+}
+
+function normalizeTranslation(value, source = "") {
+  return normalizeArtifactTerminology(source, value)
     .replace(/克劳德/g, "Claude")
     .replace(/克洛德/g, "Claude")
     .replace(/人类/g, "Anthropic")
@@ -306,7 +373,7 @@ async function main() {
 
     for (let index = 0; index < batch.length; index += 1) {
       const entry = batch[index];
-      const restored = normalizeTranslation(restore(lines[index], entry.placeholders));
+      const restored = normalizeTranslation(restore(lines[index], entry.placeholders), entry.value);
       if (!restored || restored === entry.value || !placeholdersPreserved(entry.value, restored)) {
         cache[entry.value] = entry.value;
         skipped += 1;
@@ -336,7 +403,7 @@ async function main() {
     let changed = 0;
     for (const [key, value] of Object.entries(object)) {
       if (typeof value === "string" && cache[value]) {
-        object[key] = cache[value];
+        object[key] = normalizeTranslation(cache[value], value);
         changed += 1;
       }
     }

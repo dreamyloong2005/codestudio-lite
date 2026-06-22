@@ -8,8 +8,8 @@ use crate::core::profile;
 use crate::core::storage;
 use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
-    ConfigState, DetectionSnapshot, DetectionSource, InstallState, Problem, Severity, ToolCategory,
-    ToolStatus,
+    ClaudeDesktopInstallKinds, ConfigState, DetectionSnapshot, DetectionSource,
+    DesktopInstallKindInfo, InstallState, Problem, Severity, ToolCategory, ToolStatus,
 };
 use chrono::Utc;
 use serde::Deserialize;
@@ -120,6 +120,16 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
 
     let _ = activity_log::append(Severity::Ok, "Completed local environment detection.");
 
+    // Per-kind install detection for the desktop-client page tabs. Filled
+    // here so it is cached alongside the snapshot and the tabs render
+    // instantly from the on-disk cache before a fresh scan completes.
+    let claude_install_kinds = Some(claude_desktop_install_kinds());
+    let codex_install_kinds = if supports_codex_desktop_client() {
+        Some(codex_client::codex_client_install_kinds())
+    } else {
+        None
+    };
+
     let snapshot = DetectionSnapshot {
         generated_at: Utc::now().to_rfc3339(),
         source: DetectionSource::Live,
@@ -133,6 +143,8 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
         system,
         problems,
         env_conflicts,
+        claude_install_kinds,
+        codex_install_kinds,
     };
     let _ = storage::store_detection_cache(&snapshot);
     Ok(snapshot)
@@ -381,6 +393,7 @@ fn detect_tool(definition: &ToolDefinition) -> ToolStatus {
         install_path: None,
         install_command: definition.install_command.map(ToString::to_string),
         details,
+        install_kind: None,
         running: false,
     }
 }
@@ -402,6 +415,13 @@ fn detect_claude_desktop_tool(definition: &ToolDefinition) -> ToolStatus {
         Some(_) => ConfigState::Unconfigured,
         None => ConfigState::Unknown,
     };
+    let install_kind = detected.as_ref().map(|app| {
+        if app.source.starts_with("appx") || app.source == "app-bundle" {
+            "msix".to_string()
+        } else {
+            "exe".to_string()
+        }
+    });
     let details = detected
         .as_ref()
         .map(|app| format!("Resolved: {} ({})", app.path, app.source))
@@ -429,6 +449,7 @@ fn detect_claude_desktop_tool(definition: &ToolDefinition) -> ToolStatus {
             .map(|app| display_path(std::path::Path::new(&app.path))),
         install_command: definition.install_command.map(ToString::to_string),
         details,
+        install_kind,
         running: process_control::is_process_running("Claude"),
     }
 }
@@ -480,6 +501,35 @@ pub fn claude_desktop_windows_native_install_path() -> Option<PathBuf> {
     scan_localappdata_for_claude_exe(&PathBuf::from(local_app_data))
         .map(|detection| PathBuf::from(detection.path))
 }
+/// Detect both install kinds (MSIX and native .exe) of Claude Desktop
+/// simultaneously so the UI can show a per-kind tab. Each kind is resolved
+/// independently; a user may have both installed at once.
+pub fn claude_desktop_install_kinds() -> ClaudeDesktopInstallKinds {
+    if !cfg!(target_os = "windows") {
+        return ClaudeDesktopInstallKinds {
+            msix: DesktopInstallKindInfo { installed: false, version: None, path: None },
+            exe: DesktopInstallKindInfo { installed: false, version: None, path: None },
+        };
+    }
+    let msix = detect_claude_desktop_windows_registered_msix()
+        .or_else(detect_claude_desktop_windows_stale_msix)
+        .or_else(detect_claude_desktop_windows_cached_stale_msix)
+        .or_else(detect_claude_desktop_windows_known_stale_msix)
+        .map(|app| DesktopInstallKindInfo {
+            installed: true,
+            version: Some(app.version.clone()),
+            path: Some(app.path.clone()),
+        })
+        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+    let exe = detect_claude_desktop_windows_native_exe()
+        .map(|app| DesktopInstallKindInfo {
+            installed: true,
+            version: Some(app.version.clone()),
+            path: Some(app.path.clone()),
+        })
+        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+    ClaudeDesktopInstallKinds { msix, exe }
+}
 
 /// Search a LOCALAPPDATA-style root for a Claude Desktop native (.exe) install.
 /// Last-resort fallback when MSIX detection and the explicit candidate paths
@@ -512,6 +562,36 @@ fn scan_localappdata_for_claude_exe(root: &Path) -> Option<DesktopAppDetection> 
 /// the fallback cheap and prevents descending into large unrelated subtrees.
 /// Prefers the electron-builder `app-<version>/Claude.exe` layout so a real
 /// version label can be recovered; otherwise returns the first `Claude.exe`.
+/// Check whether a Claude.exe has its companion `resources/app.asar`, i.e.
+/// the install is functional rather than a leftover exe from a partial
+/// uninstall. When the in-place localization patch modifies Claude.exe, the
+/// NSIS uninstaller may be unable to delete it (hash mismatch) but still
+/// removes every other file — leaving an orphaned exe that detection must not
+/// mistake for a working install.
+fn claude_exe_has_companion_asar(exe: &Path) -> bool {
+    exe.parent()
+        .map(|dir| dir.join("resources").join("app.asar").is_file())
+        .unwrap_or(false)
+}
+
+/// Best-effort removal of an orphaned Claude.exe left behind by a partial
+/// uninstall. Deletes the exe, and if it sat in an `app-<version>/` directory
+/// that is now empty (or contains only leftover non-essential files), removes
+/// that directory too so a fresh install is not confused by stale artifacts.
+/// All errors are silently ignored: the caller already decided the install is
+/// non-functional, so cleanup failure just means the orphan persists until the
+/// user or OS removes it manually.
+fn try_remove_orphaned_claude_exe(exe: &Path) {
+    let _ = fs::remove_file(exe);
+    if let Some(parent) = exe.parent() {
+        if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with("app-") {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+    }
+}
+
 fn search_subtree_for_claude_exe(dir: &Path, depth: usize) -> Option<DesktopAppDetection> {
     const MAX_DEPTH: usize = 2;
     // Prefer the electron-builder `app-<version>/Claude.exe` (the real
@@ -531,11 +611,14 @@ fn search_subtree_for_claude_exe(dir: &Path, depth: usize) -> Option<DesktopAppD
                     if child_name.starts_with("app-") {
                         let candidate = child.join("Claude.exe");
                         if candidate.is_file() {
-                            return Some(DesktopAppDetection {
-                                path: candidate.to_string_lossy().to_string(),
-                                version: child_name.trim_start_matches("app-").to_string(),
-                                source: "app-path",
-                            });
+                            if claude_exe_has_companion_asar(&candidate) {
+                                return Some(DesktopAppDetection {
+                                    path: candidate.to_string_lossy().to_string(),
+                                    version: child_name.trim_start_matches("app-").to_string(),
+                                    source: "app-path",
+                                });
+                            }
+                            try_remove_orphaned_claude_exe(&candidate);
                         }
                     }
                 }
@@ -549,11 +632,14 @@ fn search_subtree_for_claude_exe(dir: &Path, depth: usize) -> Option<DesktopAppD
     // layout, or the only exe present). No version label is recoverable here.
     let exe = dir.join("Claude.exe");
     if exe.is_file() {
-        return Some(DesktopAppDetection {
-            path: exe.to_string_lossy().to_string(),
-            version: "installed".to_string(),
-            source: "app-path",
-        });
+        if claude_exe_has_companion_asar(&exe) {
+            return Some(DesktopAppDetection {
+                path: exe.to_string_lossy().to_string(),
+                version: "installed".to_string(),
+                source: "app-path",
+            });
+        }
+        try_remove_orphaned_claude_exe(&exe);
     }
     None
 }
@@ -666,22 +752,28 @@ fn detect_claude_desktop_windows_native_exe() -> Option<DesktopAppDetection> {
         if let Some(app_version_dir) = newest_squirrel_app_version_dir(root) {
             let image = app_version_dir.join("Claude.exe");
             if image.is_file() {
-                return Some(DesktopAppDetection {
-                    path: image.to_string_lossy().to_string(),
-                    version: app_version_dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.trim_start_matches("app-").to_string())
-                        .unwrap_or_else(|| "installed".to_string()),
-                    source: "app-path",
-                });
+                if claude_exe_has_companion_asar(&image) {
+                    return Some(DesktopAppDetection {
+                        path: image.to_string_lossy().to_string(),
+                        version: app_version_dir
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.trim_start_matches("app-").to_string())
+                            .unwrap_or_else(|| "installed".to_string()),
+                        source: "app-path",
+                    });
+                }
+                try_remove_orphaned_claude_exe(&image);
             }
         }
-        return Some(DesktopAppDetection {
-            path: candidate.to_string_lossy().to_string(),
-            version: "installed".to_string(),
-            source: "app-path",
-        });
+        if claude_exe_has_companion_asar(&candidate) {
+            return Some(DesktopAppDetection {
+                path: candidate.to_string_lossy().to_string(),
+                version: "installed".to_string(),
+                source: "app-path",
+            });
+        }
+        try_remove_orphaned_claude_exe(&candidate);
     }
     None
 }
@@ -1839,6 +1931,8 @@ mod tests {
         let install = root.join("Claude");
         fs::create_dir_all(&install).unwrap();
         fs::write(install.join("Claude.exe"), b"stub").unwrap();
+        fs::create_dir_all(install.join("resources")).unwrap();
+        fs::write(install.join("resources").join("app.asar"), b"asar").unwrap();
         let hit = scan_localappdata_for_claude_exe(&root).expect("should detect direct exe");
         assert_eq!(
             hit.path,
@@ -1884,6 +1978,8 @@ mod tests {
         let app_dir = install.join("app-1.14271.0");
         fs::create_dir_all(&app_dir).unwrap();
         fs::write(app_dir.join("Claude.exe"), b"real").unwrap();
+        fs::create_dir_all(app_dir.join("resources")).unwrap();
+        fs::write(app_dir.join("resources").join("app.asar"), b"asar").unwrap();
         let hit = scan_localappdata_for_claude_exe(&root).expect("should detect squirrel install");
         assert_eq!(hit.version, "1.14271.0");
         assert!(hit
@@ -1900,6 +1996,8 @@ mod tests {
         let install = root.join("AnthropicClaude").join("app-1.14271.0");
         fs::create_dir_all(&install).unwrap();
         fs::write(install.join("Claude.exe"), b"stub").unwrap();
+        fs::create_dir_all(install.join("resources")).unwrap();
+        fs::write(install.join("resources").join("app.asar"), b"asar").unwrap();
         let hit = scan_localappdata_for_claude_exe(&root).expect("should detect app- layout");
         assert_eq!(hit.version, "1.14271.0");
         assert!(hit.path.ends_with("Claude.exe"));
@@ -1913,12 +2011,30 @@ mod tests {
         let install = root.join("Programs").join("Anthropic").join("Claude");
         fs::create_dir_all(&install).unwrap();
         fs::write(install.join("Claude.exe"), b"stub").unwrap();
+        fs::create_dir_all(install.join("resources")).unwrap();
+        fs::write(install.join("resources").join("app.asar"), b"asar").unwrap();
         let hit =
             scan_localappdata_for_claude_exe(&root).expect("should detect nested programs install");
         assert_eq!(
             hit.path,
             install.join("Claude.exe").to_string_lossy().to_string()
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_desktop_windows_localappdata_scan_skips_orphaned_exe_without_asar() {
+        // Simulates a partial uninstall where the NSIS uninstaller removed
+        // everything except the patched Claude.exe (hash mismatch). Detection
+        // must not report this as a working install.
+        let root = std::env::temp_dir().join(format!("cs-lite-scan-orphan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let install = root.join("AnthropicClaude").join("app-1.14271.0");
+        fs::create_dir_all(&install).unwrap();
+        fs::write(install.join("Claude.exe"), b"patched").unwrap();
+        // No resources/app.asar — this is an orphaned exe
+        let hit = scan_localappdata_for_claude_exe(&root);
+        assert!(hit.is_none(), "orphaned exe without asar should not be detected");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1963,6 +2079,7 @@ mod tests {
             install_path: None,
             install_command: None,
             details: None,
+            install_kind: None,
             running: false,
         };
 
@@ -1990,6 +2107,7 @@ mod tests {
             install_path: None,
             install_command: None,
             details: None,
+            install_kind: None,
             running: false,
         }];
         apply_claude_desktop_latest_to_tools(&mut tools, "1.14271.0");
@@ -2015,6 +2133,7 @@ mod tests {
             install_path: None,
             install_command: None,
             details: None,
+            install_kind: None,
             running: false,
         }];
         apply_claude_desktop_latest_to_tools(&mut tools, "1.14271.0");
@@ -2040,6 +2159,7 @@ mod tests {
             install_path: None,
             install_command: None,
             details: None,
+            install_kind: None,
             running: false,
         }];
         apply_claude_desktop_latest_to_tools(&mut tools, "1.14271.0");
@@ -2066,6 +2186,7 @@ mod tests {
             install_path: None,
             install_command: None,
             details: None,
+            install_kind: None,
             running: false,
         }];
         apply_codex_client_latest_to_tools(&mut tools, "0.10.0");
@@ -2091,6 +2212,7 @@ mod tests {
             install_path: None,
             install_command: None,
             details: None,
+            install_kind: None,
             running: false,
         }];
         apply_codex_client_latest_to_tools(&mut tools, "0.10.0");
@@ -2116,6 +2238,7 @@ mod tests {
             install_path: None,
             install_command: None,
             details: None,
+            install_kind: None,
             running: false,
         }];
         apply_codex_client_latest_to_tools(&mut tools, "0.10.0");

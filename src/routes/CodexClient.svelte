@@ -11,6 +11,7 @@
     refreshCodexClient,
     removeCodexClient,
     setCodexClientConfirmUninstall,
+    setCodexClientSelectedKind,
     stageCodexClientPackage,
     startCodexClientProgressListener,
     updateCodexClientDraft,
@@ -39,6 +40,10 @@
   $: plan = state?.plan ?? null;
   $: release = state?.release ?? null;
   $: isWindows = state?.platform === "windows";
+  $: installKinds = view.installKinds;
+  $: selectedKind = view.selectedKind;
+  $: portableKindInstalled = Boolean(installKinds?.portable?.installed);
+  $: effectiveSelectedKind = selectedKind === "portable" && !portableKindInstalled ? "msix" : selectedKind;
   $: isMacos = state?.platform === "macos";
   $: statusLabel = installed ? $t("common.installed") : $t("common.missing");
   $: statusTone = (installed ? "ok" : "warning") as Severity;
@@ -162,6 +167,18 @@
     </div>
   </section>
 
+  {#if isWindows && installKinds}
+    <div class="install-kind-tabs">
+      <button class:active={effectiveSelectedKind === "msix"} on:click={() => setCodexClientSelectedKind("msix")}>
+        {$t("desktopClient.kind.windowsApp")}
+        
+      </button>
+      <button class:active={effectiveSelectedKind === "portable"} on:click={() => setCodexClientSelectedKind("portable")}>
+        {$t("desktopClient.kind.exe")}
+      </button>
+    </div>
+  {/if}
+
   {#if error}
     <DismissibleNotice tone="error" message={error} on:dismiss={dismissError} />
   {/if}
@@ -241,7 +258,7 @@
       </button>
       <button class="secondary-button" disabled={!canUninstall || busyAction !== null} on:click={() => setCodexClientConfirmUninstall(true)}>
         <AppIcon name="delete" size={16} />
-        {$t("common.delete")}
+        {$t("common.uninstall")}
       </button>
     </div>
     {#if showProgress && progress}
@@ -357,18 +374,6 @@
             >
               <option value="mirror">{$t("codexClient.source.mirror")}</option>
               <option value="official">{$t("codexClient.source.official")}</option>
-            </select>
-          </label>
-        {/if}
-        {#if isWindows}
-          <label>
-            {$t("codexClient.installMode")}
-            <select
-              value={settingsDraft.windowsInstallMode}
-              on:change={(event) => updateCodexClientDraft({ windowsInstallMode: event.currentTarget.value as "msix" | "portable" })}
-            >
-              <option value="msix">{$t("codexClient.mode.msix")}</option>
-              <option value="portable">{$t("codexClient.mode.portable")}</option>
             </select>
           </label>
         {/if}

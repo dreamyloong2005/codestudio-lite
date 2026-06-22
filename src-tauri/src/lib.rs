@@ -3,6 +3,23 @@ pub mod core;
 
 pub fn run() {
     tauri::Builder::default()
+        // Single-instance guard: must be registered before any other plugin.
+        // If a second instance is launched, the callback fires in the first
+        // (already-running) instance — we show and focus the main window so
+        // the user is brought back to the existing app instead of spawning a
+        // duplicate.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = window.set_skip_taskbar(false);
+                }
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::activity_log::load_activity_log,
@@ -20,6 +37,9 @@ pub fn run() {
             commands::codex_client::update_codex_client_settings,
             commands::detect::detect_environment,
             commands::detect::detect_environment_fresh,
+            commands::detect::detect_claude_install_kinds,
+            commands::detect::detect_claude_capabilities,
+            commands::detect::detect_codex_install_kinds,
             commands::detect::load_cached_detection,
             commands::doctor::run_doctor,
             commands::gateway::load_gateway_status,
