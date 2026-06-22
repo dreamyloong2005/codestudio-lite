@@ -24,6 +24,21 @@ test("Codex client exposes a single patch-backed launch entrypoint", () => {
   assert.doesNotMatch(core, /pub fn launch_patched/);
 });
 
+test("Codex plugin force unlock includes modern marketplace request patches", () => {
+  const core = read("src-tauri/src/core/codex_client.rs");
+
+  assert.match(core, /Page\.addScriptToEvaluateOnNewDocument/);
+  assert.match(core, /allowUnsafeEvalBlockedByCSP/);
+  assert.match(core, /function patchPluginMarketplaceRequestParams/);
+  assert.match(core, /method === "list-plugins"/);
+  assert.match(core, /delete next\.marketplaceKinds/);
+  assert.match(core, /function restorePluginMarketplaceName/);
+  assert.match(core, /method === "install-plugin"/);
+  assert.match(core, /app-server-manager-signals-/);
+  assert.match(core, /Array\.prototype\.filter/);
+  assert.match(core, /plugin_marketplace_hidden_filter_bypassed/);
+});
+
 test("Codex client notices are localized and dismiss with an icon", () => {
   const route = read("src/routes/CodexClient.svelte");
   const store = read("src/lib/codexClientStore.ts");

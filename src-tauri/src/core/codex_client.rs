@@ -2566,38 +2566,70 @@ fn pick_cdp_target(debug_port: u16) -> Result<CdpTarget, String> {
 }
 
 fn evaluate_cdp_script(websocket_url: &str, script: &str) -> Result<(), String> {
-    let request = serde_json::to_string(&json!({
-        "id": 1,
-        "method": "Runtime.evaluate",
-        "params": {
-            "expression": script,
-            "awaitPromise": true,
-            "returnByValue": true
-        }
-    }))
-    .map_err(|err| format!("Failed to encode CDP request: {err}"))?;
     let (mut socket, _) = tungstenite::connect(websocket_url)
         .map_err(|err| format!("Failed to connect Codex CDP WebSocket: {err}"))?;
+
+    send_cdp_request(
+        &mut socket,
+        1,
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": script }),
+    )?;
+    wait_for_cdp_response(&mut socket, 1, "Codex new-document patch registration")?;
+
+    send_cdp_request(
+        &mut socket,
+        2,
+        "Runtime.evaluate",
+        json!({
+            "expression": script,
+            "awaitPromise": true,
+            "returnByValue": true,
+            "allowUnsafeEvalBlockedByCSP": true
+        }),
+    )?;
+    wait_for_cdp_response(&mut socket, 2, "Codex patch script")
+}
+
+fn send_cdp_request(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<(), String> {
+    let request = serde_json::to_string(&json!({
+        "id": id,
+        "method": method,
+        "params": params
+    }))
+    .map_err(|err| format!("Failed to encode CDP request: {err}"))?;
     socket
         .send(tungstenite::Message::Text(request.into()))
-        .map_err(|err| format!("Failed to send Codex patch script: {err}"))?;
+        .map_err(|err| format!("Failed to send CDP request {method}: {err}"))
+}
+
+fn wait_for_cdp_response(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    expected_id: u64,
+    context: &str,
+) -> Result<(), String> {
     for _ in 0..20 {
         let message = socket
             .read()
-            .map_err(|err| format!("Failed to read Codex patch result: {err}"))?;
+            .map_err(|err| format!("Failed to read {context} result: {err}"))?;
         if let tungstenite::Message::Text(text) = message {
             let value: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|err| format!("Failed to parse Codex patch result: {err}"))?;
-            if value.get("id").and_then(|item| item.as_i64()) != Some(1) {
+                .map_err(|err| format!("Failed to parse {context} result: {err}"))?;
+            if value.get("id").and_then(|item| item.as_u64()) != Some(expected_id) {
                 continue;
             }
             if let Some(error) = value.get("error") {
-                return Err(format!("Codex patch script failed: {error}"));
+                return Err(format!("{context} failed: {error}"));
             }
             return Ok(());
         }
     }
-    Err("Codex patch script result was not received.".to_string())
+    Err(format!("{context} result was not received."))
 }
 
 fn plugin_unlock_script() -> &'static str {
@@ -2609,6 +2641,8 @@ fn plugin_unlock_script() -> &'static str {
   }
   window.__codestudioLitePluginUnlock = "1";
   const styleId = "codestudio-lite-plugin-unlock-style";
+  const pluginMarketplaceUnlockVersion = "1";
+  const modulePromises = new Map();
   const installSelector = 'button:disabled, button[aria-disabled="true"], [role="button"][aria-disabled="true"], button[data-disabled], [role="button"][data-disabled], button.cursor-not-allowed, [role="button"].cursor-not-allowed, button.pointer-events-none, [role="button"].pointer-events-none';
   const pluginNavSelector = 'nav[role="navigation"] button.h-token-nav-row.w-full';
   const pluginSvgSelector = 'svg path[d^="M7.94562 14.0277"]';
@@ -2678,6 +2712,270 @@ fn plugin_unlock_script() -> &'static str {
       button.dataset.codestudioLitePluginEntry = "true";
       button.addEventListener("click", () => spoofChatGPTAuthMethod(button), true);
     }
+  }
+
+  function recordPluginUnlockDiagnostic(event, payload = {}) {
+    window.__codestudioLitePluginUnlockDiagnostics = window.__codestudioLitePluginUnlockDiagnostics || [];
+    window.__codestudioLitePluginUnlockDiagnostics.push({ event, payload, at: Date.now() });
+    if (window.__codestudioLitePluginUnlockDiagnostics.length > 80) {
+      window.__codestudioLitePluginUnlockDiagnostics.splice(0, window.__codestudioLitePluginUnlockDiagnostics.length - 80);
+    }
+  }
+
+  function codexAppAssetUrl(namePart) {
+    const resources = [
+      ...Array.from(document.scripts || []).map((script) => script.src),
+      ...Array.from(document.querySelectorAll("link[href]") || []).map((link) => link.href),
+      ...performance.getEntriesByType("resource").map((entry) => entry.name),
+    ].filter(Boolean);
+    return resources.find((url) => url.includes("/assets/") && url.includes(namePart) && url.split("?")[0].endsWith(".js")) || "";
+  }
+
+  async function loadCodexAppModule(namePart) {
+    if (!modulePromises.has(namePart)) {
+      const promise = Promise.resolve().then(async () => {
+        const url = codexAppAssetUrl(namePart);
+        if (!url) throw new Error(`Codex asset not found: ${namePart}`);
+        return await import(url);
+      }).catch((error) => {
+        modulePromises.delete(namePart);
+        throw error;
+      });
+      modulePromises.set(namePart, promise);
+    }
+    return await modulePromises.get(namePart);
+  }
+
+  function appServerPluginRequestMethod(method, params) {
+    if (method === "send-cli-request-for-host" && params?.method) return String(params.method);
+    return String(method || "");
+  }
+
+  function patchPluginMarketplaceRequestParams(method, params) {
+    if (method === "list-plugins") {
+      if (!params || typeof params !== "object") return params;
+    } else {
+      return params;
+    }
+    const next = { ...params };
+    const hadMarketplaceKinds = Object.prototype.hasOwnProperty.call(next, "marketplaceKinds");
+    if (hadMarketplaceKinds) delete next.marketplaceKinds;
+    recordPluginUnlockDiagnostic("plugin_marketplace_request_expanded", {
+      hadMarketplaceKinds,
+      cwdCount: Array.isArray(next.cwds) ? next.cwds.length : 0,
+    });
+    return next;
+  }
+
+  function pluginMarketplaceAliasForName(name) {
+    if (name === "openai-curated") return "codestudio-lite-openai-curated";
+    if (name === "openai-primary-runtime") return "codestudio-lite-openai-primary-runtime";
+    return "";
+  }
+
+  function displayNameForPluginMarketplaceName(name, fallback) {
+    if (name === "openai-bundled" || name === "codestudio-lite-openai-bundled") return "OpenAI插件1(CodeStudio)";
+    if (name === "openai-curated" || name === "codestudio-lite-openai-curated") return "OpenAI插件2(CodeStudio)";
+    if (name === "openai-primary-runtime" || name === "codestudio-lite-openai-primary-runtime") return "OpenAI插件3(CodeStudio)";
+    return fallback;
+  }
+
+  function patchPluginMarketplaceObject(marketplace) {
+    if (!marketplace || typeof marketplace !== "object" || marketplace.__codestudioLiteMarketplaceUnlockPatched) return false;
+    const alias = pluginMarketplaceAliasForName(marketplace.name);
+    if (alias) marketplace.name = alias;
+    const displayName = displayNameForPluginMarketplaceName(marketplace.name, marketplace.displayName || marketplace.title || marketplace.label || marketplace.name);
+    if (!displayName || displayName === marketplace.name) return false;
+    marketplace.displayName = displayName;
+    marketplace.title = displayName;
+    marketplace.label = displayName;
+    if (marketplace.interface && typeof marketplace.interface === "object") {
+      marketplace.interface = {
+        ...marketplace.interface,
+        displayName,
+        name: displayName,
+        title: displayName,
+        label: displayName,
+      };
+    } else {
+      marketplace.interface = { displayName, name: displayName, title: displayName, label: displayName };
+    }
+    marketplace.__codestudioLiteMarketplaceUnlockPatched = true;
+    return true;
+  }
+
+  function restorePluginMarketplaceName(name) {
+    if (name === "codestudio-lite-openai-bundled" || name === "codex-plus-openai-bundled") return "openai-bundled";
+    if (name === "codestudio-lite-openai-curated" || name === "codex-plus-openai-curated") return "openai-curated";
+    if (name === "codestudio-lite-openai-primary-runtime" || name === "codex-plus-openai-primary-runtime") return "openai-primary-runtime";
+    return name;
+  }
+
+  function codexPluginOfficialMarketplaceName(name) {
+    const restored = restorePluginMarketplaceName(name);
+    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime";
+  }
+
+  function isCodexPluginBuildFlavorFilter(callback, sample) {
+    if (!Array.isArray(sample) || sample.length === 0 || typeof callback !== "function") return false;
+    let source = "";
+    try {
+      source = Function.prototype.toString.call(callback);
+    } catch (_) {
+      return false;
+    }
+    if (!source.includes("!u(e.marketplaceName)||e.marketplaceName===r")) return false;
+    if (!sample.some((plugin) => codexPluginOfficialMarketplaceName(plugin?.marketplaceName))) return false;
+    return sample.some((plugin) => codexPluginOfficialMarketplaceName(plugin?.marketplaceName) && !callback(plugin));
+  }
+
+  function isCodexPluginMarketplaceHiddenFilter(callback, sample) {
+    if (!Array.isArray(sample) || sample.length === 0 || typeof callback !== "function") return false;
+    let source = "";
+    try {
+      source = Function.prototype.toString.call(callback);
+    } catch (_) {
+      return false;
+    }
+    if (!source.includes("!t.includes(e.name)")) return false;
+    if (!sample.some((marketplace) => codexPluginOfficialMarketplaceName(marketplace?.name))) return false;
+    return sample.some((marketplace) => codexPluginOfficialMarketplaceName(marketplace?.name) && !callback(marketplace));
+  }
+
+  function installPluginBuildFlavorFilterPatch() {
+    if (window.__codestudioLitePluginBuildFlavorFilterPatch === pluginMarketplaceUnlockVersion) return;
+    const originalFilter = Array.prototype.__codestudioLitePluginBuildFlavorOriginalFilter || Array.prototype.filter;
+    if (!Array.prototype.__codestudioLitePluginBuildFlavorOriginalFilter) {
+      Object.defineProperty(Array.prototype, "__codestudioLitePluginBuildFlavorOriginalFilter", {
+        value: originalFilter,
+        configurable: true,
+        writable: true,
+      });
+    }
+    if (Array.prototype.filter.__codestudioLitePluginBuildFlavorPatched === pluginMarketplaceUnlockVersion) {
+      window.__codestudioLitePluginBuildFlavorFilterPatch = pluginMarketplaceUnlockVersion;
+      return;
+    }
+    const patchedFilter = function codestudioLitePluginBuildFlavorFilterPatch(callback, thisArg) {
+      if (isCodexPluginBuildFlavorFilter(callback, this)) {
+        recordPluginUnlockDiagnostic("plugin_build_flavor_filter_bypassed", { pluginCount: this.length });
+        return Array.from(this);
+      }
+      if (isCodexPluginMarketplaceHiddenFilter(callback, this)) {
+        recordPluginUnlockDiagnostic("plugin_marketplace_hidden_filter_bypassed", { marketplaceCount: this.length });
+        return Array.from(this);
+      }
+      return originalFilter.call(this, callback, thisArg);
+    };
+    patchedFilter.__codestudioLitePluginBuildFlavorPatched = pluginMarketplaceUnlockVersion;
+    Array.prototype.filter = patchedFilter;
+    window.__codestudioLitePluginBuildFlavorFilterPatch = pluginMarketplaceUnlockVersion;
+    recordPluginUnlockDiagnostic("plugin_build_flavor_filter_patch_installed");
+  }
+
+  function restorePluginMarketplaceRequestParams(params, method = "") {
+    if (!params || typeof params !== "object") return params;
+    let next = params;
+    if (Array.isArray(params.marketplaceKinds)) {
+      const nextKinds = params.marketplaceKinds.map((kind) => {
+        if (kind === "remote:openai-curated") return "openai-curated";
+        return restorePluginMarketplaceName(kind);
+      });
+      next = { ...next, marketplaceKinds: Array.from(new Set(nextKinds)) };
+    }
+    if (method === "install-plugin") {
+      next = next === params ? { ...params } : { ...next };
+      if (next.remoteMarketplaceName) next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName);
+      if (typeof next.marketplacePath === "string" && next.marketplacePath.startsWith("remote:")) {
+        const remoteMarketplaceName = next.marketplacePath.slice("remote:".length);
+        delete next.marketplacePath;
+        next.remoteMarketplaceName = restorePluginMarketplaceName(remoteMarketplaceName);
+      }
+    }
+    return next;
+  }
+
+  function patchPluginMarketplaceResult(method, result) {
+    if (method !== "list-plugins") return result;
+    let patchedCount = 0;
+    try {
+      if (Array.isArray(result?.marketplaces)) {
+        result.marketplaces.forEach((marketplace) => {
+          if (patchPluginMarketplaceObject(marketplace)) patchedCount += 1;
+        });
+      }
+      if (patchedCount > 0) {
+        recordPluginUnlockDiagnostic("plugin_marketplace_response_expanded", { patchedCount });
+      }
+    } catch (error) {
+      recordPluginUnlockDiagnostic("plugin_marketplace_response_patch_failed", {
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+    }
+    return result;
+  }
+
+  function patchPluginMarketplaceRequestClient(client) {
+    if (!client || typeof client.sendRequest !== "function") return false;
+    if (client.__codestudioLitePluginMarketplaceUnlockPatch === pluginMarketplaceUnlockVersion) return true;
+    const originalSendRequest = client.__codestudioLitePluginMarketplaceOriginalSendRequest || client.sendRequest.bind(client);
+    client.__codestudioLitePluginMarketplaceOriginalSendRequest = originalSendRequest;
+    client.sendRequest = async function codestudioLitePluginMarketplacePatchedSendRequest(method, params, options) {
+      const requestMethod = appServerPluginRequestMethod(String(method || ""), params);
+      const requestParams = patchPluginMarketplaceRequestParams(requestMethod, restorePluginMarketplaceRequestParams(params, requestMethod));
+      if (requestMethod === "install-plugin") {
+        recordPluginUnlockDiagnostic("plugin_install_request_debug", {
+          method: String(method || ""),
+          requestMarketplacePath: requestParams?.marketplacePath || null,
+          requestRemoteMarketplaceName: requestParams?.remoteMarketplaceName || null,
+          requestPluginName: requestParams?.pluginName || null,
+        });
+      }
+      const result = await originalSendRequest(method, requestParams, options);
+      return patchPluginMarketplaceResult(requestMethod, result);
+    };
+    client.__codestudioLitePluginMarketplaceUnlockPatch = pluginMarketplaceUnlockVersion;
+    return true;
+  }
+
+  function installPluginMarketplaceRequestPatch() {
+    if (window.__codestudioLitePluginMarketplaceUnlockInstalled === pluginMarketplaceUnlockVersion) return;
+    if (window.__codestudioLitePluginMarketplaceUnlockPending) return;
+    window.__codestudioLitePluginMarketplaceUnlockPending = true;
+    Promise.resolve().then(async () => {
+      const module = await loadCodexAppModule("app-server-manager-signals-");
+      const candidates = Object.values(module).filter((value) => value && typeof value === "object");
+      let patchedCount = 0;
+      for (const candidate of candidates) {
+        if (patchPluginMarketplaceRequestClient(candidate)) patchedCount += 1;
+        if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {
+          try {
+            if (patchPluginMarketplaceRequestClient(candidate.get())) patchedCount += 1;
+          } catch (_) {
+          }
+        }
+      }
+      if (patchedCount > 0) {
+        window.__codestudioLitePluginMarketplaceUnlockInstalled = pluginMarketplaceUnlockVersion;
+        recordPluginUnlockDiagnostic("plugin_marketplace_request_patch_installed", {
+          candidateCount: candidates.length,
+          patchedCount,
+        });
+      } else {
+        recordPluginUnlockDiagnostic("plugin_marketplace_request_patch_not_found", {
+          exportCount: Object.keys(module || {}).length,
+          candidateCount: candidates.length,
+        });
+      }
+    }).catch((error) => {
+      recordPluginUnlockDiagnostic("plugin_marketplace_request_patch_failed", {
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+    }).finally(() => {
+      window.__codestudioLitePluginMarketplaceUnlockPending = false;
+    });
   }
 
   function installButtonLabel(element) {
@@ -2759,6 +3057,8 @@ fn plugin_unlock_script() -> &'static str {
 
   function refresh() {
     ensureStyle();
+    installPluginBuildFlavorFilterPatch();
+    installPluginMarketplaceRequestPatch();
     enablePluginEntry();
     unlockInstallButtons();
   }
