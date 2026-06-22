@@ -6,19 +6,22 @@ use crate::core::credentials;
 use crate::core::detector;
 use crate::core::env_health;
 use crate::core::gateway;
-use crate::core::platform::{hidden_command, resolve_command, run_powershell};
+use crate::core::platform::{
+    hidden_command, hidden_command_with_args, package, resolve_command, run_powershell,
+};
 use crate::core::process_control;
+use crate::core::storage;
 use crate::core::tool_registry;
 use crate::core::types::{
     ActiveProfilesByMode, AppSettings, ApplyProfileRequest, ApplyProfileResult, CodexAuthMethod,
-    CodexAuthStatus, CodexAuthStorage, ConfigState, DuplicateProfileDraftRequest,
-    ExportProfilesResult, ImportProfilesRequest, ImportProfilesResult, InstallState,
-    NativeConfigDiffLine, NativeConfigPreview, PreviewProfileApplyRequest,
-    PreviewProfileApplyResult, PreviewProfileWriteRequest, PreviewProfileWriteResult,
-    ProfileApplyPreviewItem, ProfileConnectionCheck, ProfileDraft, ProfileExportBundle,
+    CodexAuthStatus, CodexAuthStorage, ConfigState, DeleteProfileDraftRequest,
+    DuplicateProfileDraftRequest, InstallState, NativeConfigDiffLine, NativeConfigPreview,
+    PreviewProfileApplyRequest, PreviewProfileApplyResult, PreviewProfileWriteRequest,
+    PreviewProfileWriteResult, ProfileApplyPreviewItem, ProfileConnectionCheck, ProfileDraft,
     ProfileSummary, ProfileWritePreviewItem, ProviderApplyMode, ProviderApplyModePreview,
-    SaveProfileDraftRequest, Severity, SwitchActiveProfileRequest, TestProfileConnectionRequest,
-    TestProfileConnectionResult, UpdateAppSettingsRequest, UpdateProfileDraftRequest,
+    ReorderProfileDraftsRequest, SaveProfileDraftRequest, Severity, StartCodexOAuthLoginResult,
+    SwitchActiveProfileRequest, TestProfileConnectionRequest, TestProfileConnectionResult,
+    UpdateAppSettingsRequest, UpdateProfileDraftRequest,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -27,6 +30,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AppConfig {
@@ -34,7 +38,6 @@ struct AppConfig {
     active_profiles_by_mode: ActiveProfilesByMode,
     ui: UiConfig,
     security: SecurityConfig,
-    paths: PathConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +79,7 @@ struct NativeConfigLifecyclePlan {
 #[derive(Debug, Clone, Copy)]
 enum NativeConfigWriteKind {
     ProfileConfig,
+    CodexAuthJson,
     ClaudeVsCodePluginConfig,
     GeminiCodeAssistSettings,
     ClaudeDesktopDeploymentConfig,
@@ -100,13 +104,6 @@ struct SecurityConfig {
     preserve_codex_official_auth: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct PathConfig {
-    profiles_dir: String,
-    backups_dir: String,
-    logs_dir: String,
-}
-
 struct ProfileWritePlan {
     id: String,
     name: String,
@@ -116,10 +113,18 @@ struct ProfileWritePlan {
     protocol: String,
     model: String,
     base_url: String,
-    timeout_seconds: u16,
-    profile_path: std::path::PathBuf,
     secret_status: &'static str,
     auth_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedNativeProfile {
+    app: String,
+    provider: String,
+    protocol: String,
+    model: String,
+    base_url: String,
+    api_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -160,30 +165,38 @@ const CLAUDE_DESKTOP_DEFAULT_ROUTES: [(&str, bool); 4] = [
     ("claude-fable-5", true),
 ];
 const BUILTIN_OFFICIAL_PROFILES: [(&str, &str, &str); 8] = [
-    ("codex", "Codex 官方", PROTOCOL_OPENAI_RESPONSES),
+    ("codex", "Codex Official", PROTOCOL_OPENAI_RESPONSES),
     (
         "claude-desktop",
-        "Claude Desktop 官方",
+        "Claude Desktop Official",
         PROTOCOL_ANTHROPIC_MESSAGES,
     ),
-    ("claude", "Claude Code 官方", PROTOCOL_ANTHROPIC_MESSAGES),
-    ("gemini", "Gemini CLI 官方", PROTOCOL_GOOGLE_GEMINI),
+    (
+        "claude",
+        "Claude Code Official",
+        PROTOCOL_ANTHROPIC_MESSAGES,
+    ),
+    ("gemini", "Gemini CLI Official", PROTOCOL_GOOGLE_GEMINI),
     (
         "gemini-code-assist",
-        "Gemini Code Assist 官方",
+        "Gemini Code Assist Official",
         PROTOCOL_GOOGLE_GEMINI,
     ),
     (
         "opencode",
-        "OpenCode 官方",
+        "OpenCode Official",
         PROTOCOL_OPENAI_CHAT_COMPLETIONS,
     ),
     (
         "openclaw",
-        "OpenClaw 官方",
+        "OpenClaw Official",
         PROTOCOL_OPENAI_CHAT_COMPLETIONS,
     ),
-    ("hermes", "Hermes 官方", PROTOCOL_OPENAI_CHAT_COMPLETIONS),
+    (
+        "hermes",
+        "Hermes Official",
+        PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+    ),
 ];
 
 fn default_true() -> bool {
@@ -193,32 +206,7 @@ fn default_true() -> bool {
 pub fn ensure_app_dirs() -> Result<(), String> {
     let paths = app_paths().map_err(|err| err.to_string())?;
     ensure_dirs(&paths).map_err(|err| err.to_string())?;
-
-    if !paths.config_file.exists() {
-        let config = AppConfig {
-            active_profiles_by_mode: ActiveProfilesByMode::default(),
-            ui: UiConfig {
-                theme: "system".to_string(),
-                language: "zh-CN".to_string(),
-            },
-            security: SecurityConfig {
-                backup_before_write: true,
-                redact_secrets: true,
-                confirm_install_commands: true,
-                confirm_config_writes: true,
-                preserve_codex_official_auth: true,
-            },
-            paths: PathConfig {
-                profiles_dir: "~/.codestudio-lite/profiles".to_string(),
-                backups_dir: "~/.codestudio-lite/backups".to_string(),
-                logs_dir: "~/.codestudio-lite/logs".to_string(),
-            },
-        };
-        let toml = toml::to_string_pretty(&config).map_err(|err| err.to_string())?;
-        write_atomic(&paths.config_file, toml.as_bytes())?;
-    }
-
-    remove_legacy_default_profile(&paths)?;
+    storage::ensure_initialized()?;
 
     Ok(())
 }
@@ -227,9 +215,9 @@ pub fn load_profile_summary() -> Result<ProfileSummary, String> {
     ensure_app_dirs()?;
     let paths = app_paths().map_err(|err| err.to_string())?;
     let mut config = read_app_config()?;
-    let drafts = load_profiles()?;
+    let mut drafts = load_profiles()?;
     let active_profiles_changed = clean_active_profiles(&mut config, &drafts)
-        | sync_active_profiles_from_native_configs(&mut config, &drafts, &paths);
+        | sync_active_profiles_from_native_configs(&mut config, &mut drafts, &paths)?;
     if active_profiles_changed {
         write_app_config(&config)?;
     }
@@ -242,8 +230,6 @@ pub fn load_profile_summary() -> Result<ProfileSummary, String> {
 
     Ok(ProfileSummary {
         config_dir: display_path(&paths.config_dir),
-        profiles_dir: display_path(&paths.profiles_dir),
-        backups_dir: display_path(&paths.backups_dir),
         active_profile,
         active_profile_name,
         active_profiles_by_mode: config.active_profiles_by_mode,
@@ -265,6 +251,22 @@ pub fn codex_auth_status() -> CodexAuthStatus {
         storage: CodexAuthStorage::Unknown,
         path: None,
         detail: format!("Codex auth status could not be inspected: {err}"),
+    })
+}
+
+pub fn start_codex_oauth_login() -> Result<StartCodexOAuthLoginResult, String> {
+    let codex = resolve_command("codex")
+        .ok_or_else(|| "Codex CLI is not installed or is not on PATH.".to_string())?;
+    let mut command = hidden_command_with_args(&codex, &["login"]);
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("Failed to start Codex official login: {err}"))?;
+    Ok(StartCodexOAuthLoginResult {
+        started: true,
+        command: Some(format!("{codex} login")),
+        message: "Codex official login started. Complete the browser authorization, then return to CodeStudio Lite.".to_string(),
     })
 }
 
@@ -306,47 +308,33 @@ pub fn save_profile_draft(request: SaveProfileDraftRequest) -> Result<ProfileDra
         &request.model,
         &request.base_url,
         request.secret_provided,
-        request.timeout_seconds,
     )?;
     ensure_profile_tool_installed(&plan.app)?;
     let now = Utc::now().to_rfc3339();
+    let sort_order = storage::next_profile_sort_order(&plan.app, &plan.mode)?;
+    let draft = ProfileDraft {
+        id: plan.id,
+        name: plan.name,
+        icon: normalize_profile_icon(request.icon.as_deref())?,
+        remark: normalize_profile_remark(request.remark.as_deref()),
+        app: plan.app,
+        is_builtin: false,
+        mode: plan.mode,
+        provider: plan.provider,
+        protocol: plan.protocol,
+        model: plan.model,
+        base_url: plan.base_url,
+        auth_ref: plan.auth_ref,
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        last_test_status: Some("pending".to_string()),
+        usage_enabled: false,
+        sort_order,
+    };
 
-    let content = format!(
-        r#"id = "{id}"
-name = "{name}"
-app = "{app}"
-provider = "{provider}"
-mode = "{mode}"
-protocol = "{protocol}"
-model = "{model}"
-base_url = "{base_url}"
-timeout_seconds = {timeout_seconds}
-
-[auth]
-api_key = "{auth_ref}"
-
-[metadata]
-created_at = "{now}"
-updated_at = "{now}"
-last_test_status = "pending"
-secret_status = "{secret_status}"
-"#,
-        id = escape_toml_string(&plan.id),
-        name = escape_toml_string(&plan.name),
-        app = escape_toml_string(&plan.app),
-        provider = escape_toml_string(&plan.provider),
-        mode = provider_apply_mode_value(&plan.mode),
-        protocol = escape_toml_string(&plan.protocol),
-        model = escape_toml_string(&plan.model),
-        base_url = escape_toml_string(&plan.base_url),
-        timeout_seconds = plan.timeout_seconds,
-        auth_ref = escape_toml_string(plan.auth_ref.as_deref().unwrap_or("")),
-        now = escape_toml_string(&now),
-        secret_status = plan.secret_status
-    );
-
-    write_atomic(&plan.profile_path, content.as_bytes())?;
-    if let (Some(auth_ref), Some(api_key)) = (plan.auth_ref.as_deref(), request.api_key.as_deref())
+    capture_codex_oauth_profile_if_needed(&draft)?;
+    storage::save_profile(&draft)?;
+    if let (Some(auth_ref), Some(api_key)) = (draft.auth_ref.as_deref(), request.api_key.as_deref())
     {
         let trimmed = api_key.trim();
         if !trimmed.is_empty() {
@@ -357,26 +345,11 @@ secret_status = "{secret_status}"
         Severity::Ok,
         format!(
             "Saved profile draft '{}' for {}/{}.",
-            plan.name, plan.app, plan.provider
+            draft.name, draft.app, draft.provider
         ),
     )?;
 
-    Ok(ProfileDraft {
-        id: plan.id,
-        name: plan.name,
-        app: plan.app,
-        is_builtin: false,
-        mode: plan.mode,
-        provider: plan.provider,
-        protocol: plan.protocol,
-        model: plan.model,
-        base_url: plan.base_url,
-        auth_ref: plan.auth_ref,
-        timeout_seconds: plan.timeout_seconds,
-        created_at: Some(now.clone()),
-        updated_at: Some(now),
-        last_test_status: Some("pending".to_string()),
-    })
+    Ok(draft)
 }
 
 pub fn update_profile_draft(request: UpdateProfileDraftRequest) -> Result<ProfileDraft, String> {
@@ -390,26 +363,15 @@ pub fn update_profile_draft(request: UpdateProfileDraftRequest) -> Result<Profil
     if existing.is_builtin {
         return Err("Built-in official profiles cannot be modified.".to_string());
     }
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let profile_path = paths.profiles_dir.join(format!("{profile_id}.toml"));
-    if !profile_path.exists() {
-        return Err(format!("Profile '{profile_id}' does not exist"));
-    }
-
     let name = normalize_required("Profile Name", &request.name)?;
-    let provider = normalize_token("Provider", &request.provider)?;
-    if provider_is_official(&provider) {
-        return Err(
-            "Official profiles are built in and cannot be saved as custom profiles.".to_string(),
-        );
-    }
+    let provider = normalize_provider_token(&request.provider)?;
     let mode = normalize_profile_mode(&provider, request.mode.as_ref())?;
     let protocol = normalize_protocol(request.protocol.as_deref())?;
     let app = canonical_profile_app(&existing.app);
+    ensure_custom_official_profile_allowed(&app, &provider, mode)?;
     ensure_profile_protocol_supported_for_mode(&app, mode, &provider, &protocol)?;
     let model = request.model.trim().to_string();
     let base_url = validate_base_url_for_provider(&provider, &request.base_url)?;
-    let timeout_seconds = normalize_timeout(request.timeout_seconds)?;
     let now = Utc::now().to_rfc3339();
     let created_at = existing.created_at.clone().unwrap_or_else(|| now.clone());
     let api_key = request
@@ -417,7 +379,9 @@ pub fn update_profile_draft(request: UpdateProfileDraftRequest) -> Result<Profil
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let auth_ref = if api_key.is_some() {
+    let auth_ref = if provider_is_official(&provider) {
+        None
+    } else if api_key.is_some() {
         Some(
             existing
                 .auth_ref
@@ -427,17 +391,14 @@ pub fn update_profile_draft(request: UpdateProfileDraftRequest) -> Result<Profil
     } else {
         existing.auth_ref.clone()
     };
-    let secret_status = if auth_ref.is_some() {
-        "keychain_reference"
-    } else {
-        "missing"
-    };
     if provider_requires_api_key(&provider) && auth_ref.is_none() {
         return Err("Provider API key is required for non-official providers.".to_string());
     }
     let updated = ProfileDraft {
         id: profile_id.clone(),
         name,
+        icon: normalize_profile_icon(request.icon.as_deref())?,
+        remark: normalize_profile_remark(request.remark.as_deref()),
         app,
         is_builtin: false,
         mode,
@@ -446,15 +407,14 @@ pub fn update_profile_draft(request: UpdateProfileDraftRequest) -> Result<Profil
         model,
         base_url,
         auth_ref,
-        timeout_seconds,
         created_at: Some(created_at.clone()),
         updated_at: Some(now.clone()),
         last_test_status: Some("pending".to_string()),
+        usage_enabled: existing.usage_enabled,
+        sort_order: existing.sort_order,
     };
-    let content = profile_toml_content(&updated, &created_at, &now, "pending", secret_status);
 
-    backup::backup_files("update-profile", Some(&profile_id), &[profile_path.clone()])?;
-    write_atomic(&profile_path, content.as_bytes())?;
+    storage::save_profile(&updated)?;
     if let (Some(auth_ref), Some(api_key)) = (updated.auth_ref.as_deref(), api_key) {
         credentials::store_keychain_secret(auth_ref, api_key)?;
     }
@@ -487,13 +447,17 @@ pub fn duplicate_profile_draft(
     }
     ensure_profile_tool_installed(&canonical_profile_app(&source.app))?;
     let new_id = unique_profile_id(&slugify(&source.name))?;
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let profile_path = paths.profiles_dir.join(format!("{new_id}.toml"));
     let now = Utc::now().to_rfc3339();
-    let auth_ref = source
-        .auth_ref
-        .as_ref()
-        .map(|_| format!("keychain:codestudio-lite/{new_id}/api_key"));
+    let app = canonical_profile_app(&source.app);
+    let sort_order = storage::next_profile_sort_order(&app, &source.mode)?;
+    let auth_ref = if provider_is_official(&source.provider) {
+        None
+    } else {
+        source
+            .auth_ref
+            .as_ref()
+            .map(|_| format!("keychain:codestudio-lite/{new_id}/api_key"))
+    };
 
     if let (Some(source_auth_ref), Some(target_auth_ref)) =
         (source.auth_ref.as_deref(), auth_ref.as_deref())
@@ -508,33 +472,25 @@ pub fn duplicate_profile_draft(
 
     let duplicated = ProfileDraft {
         id: new_id,
-        name: source.name,
-        app: canonical_profile_app(&source.app),
+        name: source.name.clone(),
+        icon: source.icon.clone(),
+        remark: source.remark.clone(),
+        app,
         is_builtin: false,
         mode: source.mode,
-        provider: source.provider,
-        protocol: source.protocol,
-        model: source.model,
-        base_url: source.base_url,
+        provider: source.provider.clone(),
+        protocol: source.protocol.clone(),
+        model: source.model.clone(),
+        base_url: source.base_url.clone(),
         auth_ref,
-        timeout_seconds: source.timeout_seconds,
         created_at: Some(now.clone()),
         updated_at: Some(now.clone()),
-        last_test_status: source.last_test_status,
+        last_test_status: source.last_test_status.clone(),
+        usage_enabled: false,
+        sort_order,
     };
-    let secret_status = if duplicated.auth_ref.is_some() {
-        "keychain_reference"
-    } else {
-        "missing"
-    };
-    let last_test_status = duplicated
-        .last_test_status
-        .as_deref()
-        .unwrap_or("pending")
-        .to_string();
-    let content = profile_toml_content(&duplicated, &now, &now, &last_test_status, secret_status);
-
-    write_atomic(&profile_path, content.as_bytes())?;
+    clone_codex_oauth_profile_if_needed(&source, &duplicated)?;
+    storage::save_profile(&duplicated)?;
     activity_log::append(
         Severity::Ok,
         format!(
@@ -546,127 +502,77 @@ pub fn duplicate_profile_draft(
     Ok(duplicated)
 }
 
-pub fn export_profiles() -> Result<ExportProfilesResult, String> {
+pub fn delete_profile_draft(request: DeleteProfileDraftRequest) -> Result<ProfileSummary, String> {
     ensure_app_dirs()?;
 
+    let profile_id = normalize_token("Profile ID", &request.profile_id)?;
+    if is_builtin_profile_id(&profile_id) {
+        return Err("Built-in official profiles cannot be deleted.".to_string());
+    }
+    let source = load_profile_by_id(&profile_id)?;
+    if source.is_builtin {
+        return Err("Built-in official profiles cannot be deleted.".to_string());
+    }
+
+    if !storage::delete_profile(&profile_id)? {
+        return Err(format!("Profile '{profile_id}' does not exist"));
+    }
+    delete_codex_oauth_profile_cache_if_needed(&source)?;
+
     let mut config = read_app_config()?;
-    let profiles = load_profiles()?;
-    if clean_active_profiles(&mut config, &profiles) {
+    let mut changed =
+        replace_deleted_active_profile_with_official(&mut config, &source.app, &profile_id);
+    let drafts = load_profiles()?;
+    changed |= clean_active_profiles(&mut config, &drafts);
+    if changed {
         write_app_config(&config)?;
     }
 
-    let exported_at = Utc::now();
-    let export_profiles = profiles
-        .into_iter()
-        .filter(|profile| !profile.is_builtin)
-        .map(|mut profile| {
-            profile.auth_ref = None;
-            profile
-        })
-        .collect();
-    let bundle = ProfileExportBundle {
-        schema_version: 2,
-        app: "CodeStudio Lite".to_string(),
-        exported_at: exported_at.to_rfc3339(),
-        active_profiles_by_mode: config.active_profiles_by_mode,
-        profiles: export_profiles,
-        warnings: vec![
-            "Provider API keys are not exported. Imported profiles need their API key saved again before direct config file mode can use them."
-                .to_string(),
-            "Importing profiles does not automatically enable them for any tool.".to_string(),
-        ],
-    };
-
     activity_log::append(
-        Severity::Info,
-        format!("Exported {} profile draft(s).", bundle.profiles.len()),
+        Severity::Ok,
+        format!(
+            "Deleted profile draft '{}' for {}/{}.",
+            source.name, source.app, source.provider
+        ),
     )?;
 
-    Ok(ExportProfilesResult {
-        file_name: format!(
-            "codestudio-lite-profiles-{}.json",
-            exported_at.format("%Y%m%d-%H%M%S")
-        ),
-        bundle,
-    })
+    load_profile_summary()
 }
 
-pub fn import_profiles(request: ImportProfilesRequest) -> Result<ImportProfilesResult, String> {
+pub fn reorder_profile_drafts(
+    request: ReorderProfileDraftsRequest,
+) -> Result<ProfileSummary, String> {
     ensure_app_dirs()?;
 
-    let profiles = parse_profile_import_content(&request.content)?;
-    if profiles.is_empty() {
-        return Err("Import file does not contain any profiles.".to_string());
+    let app = canonical_profile_app(&normalize_token("Tool", &request.app)?);
+    let mode = request.mode;
+    let profiles = load_profiles()?;
+    let expected_ids = profiles
+        .iter()
+        .filter(|profile| canonical_profile_app(&profile.app) == app && profile.mode == mode)
+        .map(|profile| profile.id.clone())
+        .collect::<HashSet<_>>();
+    let requested_ids = request
+        .profile_ids
+        .iter()
+        .map(|id| normalize_token("Profile ID", id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let requested_set = requested_ids.iter().cloned().collect::<HashSet<_>>();
+    if requested_set != expected_ids {
+        return Err("Profile order must include every profile in this tool category.".to_string());
     }
 
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let installed_tool_ids = installed_profile_tool_ids()?;
-    let now = Utc::now().to_rfc3339();
-    let mut imported = Vec::new();
-    let mut skipped = Vec::new();
-
-    for (index, profile) in profiles.iter().enumerate() {
-        let label = if profile.name.trim().is_empty() {
-            format!("profile #{}", index + 1)
-        } else {
-            profile.name.trim().to_string()
-        };
-
-        match normalize_import_profile(profile, &now) {
-            Ok(imported_profile) => {
-                if !installed_tool_ids.contains(&canonical_profile_app(&imported_profile.app)) {
-                    skipped.push(format!(
-                        "{label}: {}",
-                        profile_tool_not_installed_error(&imported_profile.app)
-                    ));
-                    continue;
-                }
-                let profile_path = paths
-                    .profiles_dir
-                    .join(format!("{}.toml", imported_profile.id));
-                let created_at = imported_profile
-                    .created_at
-                    .as_deref()
-                    .unwrap_or(now.as_str());
-                let updated_at = imported_profile
-                    .updated_at
-                    .as_deref()
-                    .unwrap_or(now.as_str());
-                let content = profile_toml_content(
-                    &imported_profile,
-                    created_at,
-                    updated_at,
-                    imported_profile
-                        .last_test_status
-                        .as_deref()
-                        .unwrap_or("pending"),
-                    "missing",
-                );
-                write_atomic(&profile_path, content.as_bytes())?;
-                imported.push(imported_profile);
-            }
-            Err(err) => skipped.push(format!("{label}: {err}")),
-        }
-    }
-
+    storage::reorder_profiles(&app, &mode, &requested_ids)?;
     activity_log::append(
-        if imported.is_empty() {
-            Severity::Warning
-        } else {
-            Severity::Ok
-        },
+        Severity::Info,
         format!(
-            "Imported {} profile draft(s); skipped {}.",
-            imported.len(),
-            skipped.len()
+            "Reordered {} profile draft(s) for {app}/{}.",
+            requested_ids.len(),
+            provider_apply_mode_value(&mode)
         ),
     )?;
 
-    Ok(ImportProfilesResult {
-        imported,
-        skipped,
-        summary: load_profile_summary()?,
-    })
+    load_profile_summary()
 }
 
 pub fn preview_profile_write(
@@ -681,7 +587,6 @@ pub fn preview_profile_write(
         &request.model,
         &request.base_url,
         request.secret_provided,
-        request.timeout_seconds,
     )?;
     let paths = app_paths().map_err(|err| err.to_string())?;
     let base_id = slugify(&plan.name);
@@ -708,9 +613,12 @@ pub fn preview_profile_write(
         warnings.push(format!("Tool '{}' is not in the local registry.", plan.app));
     }
     let now = Utc::now().to_rfc3339();
+    let database_path = display_path(&paths.database_file);
     let preview_profile = ProfileDraft {
         id: plan.id.clone(),
         name: plan.name.clone(),
+        icon: normalize_profile_icon(request.icon.as_deref())?,
+        remark: normalize_profile_remark(request.remark.as_deref()),
         app: plan.app.clone(),
         is_builtin: false,
         mode: plan.mode,
@@ -719,28 +627,29 @@ pub fn preview_profile_write(
         model: plan.model.clone(),
         base_url: plan.base_url.clone(),
         auth_ref: plan.auth_ref.clone(),
-        timeout_seconds: plan.timeout_seconds,
         created_at: Some(now.clone()),
         updated_at: Some(now.clone()),
         last_test_status: Some("pending".to_string()),
+        usage_enabled: false,
+        sort_order: 0,
     };
     let profile_content =
-        profile_toml_content(&preview_profile, &now, &now, "pending", plan.secret_status);
+        profile_sql_preview_content(&preview_profile, plan.secret_status, "pending")?;
     let mut items = vec![
         ProfileWritePreviewItem {
-            label: "Profile draft".to_string(),
-            path: Some(display_path(&plan.profile_path)),
+            label: "Profile row".to_string(),
+            path: Some(database_path.clone()),
             action: "create".to_string(),
             backup_required: false,
             detail: format!(
-                "Save Profile Draft writes normalized metadata for {}/{} and excludes API keys.",
+                "Save Profile Draft stores normalized metadata in SQLite for {}/{} and excludes API keys.",
                 plan.protocol, plan.provider
             ),
             content: Some(profile_content),
         },
         ProfileWritePreviewItem {
             label: "Active tool profile pointer".to_string(),
-            path: Some(display_path(&paths.config_file)),
+            path: Some(database_path.clone()),
             action: "not_modified".to_string(),
             backup_required: false,
             detail: "Saving a draft does not switch the active profile.".to_string(),
@@ -770,7 +679,7 @@ pub fn preview_profile_write(
     Ok(PreviewProfileWriteResult {
         generated_at: now,
         profile_id: plan.id,
-        profile_path: display_path(&plan.profile_path),
+        profile_path: database_path,
         target_tool_path,
         backup_required: false,
         items,
@@ -797,7 +706,6 @@ pub fn preview_profile_apply(
                 .and_then(|definition| definition.config_relative_path)
                 .map(|relative| display_path(&paths.home_dir.join(relative)))
         });
-    let managed_apply_path = applied_profile_path(&profile.app)?;
     let tool_name = tool
         .as_ref()
         .map(|definition| definition.name)
@@ -815,10 +723,26 @@ pub fn preview_profile_apply(
         &paths,
         ProviderApplyMode::Gateway,
     )?;
+    let config_native_diff = attach_native_config_content_preview(
+        config_native_diff,
+        &profile,
+        &paths,
+        ProviderApplyMode::Config,
+    );
+    let gateway_native_diff = attach_native_config_content_preview(
+        gateway_native_diff,
+        &profile,
+        &paths,
+        ProviderApplyMode::Gateway,
+    );
     let native_diff = match profile.mode {
         ProviderApplyMode::Config => config_native_diff.clone(),
         ProviderApplyMode::Gateway => gateway_native_diff.clone(),
     };
+    let native_write_enabled = native_diff
+        .as_ref()
+        .map(|diff| diff.write_enabled)
+        .unwrap_or(false);
     let mode_previews =
         build_provider_mode_previews(&profile, &config_native_diff, &gateway_native_diff);
     let mut warnings = Vec::new();
@@ -841,38 +765,24 @@ pub fn preview_profile_apply(
         items: vec![
             ProfileApplyPreviewItem {
                 label: "Active tool profile pointer".to_string(),
-                path: Some(display_path(&paths.config_file)),
+                path: Some(display_path(&paths.database_file)),
                 action: "update".to_string(),
-                backup_required: true,
+                backup_required: false,
                 detail: format!(
-                    "Sets CodeStudio Lite active profile for '{}' to '{}' before refreshing detection.",
+                    "Sets the SQLite active profile pointer for '{}' to '{}' before refreshing detection.",
                     profile.app, profile.id
-                ),
-            },
-            ProfileApplyPreviewItem {
-                label: "Managed tool binding".to_string(),
-                path: Some(display_path(&managed_apply_path)),
-                action: if managed_apply_path.exists() {
-                    "update".to_string()
-                } else {
-                    "create".to_string()
-                },
-                backup_required: true,
-                detail: format!(
-                    "Writes CodeStudio-managed adapter metadata for {}/{}. API keys are not written.",
-                    profile.app, profile.provider
                 ),
             },
             ProfileApplyPreviewItem {
                 label: format!("{tool_name} native config"),
                 path: native_config_path,
-                action: if native_diff.is_some() {
+                action: if native_write_enabled {
                     "create_or_update".to_string()
                 } else {
                     "not_modified".to_string()
                 },
-                backup_required: native_diff.is_some(),
-                detail: if native_diff.is_some() {
+                backup_required: native_write_enabled,
+                detail: if native_write_enabled {
                     "Selected mode writes this client config; detailed file changes are shown below."
                         .to_string()
                 } else {
@@ -906,21 +816,22 @@ fn build_provider_mode_previews(
     let official_client_config = is_official && !is_codex_tool;
     let config_protocol_supported = config_file_protocol_supported(profile);
     let config_supported = config_native_diff.is_some() || official_client_config;
-    let gateway_writes_native_config = gateway_native_diff.is_some();
+    let config_writes_native_config = native_preview_writes(config_native_diff);
+    let gateway_writes_native_config = native_preview_writes(gateway_native_diff);
     let gateway_supported = !is_official;
     let config_blocked_reason = if !config_protocol_supported && !is_official {
         Some(format!(
-            "Config file mode does not support {} for '{}'.",
+            "Config profiles do not support {} for '{}'.",
             protocol_display_name(&profile.protocol),
             profile.app
         ))
     } else if !config_supported && !is_official {
         Some(format!(
-            "Config file mode adapter is not implemented for '{}'.",
+            "Config profile adapter is not implemented for '{}'.",
             profile.app
         ))
     } else if profile.auth_ref.is_none() && provider_requires_api_key(&profile.provider) {
-        Some("Config file mode needs a stored Provider API key for this Provider.".to_string())
+        Some("Config profiles need a stored Provider API key for this Provider.".to_string())
     } else {
         None
     };
@@ -928,12 +839,12 @@ fn build_provider_mode_previews(
     vec![
         ProviderApplyModePreview {
             mode: ProviderApplyMode::Config,
-            label: "CC Switch config file mode".to_string(),
+            label: "Client config profile".to_string(),
             description: "Back up and modify the target client's native provider config directly. This makes the client talk to the selected upstream Provider without CodeStudio Lite in the request path."
                 .to_string(),
             supported: config_supported && config_blocked_reason.is_none(),
             recommended: is_official && config_supported && config_blocked_reason.is_none(),
-            writes_native_config: config_native_diff.is_some(),
+            writes_native_config: config_writes_native_config,
             starts_gateway: false,
             blocked_reason: config_blocked_reason,
             native_diff: config_native_diff.clone(),
@@ -944,7 +855,7 @@ fn build_provider_mode_previews(
                 ]
             } else if config_supported {
                 vec![
-                    "Direct config file mode writes Provider connection details into the client config.".to_string(),
+                    "Config profiles write Provider connection details into the client config.".to_string(),
                     "Frequent Provider switching may require the client to reload its own config.".to_string(),
                 ]
             } else {
@@ -953,7 +864,7 @@ fn build_provider_mode_previews(
         },
         ProviderApplyModePreview {
             mode: ProviderApplyMode::Gateway,
-            label: "Gateway mode".to_string(),
+            label: "Gateway profile".to_string(),
             description: if gateway_writes_native_config {
                 "Back up and point the client at the local CodeStudio Gateway once. This apply only switches the active Provider profile; start the Gateway from the sidebar when needed."
             } else {
@@ -994,6 +905,178 @@ fn build_provider_mode_previews(
     ]
 }
 
+fn attach_native_config_content_preview(
+    preview: Option<NativeConfigPreview>,
+    profile: &ProfileDraft,
+    paths: &crate::core::app_paths::AppPaths,
+    mode: ProviderApplyMode,
+) -> Option<NativeConfigPreview> {
+    let mut preview = preview?;
+    normalize_native_config_preview(&mut preview);
+    if !preview.write_enabled {
+        preview.content = None;
+        return Some(preview);
+    }
+    if let Ok(Some(content)) =
+        build_native_config_content_preview(profile, paths, mode, &preview.path)
+    {
+        preview.content = Some(redact_native_config_preview_content(
+            &content, profile, mode,
+        ));
+    }
+    Some(preview)
+}
+
+fn build_native_config_content_preview(
+    profile: &ProfileDraft,
+    paths: &crate::core::app_paths::AppPaths,
+    mode: ProviderApplyMode,
+    preview_path: &str,
+) -> Result<Option<String>, String> {
+    if provider_is_official(&profile.provider) && mode == ProviderApplyMode::Gateway {
+        return Ok(None);
+    }
+
+    if canonical_profile_app(&profile.app) == "claude-desktop" {
+        let desktop_paths = claude_desktop_paths(paths)?;
+        if display_path(&desktop_paths.profile_path) != preview_path {
+            return Ok(None);
+        }
+        if mode == ProviderApplyMode::Config && provider_is_official(&profile.provider) {
+            return Ok(None);
+        }
+        let content = match mode {
+            ProviderApplyMode::Config => claude_desktop_direct_profile_content_with_api_key(
+                profile,
+                secret_preview(profile),
+            )?,
+            ProviderApplyMode::Gateway => claude_desktop_gateway_profile_content(profile)?,
+        };
+        return Ok(Some(content));
+    }
+
+    let Some(path) = native_config_path_for_profile_mode(profile, paths, mode)? else {
+        return Ok(None);
+    };
+    if display_path(&path) != preview_path {
+        return Ok(None);
+    }
+
+    let current = read_file_if_exists(&path)?;
+    let render = |current: &str| native_config_content_for_preview(current, profile, mode);
+    match render(&current) {
+        Ok(content) => Ok(Some(content)),
+        Err(err) if preview_content_parse_error(&err) => render("").map(Some),
+        Err(err) => Err(err),
+    }
+}
+
+fn native_config_content_for_preview(
+    current: &str,
+    profile: &ProfileDraft,
+    mode: ProviderApplyMode,
+) -> Result<String, String> {
+    match mode {
+        ProviderApplyMode::Config => match canonical_profile_app(&profile.app).as_str() {
+            "codex" => {
+                if provider_is_official(&profile.provider) {
+                    codex_official_config_content(current, profile)
+                } else {
+                    codex_direct_config_content_with_api_key(
+                        current,
+                        profile,
+                        secret_preview(profile),
+                    )
+                }
+            }
+            "claude" => {
+                if provider_is_official(&profile.provider) {
+                    claude_official_config_content(current)
+                } else {
+                    claude_config_content_with_api_key(current, profile, secret_preview(profile))
+                }
+            }
+            "gemini" => {
+                if provider_is_official(&profile.provider) {
+                    Ok(gemini_official_env_content(current))
+                } else {
+                    gemini_env_content_with_api_key(current, profile, secret_preview(profile))
+                }
+            }
+            "gemini-code-assist" => {
+                if provider_is_official(&profile.provider) {
+                    gemini_code_assist_official_settings_content(current)
+                } else {
+                    gemini_code_assist_settings_content_with_api_key(
+                        current,
+                        profile,
+                        secret_preview(profile),
+                    )
+                }
+            }
+            "opencode" => {
+                if provider_is_official(&profile.provider) {
+                    opencode_official_config_content(current)
+                } else {
+                    opencode_config_content_with_api_key(current, profile, secret_preview(profile))
+                }
+            }
+            "openclaw" => {
+                if provider_is_official(&profile.provider) {
+                    openclaw_official_config_content(current)
+                } else {
+                    openclaw_config_content_with_api_key(current, profile, secret_preview(profile))
+                }
+            }
+            "hermes" => {
+                if provider_is_official(&profile.provider) {
+                    hermes_official_config_content(current)
+                } else {
+                    hermes_config_content_with_api_key(current, profile, secret_preview(profile))
+                }
+            }
+            _ => Err(format!(
+                "Config profile adapter is not implemented for tool '{}'.",
+                profile.app
+            )),
+        },
+        ProviderApplyMode::Gateway => match canonical_profile_app(&profile.app).as_str() {
+            "codex" => codex_native_config_content(current, &profile.app),
+            "claude" => claude_gateway_config_content(current, profile),
+            "gemini" => gemini_gateway_env_content(current, profile),
+            "opencode" => opencode_gateway_config_content(current, profile),
+            "openclaw" => openclaw_gateway_config_content(current, profile),
+            "hermes" => hermes_gateway_config_content(current, profile),
+            _ => Err(format!(
+                "Gateway profile adapter is not implemented for tool '{}'.",
+                profile.app
+            )),
+        },
+    }
+}
+
+fn preview_content_parse_error(err: &str) -> bool {
+    err.starts_with("Existing ") && err.contains(" could not be parsed")
+}
+
+fn native_preview_writes(preview: &Option<NativeConfigPreview>) -> bool {
+    preview
+        .as_ref()
+        .map(|preview| preview.write_enabled)
+        .unwrap_or(false)
+}
+
+fn normalize_native_config_preview(preview: &mut NativeConfigPreview) {
+    preview.changes.retain(native_config_change_writes);
+    if preview.changes.is_empty() {
+        preview.write_enabled = false;
+    }
+}
+
+fn native_config_change_writes(change: &NativeConfigDiffLine) -> bool {
+    change.action != "unchanged" && change.before != change.after
+}
+
 pub fn apply_profile(request: ApplyProfileRequest) -> Result<ApplyProfileResult, String> {
     ensure_app_dirs()?;
 
@@ -1015,13 +1098,16 @@ pub fn apply_profile(request: ApplyProfileRequest) -> Result<ApplyProfileResult,
         ));
     }
     let paths = app_paths().map_err(|err| err.to_string())?;
-    let managed_apply_path = applied_profile_path(&profile.app)?;
     let mode = profile.mode;
     if request.restart_after_apply && mode != ProviderApplyMode::Config {
-        return Err("Apply and restart is only available for Config file mode.".to_string());
+        return Err("Apply and restart is only available for Config profiles.".to_string());
     }
-    let native_plans =
-        build_native_apply_plan(&profile, &paths, &mode, request.sync_claude_vs_code)?;
+    let native_plans = filter_native_write_plans(build_native_apply_plan(
+        &profile,
+        &paths,
+        &mode,
+        request.sync_claude_vs_code,
+    )?)?;
     if request.restart_after_apply && native_plans.is_empty() {
         return Err(
             "Apply and restart requires a native client config write for this profile.".to_string(),
@@ -1034,7 +1120,7 @@ pub fn apply_profile(request: ApplyProfileRequest) -> Result<ApplyProfileResult,
     if profile_is_active(&config, &profile) {
         return Err("Profile is already active for this tool and mode.".to_string());
     }
-    let mut backup_targets = vec![paths.config_file.clone(), managed_apply_path.clone()];
+    let mut backup_targets = Vec::new();
     for plan in &native_plans {
         backup_targets.push(plan.path.clone());
     }
@@ -1042,12 +1128,9 @@ pub fn apply_profile(request: ApplyProfileRequest) -> Result<ApplyProfileResult,
 
     activate_profile_for_tool(&mut config, &profile, &profiles);
     write_app_config(&config)?;
-
-    let applied_content = applied_profile_content(&profile, &mode);
-    write_atomic(&managed_apply_path, applied_content.as_bytes())?;
-    let verified = verify_applied_profile(&managed_apply_path, &profile)?;
+    let verified = verify_active_profile(&config, &profile);
     if !verified {
-        return Err("Applied profile artifact did not pass verification".to_string());
+        return Err("Applied profile database record did not pass verification".to_string());
     }
     let native_verified = if native_plans.is_empty() {
         false
@@ -1075,12 +1158,12 @@ pub fn apply_profile(request: ApplyProfileRequest) -> Result<ApplyProfileResult,
         Severity::Ok,
         if mode == ProviderApplyMode::Gateway {
             format!(
-                "Applied profile '{}' for {}/{} in Gateway mode.",
+                "Applied profile '{}' for {}/{} in Gateway profile.",
                 profile.name, profile.app, profile.provider
             )
         } else if native_verified && mode == ProviderApplyMode::Config {
             format!(
-                "Applied profile '{}' for {}/{} through direct client config file mode.",
+                "Applied profile '{}' for {}/{} through direct client config profile.",
                 profile.name, profile.app, profile.provider
             )
         } else {
@@ -1097,7 +1180,7 @@ pub fn apply_profile(request: ApplyProfileRequest) -> Result<ApplyProfileResult,
         summary: load_profile_summary()?,
         mode,
         backup,
-        applied_path: display_path(&managed_apply_path),
+        applied_path: display_path(&paths.database_file),
         verified,
         native_path: native_plans.first().map(|plan| display_path(&plan.path)),
         native_verified,
@@ -1161,7 +1244,9 @@ fn apply_active_native_configs(
             continue;
         };
 
-        match build_native_apply_plan(&profile, &paths, &mode, false) {
+        match build_native_apply_plan(&profile, &paths, &mode, false)
+            .and_then(filter_native_write_plans)
+        {
             Ok(plans) if !plans.is_empty() => {
                 lifecycle_plans.extend(plans.into_iter().map(|plan| NativeConfigLifecyclePlan {
                     profile: profile.clone(),
@@ -1327,6 +1412,9 @@ enum RestartLaunch {
         fallback_command: &'static str,
         hidden: bool,
     },
+    MsixPackage {
+        package_identities: &'static [&'static str],
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -1344,7 +1432,10 @@ fn restart_tool_for_profile(profile: &ProfileDraft) -> Result<RestartOutcome, St
     if targets.is_empty() {
         return Ok(RestartOutcome {
             performed: false,
-            message: Some(format!("工具 '{}' 暂无需要自动重启的客户端。", profile.app)),
+            message: Some(format!(
+                "Tool '{}' does not have a client that needs automatic restart.",
+                profile.app
+            )),
         });
     }
 
@@ -1357,7 +1448,10 @@ fn restart_tool_for_profile(profile: &ProfileDraft) -> Result<RestartOutcome, St
             continue;
         }
         if result.remaining > 0 {
-            return Err(format!("仍有 {} 进程无法结束，未继续重启。", target.label));
+            return Err(format!(
+                "{} is still running; restart was not continued.",
+                target.label
+            ));
         }
 
         launch_restart_target(target, &result.paths)?;
@@ -1374,7 +1468,7 @@ fn restart_tool_for_profile(profile: &ProfileDraft) -> Result<RestartOutcome, St
         Ok(RestartOutcome {
             performed: false,
             message: Some(format!(
-                "未检测到正在运行的 {}，无需重启。",
+                "{} is not running, so no restart is needed.",
                 restart_category_label(&app)
             )),
         })
@@ -1399,7 +1493,7 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
     match app {
         "codex" => vec![
             RestartTarget {
-                label: "Codex 客户端",
+                label: "Codex",
                 process_names: CODEX_DESKTOP_NAMES,
                 command_markers: EMPTY,
                 require_window: true,
@@ -1431,9 +1525,15 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
             process_names: CLAUDE_DESKTOP_NAMES,
             command_markers: EMPTY,
             require_window: true,
-            launch: RestartLaunch::ExistingProcessPath {
-                fallback_command: "Claude",
-                hidden: false,
+            launch: if cfg!(target_os = "windows") {
+                RestartLaunch::MsixPackage {
+                    package_identities: detector::claude_desktop_windows_package_identities(),
+                }
+            } else {
+                RestartLaunch::ExistingProcessPath {
+                    fallback_command: "Claude",
+                    hidden: false,
+                }
             },
         }],
         "claude" => vec![
@@ -1514,26 +1614,26 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
 
 fn restart_category_label(app: &str) -> &'static str {
     match app {
-        "codex" => "Codex 客户端、Codex CLI 或 Codex VS Code",
+        "codex" => "Codex, Codex CLI, or Codex VS Code",
         "claude-desktop" => "Claude Desktop",
-        "claude" => "Claude Code 或 Claude VS Code",
+        "claude" => "Claude Code or Claude VS Code",
         "gemini" => "Gemini CLI",
         "gemini-code-assist" => "Gemini Code Assist",
         "opencode" => "OpenCode",
         "openclaw" => "OpenClaw",
         "hermes" => "Hermes",
-        _ => "目标工具",
+        _ => "target tool",
     }
 }
 
 fn restart_target_message(target: RestartTarget, result: &RestartProcessResult) -> String {
     if result.forced > 0 {
         format!(
-            "已强制结束 {} 个 {} 进程并重新启动。",
+            "Force-closed {} {} process(es) and restarted.",
             result.forced, target.label
         )
     } else {
-        format!("已重新启动 {}。", target.label)
+        format!("Restarted {}.", target.label)
     }
 }
 
@@ -1661,7 +1761,7 @@ foreach ($id in $targetIds) {{
         paths: Vec<String>,
     }
     let value: RawRestartProcessResult = serde_json::from_str(&json)
-        .map_err(|err| format!("解析 {} 进程重启结果失败：{err}", target.label))?;
+        .map_err(|err| format!("Failed to parse {} restart result: {err}", target.label))?;
     Ok(RestartProcessResult {
         total: value.total.unwrap_or(0),
         forced: value.forced.unwrap_or(0),
@@ -1687,6 +1787,10 @@ fn launch_restart_target(target: RestartTarget, paths: &[String]) -> Result<(), 
                 launch_process(fallback_command, hidden)?;
             }
             Ok(())
+        }
+        RestartLaunch::MsixPackage { package_identities } => {
+            let args = Vec::new();
+            package::launch_first_msix_package_with_args(package_identities, &args).map(|_| ())
         }
     }
 }
@@ -1714,7 +1818,7 @@ fn launch_process(program: &str, hidden: bool) -> Result<(), String> {
             return command
                 .spawn()
                 .map(|_| ())
-                .map_err(|err| format!("启动 {program} 失败：{err}"));
+                .map_err(|err| format!("Failed to start {program}: {err}"));
         }
     }
 
@@ -1722,7 +1826,7 @@ fn launch_process(program: &str, hidden: bool) -> Result<(), String> {
     hidden_command(&resolved)
         .spawn()
         .map(|_| ())
-        .map_err(|err| format!("启动 {program} 失败：{err}"))
+        .map_err(|err| format!("Failed to start {program}: {err}"))
 }
 
 fn ps_array(values: &[&str]) -> String {
@@ -1763,45 +1867,69 @@ fn profile_is_active(config: &AppConfig, profile: &ProfileDraft) -> bool {
         .unwrap_or(false)
 }
 
+fn verify_active_profile(config: &AppConfig, profile: &ProfileDraft) -> bool {
+    profile_is_active(config, profile)
+}
+
 fn sync_active_profiles_from_native_configs(
     config: &mut AppConfig,
-    drafts: &[ProfileDraft],
+    drafts: &mut Vec<ProfileDraft>,
     paths: &crate::core::app_paths::AppPaths,
-) -> bool {
+) -> Result<bool, String> {
     let mut changed = false;
 
-    let codex_config_path = paths.home_dir.join(".codex").join("config.toml");
-    if let Ok(content) = fs::read_to_string(codex_config_path) {
-        if let Ok(codex_config) = toml::from_str::<toml::Value>(&content) {
-            changed |= sync_codex_config_profile(config, drafts, &codex_config);
-        }
+    let codex_config =
+        fs::read_to_string(paths.home_dir.join(".codex").join("config.toml")).unwrap_or_default();
+    if let Ok(codex_config) = parse_toml_or_empty(&codex_config, "Codex config") {
+        let codex_auth = read_codex_auth_json(paths).ok();
+        changed |= sync_or_import_native_config_profile(
+            config,
+            drafts,
+            "codex",
+            |profile| {
+                codex_direct_config_matches_profile(&codex_config, codex_auth.as_ref(), profile)
+            },
+            || detect_codex_native_profile_with_auth(&codex_config, codex_auth.as_ref()),
+        )?;
     }
 
+    changed |= sync_claude_desktop_config_profile(config, drafts, paths)?;
+
     let claude_config_path = paths.home_dir.join(".claude").join("settings.json");
-    if let Ok(content) = fs::read_to_string(claude_config_path) {
-        if let Ok(claude_config) = parse_json5_or_empty(&content, "Claude settings") {
-            changed |= sync_native_config_profile(config, drafts, "claude", |profile| {
-                claude_config_matches_profile(&claude_config, profile)
-            });
-        }
+    let claude_config = fs::read_to_string(claude_config_path).unwrap_or_default();
+    if let Ok(claude_config) = parse_json5_or_empty(&claude_config, "Claude settings") {
+        changed |= sync_or_import_native_config_profile(
+            config,
+            drafts,
+            "claude",
+            |profile| claude_config_matches_profile(&claude_config, profile),
+            || detect_claude_native_profile(&claude_config),
+        )?;
     }
 
     let gemini_env_path = paths.home_dir.join(".gemini").join(".env");
-    if let Ok(content) = fs::read_to_string(gemini_env_path) {
-        let env = parse_env_content(&content);
-        changed |= sync_native_config_profile(config, drafts, "gemini", |profile| {
-            gemini_env_matches_profile(&env, profile)
-        });
-    }
+    let gemini_env = parse_env_content(&fs::read_to_string(gemini_env_path).unwrap_or_default());
+    changed |= sync_or_import_native_config_profile(
+        config,
+        drafts,
+        "gemini",
+        |profile| gemini_env_matches_profile(&gemini_env, profile),
+        || detect_gemini_native_profile(&gemini_env),
+    )?;
 
     let gemini_code_assist_settings_path = vs_code_user_settings_path(paths);
-    if let Ok(content) = fs::read_to_string(gemini_code_assist_settings_path) {
-        if let Ok(settings) = parse_json5_or_empty(&content, "VS Code user settings") {
-            changed |=
-                sync_native_config_profile(config, drafts, "gemini-code-assist", |profile| {
-                    gemini_code_assist_settings_match_profile(&settings, profile)
-                });
-        }
+    let gemini_code_assist_settings =
+        fs::read_to_string(gemini_code_assist_settings_path).unwrap_or_default();
+    if let Ok(settings) =
+        parse_json5_or_empty(&gemini_code_assist_settings, "VS Code user settings")
+    {
+        changed |= sync_or_import_native_config_profile(
+            config,
+            drafts,
+            "gemini-code-assist",
+            |profile| gemini_code_assist_settings_match_profile(&settings, profile),
+            || detect_gemini_code_assist_native_profile(&settings),
+        )?;
     }
 
     let opencode_config_path = paths
@@ -1809,45 +1937,80 @@ fn sync_active_profiles_from_native_configs(
         .join(".config")
         .join("opencode")
         .join("opencode.json");
-    if let Ok(content) = fs::read_to_string(opencode_config_path) {
-        if let Ok(opencode_config) = parse_json5_or_empty(&content, "OpenCode config") {
-            changed |= sync_native_config_profile(config, drafts, "opencode", |profile| {
-                opencode_config_matches_profile(&opencode_config, profile)
-            });
-        }
+    let opencode_config = fs::read_to_string(opencode_config_path).unwrap_or_default();
+    if let Ok(opencode_config) = parse_json5_or_empty(&opencode_config, "OpenCode config") {
+        changed |= sync_or_import_native_config_profile(
+            config,
+            drafts,
+            "opencode",
+            |profile| opencode_config_matches_profile(&opencode_config, profile),
+            || detect_opencode_native_profile(&opencode_config),
+        )?;
     }
 
     let openclaw_config_path = paths.home_dir.join(".openclaw").join("openclaw.json");
-    if let Ok(content) = fs::read_to_string(openclaw_config_path) {
-        if let Ok(openclaw_config) = parse_json5_or_empty(&content, "OpenClaw config") {
-            changed |= sync_native_config_profile(config, drafts, "openclaw", |profile| {
-                openclaw_config_matches_profile(&openclaw_config, profile)
-            });
-        }
+    let openclaw_config = fs::read_to_string(openclaw_config_path).unwrap_or_default();
+    if let Ok(openclaw_config) = parse_json5_or_empty(&openclaw_config, "OpenClaw config") {
+        changed |= sync_or_import_native_config_profile(
+            config,
+            drafts,
+            "openclaw",
+            |profile| openclaw_config_matches_profile(&openclaw_config, profile),
+            || detect_openclaw_native_profile(&openclaw_config),
+        )?;
     }
 
     let hermes_config_path = paths.home_dir.join(".hermes").join("config.yaml");
-    if let Ok(content) = fs::read_to_string(hermes_config_path) {
-        if let Ok(hermes_config) = parse_yaml_or_empty(&content, "Hermes config") {
-            changed |= sync_native_config_profile(config, drafts, "hermes", |profile| {
-                hermes_config_matches_profile(&hermes_config, profile)
-            });
-        }
+    let hermes_config = fs::read_to_string(hermes_config_path).unwrap_or_default();
+    if let Ok(hermes_config) = parse_yaml_or_empty(&hermes_config, "Hermes config") {
+        changed |= sync_or_import_native_config_profile(
+            config,
+            drafts,
+            "hermes",
+            |profile| hermes_config_matches_profile(&hermes_config, profile),
+            || detect_hermes_native_profile(&hermes_config),
+        )?;
     }
 
-    changed
+    Ok(changed)
 }
 
+#[cfg(test)]
 fn sync_codex_config_profile(
     config: &mut AppConfig,
     drafts: &[ProfileDraft],
     codex_config: &toml::Value,
 ) -> bool {
     sync_native_config_profile(config, drafts, "codex", |profile| {
-        codex_direct_config_matches_profile(codex_config, profile)
+        codex_direct_config_matches_profile(codex_config, None, profile)
     })
 }
 
+fn sync_claude_desktop_config_profile(
+    config: &mut AppConfig,
+    drafts: &mut Vec<ProfileDraft>,
+    paths: &crate::core::app_paths::AppPaths,
+) -> Result<bool, String> {
+    let desktop_paths = claude_desktop_paths(paths).ok();
+    let official = desktop_paths
+        .as_ref()
+        .map(claude_desktop_is_official)
+        .unwrap_or(true);
+
+    sync_or_import_native_config_profile(
+        config,
+        drafts,
+        "claude-desktop",
+        |profile| claude_desktop_config_matches_profile(profile, desktop_paths.as_ref(), official),
+        || {
+            desktop_paths
+                .as_ref()
+                .and_then(detect_claude_desktop_native_profile)
+        },
+    )
+}
+
+#[cfg(test)]
 fn sync_native_config_profile<F>(
     config: &mut AppConfig,
     drafts: &[ProfileDraft],
@@ -1858,14 +2021,7 @@ where
     F: Fn(&ProfileDraft) -> bool,
 {
     let current_active_id = config.active_profiles_by_mode.config.get(app).cloned();
-    let matching_profiles = drafts
-        .iter()
-        .filter(|profile| {
-            canonical_profile_app(&profile.app) == app
-                && profile.mode == ProviderApplyMode::Config
-                && matches_profile(profile)
-        })
-        .collect::<Vec<_>>();
+    let matching_profiles = matching_native_config_profiles(drafts, app, &matches_profile);
 
     let selected_profile_id = current_active_id
         .as_ref()
@@ -1890,7 +2046,775 @@ where
     }
 }
 
-fn codex_direct_config_matches_profile(value: &toml::Value, profile: &ProfileDraft) -> bool {
+fn sync_or_import_native_config_profile<F, G>(
+    config: &mut AppConfig,
+    drafts: &mut Vec<ProfileDraft>,
+    app: &str,
+    matches_profile: F,
+    detect_profile: G,
+) -> Result<bool, String>
+where
+    F: Fn(&ProfileDraft) -> bool,
+    G: FnOnce() -> Option<DetectedNativeProfile>,
+{
+    let app = canonical_profile_app(app);
+    let current_active_id = config.active_profiles_by_mode.config.get(&app).cloned();
+    let detected = detect_profile();
+    let (selected_profile_id, should_correct_detected_profile) = {
+        let matching_profiles = matching_native_config_profiles(drafts, &app, &matches_profile);
+        let selected_profile_id = current_active_id
+            .as_ref()
+            .and_then(|active_id| {
+                matching_profiles
+                    .iter()
+                    .find(|profile| profile.id == *active_id)
+                    .map(|profile| profile.id.clone())
+            })
+            .or_else(|| matching_profiles.first().map(|profile| profile.id.clone()));
+        let should_correct_detected_profile = detected
+            .as_ref()
+            .map(|detected| {
+                matching_profiles
+                    .iter()
+                    .any(|profile| should_correct_detected_native_profile(profile, &app, detected))
+            })
+            .unwrap_or(false);
+        (selected_profile_id, should_correct_detected_profile)
+    };
+
+    if should_correct_detected_profile {
+        if let Some(detected) = detected {
+            let imported = upsert_detected_native_profile(drafts, detected)?;
+            let changed = config.active_profiles_by_mode.config.get(&app) != Some(&imported.id);
+            config
+                .active_profiles_by_mode
+                .config
+                .insert(app, imported.id);
+            return Ok(changed);
+        }
+    }
+
+    if let Some(profile_id) = selected_profile_id {
+        if config.active_profiles_by_mode.config.get(&app) != Some(&profile_id) {
+            config
+                .active_profiles_by_mode
+                .config
+                .insert(app, profile_id);
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+
+    if let Some(detected) = detected {
+        let imported = upsert_detected_native_profile(drafts, detected)?;
+        let changed = config.active_profiles_by_mode.config.get(&app) != Some(&imported.id);
+        config
+            .active_profiles_by_mode
+            .config
+            .insert(app, imported.id);
+        return Ok(changed);
+    }
+
+    Ok(config.active_profiles_by_mode.config.remove(&app).is_some())
+}
+
+fn matching_native_config_profiles<'a, F>(
+    drafts: &'a [ProfileDraft],
+    app: &str,
+    matches_profile: &F,
+) -> Vec<&'a ProfileDraft>
+where
+    F: Fn(&ProfileDraft) -> bool,
+{
+    drafts
+        .iter()
+        .filter(|profile| {
+            canonical_profile_app(&profile.app) == app
+                && profile.mode == ProviderApplyMode::Config
+                && matches_profile(profile)
+        })
+        .collect()
+}
+
+fn should_correct_detected_native_profile(
+    profile: &ProfileDraft,
+    app: &str,
+    detected: &DetectedNativeProfile,
+) -> bool {
+    if profile.is_builtin
+        || canonical_profile_app(&profile.app) != app
+        || profile.mode != ProviderApplyMode::Config
+        || !is_auto_imported_native_profile(profile)
+    {
+        return false;
+    }
+
+    let provider = normalize_detected_provider(&detected.provider, &detected.base_url);
+    if profile.provider == provider {
+        return false;
+    }
+    let Ok(protocol) = normalize_protocol(Some(&detected.protocol)) else {
+        return false;
+    };
+    let Ok(base_url) = validate_base_url(&detected.base_url) else {
+        return false;
+    };
+    let model = native_optional_model(&detected.model).unwrap_or_default();
+
+    profile.protocol == protocol
+        && profile.model.trim() == model
+        && profile.base_url.trim() == base_url
+}
+
+fn upsert_detected_native_profile(
+    drafts: &mut Vec<ProfileDraft>,
+    detected: DetectedNativeProfile,
+) -> Result<ProfileDraft, String> {
+    let app = canonical_profile_app(&normalize_token("Tool", &detected.app)?);
+    let provider = normalize_detected_provider(&detected.provider, &detected.base_url);
+    if provider_is_official(&provider) {
+        return Err("Detected Provider cannot be official.".to_string());
+    }
+    let protocol = normalize_protocol(Some(&detected.protocol))?;
+    ensure_profile_protocol_supported_for_mode(
+        &app,
+        ProviderApplyMode::Config,
+        &provider,
+        &protocol,
+    )?;
+    let base_url = validate_base_url(&detected.base_url)?;
+    let api_key = detected.api_key.trim();
+    if api_key.is_empty() || looks_like_local_gateway_token(api_key) {
+        return Err("Detected Provider API key is not importable.".to_string());
+    }
+    let model = native_optional_model(&detected.model).unwrap_or_default();
+
+    if let Some(existing) = drafts.iter().find(|profile| {
+        !profile.is_builtin
+            && canonical_profile_app(&profile.app) == app
+            && profile.mode == ProviderApplyMode::Config
+            && profile.provider == provider
+            && profile.protocol == protocol
+            && profile.model.trim() == model
+            && profile.base_url.trim() == base_url
+    }) {
+        if let Some(auth_ref) = existing.auth_ref.as_deref() {
+            credentials::store_keychain_secret(auth_ref, api_key)?;
+            return Ok(existing.clone());
+        }
+    }
+
+    if let Some(existing_index) = drafts.iter().position(|profile| {
+        !profile.is_builtin
+            && canonical_profile_app(&profile.app) == app
+            && profile.mode == ProviderApplyMode::Config
+            && profile.provider != provider
+            && profile.protocol == protocol
+            && profile.model.trim() == model
+            && profile.base_url.trim() == base_url
+            && is_auto_imported_native_profile(profile)
+    }) {
+        let now = Utc::now().to_rfc3339();
+        let mut updated = drafts[existing_index].clone();
+        let old_provider = updated.provider.clone();
+        updated.provider = provider;
+        if is_auto_detected_native_profile_name(&updated.name, &app, &old_provider) {
+            updated.name = unique_detected_native_profile_name_excluding(
+                drafts,
+                &app,
+                &updated.provider,
+                Some(&updated.id),
+            );
+        }
+        if updated.auth_ref.is_none() {
+            updated.auth_ref = Some(format!("keychain:codestudio-lite/{}/api_key", updated.id));
+        }
+        updated.updated_at = Some(now);
+        updated.last_test_status = Some("detected".to_string());
+
+        storage::save_profile(&updated)?;
+        if let Some(auth_ref) = updated.auth_ref.as_deref() {
+            credentials::store_keychain_secret(auth_ref, api_key)?;
+        }
+        drafts[existing_index] = updated.clone();
+        drafts.sort_by(compare_profiles);
+        activity_log::append(
+            Severity::Info,
+            format!(
+                "Updated imported native config profile '{}' for {}/{}.",
+                updated.name, updated.app, updated.provider
+            ),
+        )?;
+
+        return Ok(updated);
+    }
+
+    let name = unique_detected_native_profile_name(drafts, &app, &provider);
+    let id = unique_profile_id(&slugify(&name))?;
+    let now = Utc::now().to_rfc3339();
+    let auth_ref = Some(format!("keychain:codestudio-lite/{id}/api_key"));
+    let sort_order = storage::next_profile_sort_order(&app, &ProviderApplyMode::Config)?;
+    let draft = ProfileDraft {
+        id,
+        name,
+        icon: None,
+        remark: None,
+        app,
+        is_builtin: false,
+        mode: ProviderApplyMode::Config,
+        provider,
+        protocol,
+        model,
+        base_url,
+        auth_ref,
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        last_test_status: Some("detected".to_string()),
+        usage_enabled: false,
+        sort_order,
+    };
+
+    storage::save_profile(&draft)?;
+    if let Some(auth_ref) = draft.auth_ref.as_deref() {
+        credentials::store_keychain_secret(auth_ref, api_key)?;
+    }
+    drafts.push(draft.clone());
+    drafts.sort_by(compare_profiles);
+    activity_log::append(
+        Severity::Info,
+        format!(
+            "Imported existing native config as profile '{}' for {}/{}.",
+            draft.name, draft.app, draft.provider
+        ),
+    )?;
+
+    Ok(draft)
+}
+
+fn unique_detected_native_profile_name(
+    drafts: &[ProfileDraft],
+    app: &str,
+    provider: &str,
+) -> String {
+    unique_detected_native_profile_name_excluding(drafts, app, provider, None)
+}
+
+fn unique_detected_native_profile_name_excluding(
+    drafts: &[ProfileDraft],
+    app: &str,
+    provider: &str,
+    exclude_id: Option<&str>,
+) -> String {
+    let base = format!("{} {}", native_profile_tool_name(app), provider);
+    let existing = drafts
+        .iter()
+        .filter(|profile| exclude_id != Some(profile.id.as_str()))
+        .map(|profile| profile.name.as_str())
+        .collect::<HashSet<_>>();
+    for index in 0..1000 {
+        let candidate = if index == 0 {
+            base.clone()
+        } else {
+            format!("{base} {index}")
+        };
+        if !existing.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    base
+}
+
+fn is_auto_detected_native_profile_name(name: &str, app: &str, provider: &str) -> bool {
+    let base = format!("{} {}", native_profile_tool_name(app), provider);
+    if name == base {
+        return true;
+    }
+    name.strip_prefix(&(base + " "))
+        .map(|suffix| !suffix.is_empty() && suffix.chars().all(|item| item.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
+fn is_auto_imported_native_profile(profile: &ProfileDraft) -> bool {
+    profile.last_test_status.as_deref() == Some("detected")
+        || is_auto_detected_native_profile_name(&profile.name, &profile.app, &profile.provider)
+}
+
+fn native_profile_tool_name(app: &str) -> &'static str {
+    match canonical_profile_app(app).as_str() {
+        "codex" => "Codex",
+        "claude-desktop" => "Claude Desktop",
+        "claude" => "Claude Code",
+        "gemini" => "Gemini CLI",
+        "gemini-code-assist" => "Gemini Code Assist",
+        "opencode" => "OpenCode",
+        "openclaw" => "OpenClaw",
+        "hermes" => "Hermes",
+        _ => "Tool",
+    }
+}
+
+fn native_optional_model(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty() && trimmed != "codestudio-default").then(|| trimmed.to_string())
+}
+
+fn normalize_detected_provider(provider: &str, base_url: &str) -> String {
+    let raw_provider = provider.trim();
+    let raw_provider_lower = raw_provider.to_ascii_lowercase();
+    let generated_codestudio_label = raw_provider_lower.starts_with("codestudio-")
+        || raw_provider_lower.starts_with("codestudio ");
+    let from_base_url = provider_slug_from_base_url(base_url);
+    if generated_codestudio_label {
+        if let Some(provider) = from_base_url.clone() {
+            return provider;
+        }
+    }
+    let from_provider = raw_provider
+        .strip_prefix("codestudio-")
+        .unwrap_or(raw_provider);
+    if let Some(provider) = normalize_detected_provider_display_token(from_provider) {
+        return provider;
+    }
+    let mut slug = slugify(from_provider);
+    if let Some(stripped) = slug.strip_prefix("codestudio-") {
+        slug = stripped.to_string();
+    }
+    if slug.is_empty()
+        || matches!(
+            slug.as_str(),
+            "official" | "codestudio-local" | "custom" | "provider"
+        )
+    {
+        slug = from_base_url.unwrap_or_else(|| "custom".to_string());
+    }
+    if slug == "official" || slug == "codestudio-local" {
+        "custom".to_string()
+    } else {
+        slug
+    }
+}
+
+fn normalize_detected_provider_display_token(provider: &str) -> Option<String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    if !provider.contains('.')
+        || provider.starts_with('.')
+        || provider.ends_with('.')
+        || !provider.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return None;
+    }
+    provider_slug_from_base_url(&provider).or(Some(provider))
+}
+
+fn provider_slug_from_base_url(base_url: &str) -> Option<String> {
+    let host = base_url
+        .trim()
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split('@')
+        .next_back()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_matches('.')
+        .to_ascii_lowercase();
+    let mut parts = host
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    while matches!(parts.first(), Some(&"api" | &"gateway" | &"router")) && parts.len() > 2 {
+        parts.remove(0);
+    }
+    let provider = if parts.len() >= 2 {
+        parts[parts.len() - 2..].join(".")
+    } else {
+        parts.join(".")
+    };
+    (!provider.is_empty())
+        .then(|| provider)
+        .filter(|slug| !slug.is_empty())
+}
+
+#[cfg(test)]
+fn detect_codex_native_profile(value: &toml::Value) -> Option<DetectedNativeProfile> {
+    detect_codex_native_profile_with_auth(value, None)
+}
+
+fn detect_codex_native_profile_with_auth(
+    value: &toml::Value,
+    auth: Option<&serde_json::Value>,
+) -> Option<DetectedNativeProfile> {
+    let provider_id = read_toml_string(value, "model_provider")?;
+    if provider_id == "codestudio-local" {
+        return None;
+    }
+    let base_url = toml_lookup(value, &format!("model_providers.{provider_id}.base_url"))
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())?;
+    let config_api_key = toml_lookup(
+        value,
+        &format!("model_providers.{provider_id}.experimental_bearer_token"),
+    )
+    .and_then(|item| item.as_str())
+    .map(str::trim)
+    .filter(|item| !item.is_empty())
+    .filter(|item| !looks_like_local_gateway_token(item))
+    .map(ToString::to_string);
+    let requires_openai_auth = toml_lookup(
+        value,
+        &format!("model_providers.{provider_id}.requires_openai_auth"),
+    )
+    .and_then(|item| item.as_bool())
+    .unwrap_or(false);
+    let auth_api_key = auth
+        .filter(|_| requires_openai_auth)
+        .and_then(codex_auth_api_key_from_value);
+    let api_key = config_api_key.or(auth_api_key)?;
+    let wire_api = toml_lookup(value, &format!("model_providers.{provider_id}.wire_api"))
+        .and_then(|item| item.as_str())
+        .unwrap_or("responses");
+    let protocol = protocol_for_codex_wire_api(wire_api)?;
+    let provider = toml_lookup(value, &format!("model_providers.{provider_id}.name"))
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or(provider_id.as_str());
+
+    Some(DetectedNativeProfile {
+        app: "codex".to_string(),
+        provider: provider.to_string(),
+        protocol: protocol.to_string(),
+        model: read_toml_string(value, "model")
+            .and_then(|model| native_optional_model(&model))
+            .unwrap_or_default(),
+        base_url: base_url.to_string(),
+        api_key,
+    })
+}
+
+fn protocol_for_codex_wire_api(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "responses" => Some(PROTOCOL_OPENAI_RESPONSES),
+        "chat" => Some(PROTOCOL_OPENAI_CHAT_COMPLETIONS),
+        _ => None,
+    }
+}
+
+fn detect_claude_desktop_native_profile(
+    paths: &ClaudeDesktopPaths,
+) -> Option<DetectedNativeProfile> {
+    let content = fs::read_to_string(&paths.profile_path).ok()?;
+    let value = parse_json5_or_empty(&content, "Claude Desktop 3P profile").ok()?;
+    let base_url = json_string_lookup(&value, &["inferenceGatewayBaseUrl"])
+        .map(|value| claude_desktop_direct_profile_base_url(&value))
+        .filter(|item| !item.trim().is_empty())?;
+    let api_key = json_string_lookup(&value, &["inferenceGatewayApiKey"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| !looks_like_local_gateway_token(item))?;
+    if json_string_lookup(&value, &["inferenceProvider"]).as_deref() != Some("gateway") {
+        return None;
+    }
+
+    Some(DetectedNativeProfile {
+        app: "claude-desktop".to_string(),
+        provider: provider_slug_from_base_url(&base_url).unwrap_or_else(|| "anthropic".to_string()),
+        protocol: PROTOCOL_ANTHROPIC_MESSAGES.to_string(),
+        model: claude_desktop_detected_model(&value).unwrap_or_default(),
+        base_url,
+        api_key,
+    })
+}
+
+fn claude_desktop_config_matches_profile(
+    profile: &ProfileDraft,
+    paths: Option<&ClaudeDesktopPaths>,
+    official: bool,
+) -> bool {
+    if canonical_profile_app(&profile.app) != "claude-desktop"
+        || profile.mode != ProviderApplyMode::Config
+    {
+        return false;
+    }
+    if provider_is_official(&profile.provider) {
+        return official;
+    }
+    if normalize_protocol(Some(&profile.protocol)).as_deref() != Ok(PROTOCOL_ANTHROPIC_MESSAGES) {
+        return false;
+    }
+    let Some(paths) = paths else {
+        return false;
+    };
+    let content = fs::read_to_string(&paths.profile_path).unwrap_or_default();
+    let Ok(value) = parse_json5_or_empty(&content, "Claude Desktop 3P profile") else {
+        return false;
+    };
+    let model_matches = match profile_model(profile) {
+        Some(model) => claude_desktop_detected_model(&value).as_deref() == Some(model),
+        None => claude_desktop_detected_model(&value).is_none(),
+    };
+    let token_matches = json_string_lookup(&value, &["inferenceGatewayApiKey"])
+        .map(|token| profile_api_key_matches_config(profile, &token))
+        .unwrap_or(false);
+
+    json_string_lookup(&value, &["inferenceProvider"]).as_deref() == Some("gateway")
+        && json_string_lookup(&value, &["inferenceGatewayAuthScheme"])
+            .map(|scheme| scheme.eq_ignore_ascii_case("bearer"))
+            .unwrap_or(true)
+        && json_string_lookup(&value, &["inferenceGatewayBaseUrl"])
+            .map(|base_url| claude_desktop_direct_profile_base_url(&base_url))
+            .as_deref()
+            == Some(profile.base_url.trim())
+        && token_matches
+        && model_matches
+}
+
+fn claude_desktop_direct_profile_base_url(value: &str) -> String {
+    value.trim().to_string()
+}
+
+fn claude_desktop_detected_model(value: &serde_json::Value) -> Option<String> {
+    let models = value
+        .get("inferenceModels")
+        .and_then(serde_json::Value::as_array)?;
+    models.first().and_then(|model| {
+        model
+            .as_str()
+            .map(ToString::to_string)
+            .or_else(|| json_string_lookup(model, &["labelOverride"]))
+            .or_else(|| json_string_lookup(model, &["name"]))
+    })
+}
+
+fn detect_claude_native_profile(value: &serde_json::Value) -> Option<DetectedNativeProfile> {
+    let base_url = json_string_lookup(value, &["env", "ANTHROPIC_BASE_URL"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())?;
+    let api_key = json_string_lookup(value, &["env", "ANTHROPIC_AUTH_TOKEN"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| !looks_like_local_gateway_token(item))?;
+    let model = json_string_lookup(value, &["model"])
+        .or_else(|| json_string_lookup(value, &["env", "ANTHROPIC_MODEL"]))
+        .and_then(|model| native_optional_model(&model))
+        .unwrap_or_default();
+
+    Some(DetectedNativeProfile {
+        app: "claude".to_string(),
+        provider: provider_slug_from_base_url(&base_url).unwrap_or_else(|| "anthropic".to_string()),
+        protocol: PROTOCOL_ANTHROPIC_MESSAGES.to_string(),
+        model,
+        base_url,
+        api_key,
+    })
+}
+
+fn detect_gemini_native_profile(env: &HashMap<String, String>) -> Option<DetectedNativeProfile> {
+    let base_url = env
+        .get("GOOGLE_GEMINI_BASE_URL")
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())?;
+    let api_key = env
+        .get("GEMINI_API_KEY")
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| !looks_like_local_gateway_token(item))?;
+
+    Some(DetectedNativeProfile {
+        app: "gemini".to_string(),
+        provider: provider_slug_from_base_url(&base_url).unwrap_or_else(|| "gemini".to_string()),
+        protocol: PROTOCOL_GOOGLE_GEMINI.to_string(),
+        model: env
+            .get("GEMINI_MODEL")
+            .and_then(|model| native_optional_model(model))
+            .unwrap_or_default(),
+        base_url,
+        api_key,
+    })
+}
+
+fn detect_gemini_code_assist_native_profile(
+    value: &serde_json::Value,
+) -> Option<DetectedNativeProfile> {
+    let api_key = json_string_lookup(value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| !looks_like_local_gateway_token(item))?;
+
+    Some(DetectedNativeProfile {
+        app: "gemini-code-assist".to_string(),
+        provider: "gemini".to_string(),
+        protocol: PROTOCOL_GOOGLE_GEMINI.to_string(),
+        model: String::new(),
+        base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        api_key,
+    })
+}
+
+fn detect_opencode_native_profile(value: &serde_json::Value) -> Option<DetectedNativeProfile> {
+    let provider_id = opencode_active_provider_id(value)?;
+    if provider_id == "codestudio-local" {
+        return None;
+    }
+    let base_url = json_string_lookup(value, &["provider", &provider_id, "options", "baseURL"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())?;
+    let api_key = json_string_lookup(value, &["provider", &provider_id, "options", "apiKey"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| !looks_like_local_gateway_token(item))?;
+    let provider = json_string_lookup(value, &["provider", &provider_id, "name"])
+        .unwrap_or_else(|| provider_id.clone());
+
+    Some(DetectedNativeProfile {
+        app: "opencode".to_string(),
+        provider,
+        protocol: PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string(),
+        model: opencode_model_from_ref(
+            json_string_lookup(value, &["model"]).as_deref(),
+            &provider_id,
+        )
+        .unwrap_or_default(),
+        base_url,
+        api_key,
+    })
+}
+
+fn opencode_active_provider_id(value: &serde_json::Value) -> Option<String> {
+    if let Some(model) = json_string_lookup(value, &["model"]) {
+        if let Some((provider, _)) = model.split_once('/') {
+            if !provider.trim().is_empty() {
+                return Some(provider.trim().to_string());
+            }
+        }
+    }
+    json_object_keys(value, &["provider"])
+        .into_iter()
+        .find(|provider_id| {
+            json_string_lookup(value, &["provider", provider_id, "options", "baseURL"]).is_some()
+                && json_string_lookup(value, &["provider", provider_id, "options", "apiKey"])
+                    .is_some()
+        })
+}
+
+fn opencode_model_from_ref(value: Option<&str>, provider_id: &str) -> Option<String> {
+    let value = value?.trim();
+    let prefix = format!("{provider_id}/");
+    value
+        .strip_prefix(&prefix)
+        .and_then(native_optional_model)
+        .or_else(|| native_optional_model(value))
+}
+
+fn detect_openclaw_native_profile(value: &serde_json::Value) -> Option<DetectedNativeProfile> {
+    let provider_id = openclaw_active_provider_id(value)?;
+    if provider_id == "codestudio-local" {
+        return None;
+    }
+    let base_url = json_string_lookup(value, &["models", "providers", &provider_id, "baseUrl"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())?;
+    let api_key = json_string_lookup(value, &["models", "providers", &provider_id, "apiKey"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| !looks_like_local_gateway_token(item))?;
+    let provider = json_string_lookup(value, &["models", "providers", &provider_id, "name"])
+        .unwrap_or_else(|| provider_id.clone());
+
+    Some(DetectedNativeProfile {
+        app: "openclaw".to_string(),
+        provider,
+        protocol: PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string(),
+        model: opencode_model_from_ref(
+            json_string_lookup(value, &["agents", "defaults", "model", "primary"]).as_deref(),
+            &provider_id,
+        )
+        .unwrap_or_default(),
+        base_url,
+        api_key,
+    })
+}
+
+fn openclaw_active_provider_id(value: &serde_json::Value) -> Option<String> {
+    if let Some(model) = json_string_lookup(value, &["agents", "defaults", "model", "primary"]) {
+        if let Some((provider, _)) = model.split_once('/') {
+            if !provider.trim().is_empty() {
+                return Some(provider.trim().to_string());
+            }
+        }
+    }
+    json_object_keys(value, &["models", "providers"])
+        .into_iter()
+        .find(|provider_id| {
+            json_string_lookup(value, &["models", "providers", provider_id, "baseUrl"]).is_some()
+                && json_string_lookup(value, &["models", "providers", provider_id, "apiKey"])
+                    .is_some()
+        })
+}
+
+fn detect_hermes_native_profile(value: &serde_norway::Value) -> Option<DetectedNativeProfile> {
+    if yaml_string_lookup(value, &["model", "provider"]).as_deref() != Some("custom") {
+        return None;
+    }
+    let base_url = yaml_string_lookup(value, &["model", "base_url"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())?;
+    let api_key = yaml_string_lookup(value, &["model", "api_key"])
+        .map(|value| value.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| !looks_like_local_gateway_token(item))?;
+    if yaml_string_lookup(value, &["model", "api_mode"])
+        .as_deref()
+        .map(|mode| mode != "chat_completions")
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    Some(DetectedNativeProfile {
+        app: "hermes".to_string(),
+        provider: provider_slug_from_base_url(&base_url).unwrap_or_else(|| "openai".to_string()),
+        protocol: PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string(),
+        model: yaml_string_lookup(value, &["model", "default"])
+            .and_then(|model| native_optional_model(&model))
+            .unwrap_or_default(),
+        base_url,
+        api_key,
+    })
+}
+
+fn claude_desktop_is_official(paths: &ClaudeDesktopPaths) -> bool {
+    let normal_mode = read_json_string_from_file(&paths.normal_config_path, &["deploymentMode"]);
+    let threep_mode = read_json_string_from_file(&paths.threep_config_path, &["deploymentMode"]);
+    let applied_id = read_json_string_from_file(&paths.meta_path, &["appliedId"]);
+    let profile_exists = paths.profile_path.exists();
+
+    normal_mode.as_deref().unwrap_or("1p") == "1p"
+        && threep_mode.as_deref().unwrap_or("1p") == "1p"
+        && applied_id.as_deref() != Some(CLAUDE_DESKTOP_PROFILE_ID)
+        && !profile_exists
+}
+
+fn read_json_string_from_file(path: &Path, keys: &[&str]) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| parse_json5_or_empty(&content, "native config").ok())
+        .and_then(|value| json_string_lookup(&value, keys))
+}
+
+fn codex_direct_config_matches_profile(
+    value: &toml::Value,
+    auth: Option<&serde_json::Value>,
+    profile: &ProfileDraft,
+) -> bool {
     if !is_codex_family_app(&profile.app) || profile.mode != ProviderApplyMode::Config {
         return false;
     }
@@ -1899,7 +2823,9 @@ fn codex_direct_config_matches_profile(value: &toml::Value, profile: &ProfileDra
         return codex_official_config_matches_profile(value, profile);
     }
 
-    let provider_id = codex_provider_id_for_profile(profile);
+    let Some(provider_id) = codex_active_provider_id_for_profile(value, profile) else {
+        return false;
+    };
     let model = if profile.model.trim().is_empty() {
         "codestudio-default"
     } else {
@@ -1908,13 +2834,25 @@ fn codex_direct_config_matches_profile(value: &toml::Value, profile: &ProfileDra
     let Ok(wire_api) = codex_wire_api_for_protocol(&profile.protocol) else {
         return false;
     };
-    let token_matches = toml_lookup(
+    let config_token_matches = toml_lookup(
         value,
         &format!("model_providers.{provider_id}.experimental_bearer_token"),
     )
     .and_then(|item| item.as_str())
     .map(|token| profile_api_key_matches_config(profile, token))
     .unwrap_or(false);
+    let requires_openai_auth = toml_lookup(
+        value,
+        &format!("model_providers.{provider_id}.requires_openai_auth"),
+    )
+    .and_then(|item| item.as_bool())
+        == Some(true);
+    let auth_token_matches = auth
+        .filter(|_| requires_openai_auth)
+        .and_then(codex_auth_api_key_from_value)
+        .map(|token| profile_api_key_matches_config(profile, &token))
+        .unwrap_or(false);
+    let token_matches = config_token_matches || auth_token_matches;
 
     read_toml_string(value, "model_provider").as_deref() == Some(provider_id.as_str())
         && read_toml_string(value, "model").as_deref() == Some(model)
@@ -1929,7 +2867,7 @@ fn codex_direct_config_matches_profile(value: &toml::Value, profile: &ProfileDra
             &format!("model_providers.{provider_id}.requires_openai_auth"),
         )
         .and_then(|item| item.as_bool())
-            == Some(false)
+        .is_some()
         && token_matches
 }
 
@@ -1937,11 +2875,22 @@ fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileD
     let Ok(wire_api) = codex_wire_api_for_protocol(&profile.protocol) else {
         return false;
     };
+    let provider_matches = match read_toml_string(value, "model_provider") {
+        Some(provider) => provider == "openai",
+        None => true,
+    };
     let model_matches = if profile.model.trim().is_empty() {
-        read_toml_string(value, "model").is_none()
+        true
     } else {
         read_toml_string(value, "model").as_deref() == Some(profile.model.trim())
     };
+    let wire_api_matches = toml_lookup(value, "model_providers.openai.wire_api")
+        .and_then(|item| item.as_str())
+        .map(|configured| configured == wire_api)
+        .unwrap_or(true);
+    let auth_matches = toml_lookup(value, "model_providers.openai.requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(true);
     let token_is_absent = toml_lookup(value, "model_providers.openai.experimental_bearer_token")
         .and_then(|item| item.as_str())
         .map(|token| token.trim().is_empty())
@@ -1951,21 +2900,61 @@ fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileD
         .map(|base_url| base_url.trim().is_empty())
         .unwrap_or(true);
 
-    read_toml_string(value, "model_provider").as_deref() == Some("openai")
+    provider_matches
         && model_matches
-        && toml_lookup(value, "model_providers.openai.wire_api").and_then(|item| item.as_str())
-            == Some(wire_api)
-        && toml_lookup(value, "model_providers.openai.requires_openai_auth")
-            .and_then(|item| item.as_bool())
-            == Some(true)
+        && wire_api_matches
+        && auth_matches
         && token_is_absent
         && base_url_is_absent
 }
 
+fn codex_active_provider_id_for_profile(
+    value: &toml::Value,
+    profile: &ProfileDraft,
+) -> Option<String> {
+    let active_provider = read_toml_string(value, "model_provider")?;
+    let managed_provider = codex_provider_id_for_profile(profile);
+    if active_provider == managed_provider {
+        return Some(active_provider);
+    }
+
+    let base_url_matches = toml_lookup(
+        value,
+        &format!("model_providers.{active_provider}.base_url"),
+    )
+    .and_then(|item| item.as_str())
+    .map(str::trim)
+        == Some(profile.base_url.trim());
+    let wire_api_matches = codex_wire_api_for_protocol(&profile.protocol)
+        .ok()
+        .and_then(|wire_api| {
+            toml_lookup(
+                value,
+                &format!("model_providers.{active_provider}.wire_api"),
+            )
+            .and_then(|item| item.as_str())
+            .map(|configured| configured == wire_api)
+        })
+        .unwrap_or(false);
+
+    if base_url_matches && wire_api_matches {
+        Some(active_provider)
+    } else {
+        None
+    }
+}
+
 fn claude_config_matches_profile(value: &serde_json::Value, profile: &ProfileDraft) -> bool {
+    if provider_is_official(&profile.provider) {
+        return canonical_profile_app(&profile.app) == "claude"
+            && profile.mode == ProviderApplyMode::Config
+            && normalize_protocol(Some(&profile.protocol)).as_deref()
+                == Ok(PROTOCOL_ANTHROPIC_MESSAGES)
+            && !claude_settings_have_managed_endpoint(value);
+    }
+
     if canonical_profile_app(&profile.app) != "claude"
         || profile.mode != ProviderApplyMode::Config
-        || provider_is_official(&profile.provider)
         || normalize_protocol(Some(&profile.protocol)).as_deref() != Ok(PROTOCOL_ANTHROPIC_MESSAGES)
     {
         return false;
@@ -1997,9 +2986,16 @@ fn claude_vscode_plugin_config_matches(value: &serde_json::Value) -> bool {
 }
 
 fn gemini_env_matches_profile(env: &HashMap<String, String>, profile: &ProfileDraft) -> bool {
+    if provider_is_official(&profile.provider) {
+        return canonical_profile_app(&profile.app) == "gemini"
+            && profile.mode == ProviderApplyMode::Config
+            && normalize_protocol(Some(&profile.protocol)).as_deref()
+                == Ok(PROTOCOL_GOOGLE_GEMINI)
+            && !gemini_env_has_managed_endpoint(env);
+    }
+
     if canonical_profile_app(&profile.app) != "gemini"
         || profile.mode != ProviderApplyMode::Config
-        || provider_is_official(&profile.provider)
         || normalize_protocol(Some(&profile.protocol)).as_deref() != Ok(PROTOCOL_GOOGLE_GEMINI)
     {
         return false;
@@ -2023,9 +3019,16 @@ fn gemini_code_assist_settings_match_profile(
     value: &serde_json::Value,
     profile: &ProfileDraft,
 ) -> bool {
+    if provider_is_official(&profile.provider) {
+        return canonical_profile_app(&profile.app) == "gemini-code-assist"
+            && profile.mode == ProviderApplyMode::Config
+            && normalize_protocol(Some(&profile.protocol)).as_deref()
+                == Ok(PROTOCOL_GOOGLE_GEMINI)
+            && !gemini_code_assist_settings_have_managed_endpoint(value);
+    }
+
     if canonical_profile_app(&profile.app) != "gemini-code-assist"
         || profile.mode != ProviderApplyMode::Config
-        || provider_is_official(&profile.provider)
         || normalize_protocol(Some(&profile.protocol)).as_deref() != Ok(PROTOCOL_GOOGLE_GEMINI)
     {
         return false;
@@ -2037,9 +3040,18 @@ fn gemini_code_assist_settings_match_profile(
 }
 
 fn opencode_config_matches_profile(value: &serde_json::Value, profile: &ProfileDraft) -> bool {
+    if provider_is_official(&profile.provider) {
+        return canonical_profile_app(&profile.app) == "opencode"
+            && profile.mode == ProviderApplyMode::Config
+            && matches!(
+                normalize_protocol(Some(&profile.protocol)).as_deref(),
+                Ok(PROTOCOL_OPENAI_CHAT_COMPLETIONS) | Ok(PROTOCOL_OPENAI_RESPONSES)
+            )
+            && !opencode_config_has_managed_provider(value);
+    }
+
     if canonical_profile_app(&profile.app) != "opencode"
         || profile.mode != ProviderApplyMode::Config
-        || provider_is_official(&profile.provider)
         || !matches!(
             normalize_protocol(Some(&profile.protocol)).as_deref(),
             Ok(PROTOCOL_OPENAI_CHAT_COMPLETIONS) | Ok(PROTOCOL_OPENAI_RESPONSES)
@@ -2065,9 +3077,16 @@ fn opencode_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
 }
 
 fn openclaw_config_matches_profile(value: &serde_json::Value, profile: &ProfileDraft) -> bool {
+    if provider_is_official(&profile.provider) {
+        return canonical_profile_app(&profile.app) == "openclaw"
+            && profile.mode == ProviderApplyMode::Config
+            && normalize_protocol(Some(&profile.protocol)).as_deref()
+                == Ok(PROTOCOL_OPENAI_CHAT_COMPLETIONS)
+            && !openclaw_config_has_managed_provider(value);
+    }
+
     if canonical_profile_app(&profile.app) != "openclaw"
         || profile.mode != ProviderApplyMode::Config
-        || provider_is_official(&profile.provider)
         || normalize_protocol(Some(&profile.protocol)).as_deref()
             != Ok(PROTOCOL_OPENAI_CHAT_COMPLETIONS)
     {
@@ -2094,9 +3113,16 @@ fn openclaw_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
 }
 
 fn hermes_config_matches_profile(value: &serde_norway::Value, profile: &ProfileDraft) -> bool {
+    if provider_is_official(&profile.provider) {
+        return canonical_profile_app(&profile.app) == "hermes"
+            && profile.mode == ProviderApplyMode::Config
+            && normalize_protocol(Some(&profile.protocol)).as_deref()
+                == Ok(PROTOCOL_OPENAI_CHAT_COMPLETIONS)
+            && !hermes_config_has_managed_endpoint(value);
+    }
+
     if canonical_profile_app(&profile.app) != "hermes"
         || profile.mode != ProviderApplyMode::Config
-        || provider_is_official(&profile.provider)
         || normalize_protocol(Some(&profile.protocol)).as_deref()
             != Ok(PROTOCOL_OPENAI_CHAT_COMPLETIONS)
     {
@@ -2119,6 +3145,36 @@ fn hermes_config_matches_profile(value: &serde_norway::Value, profile: &ProfileD
         && model_matches
 }
 
+fn claude_settings_have_managed_endpoint(value: &serde_json::Value) -> bool {
+    json_string_lookup(value, &["env", "ANTHROPIC_BASE_URL"]).is_some()
+        || json_string_lookup(value, &["env", "ANTHROPIC_AUTH_TOKEN"]).is_some()
+}
+
+fn gemini_env_has_managed_endpoint(env: &HashMap<String, String>) -> bool {
+    env.get("GOOGLE_GEMINI_BASE_URL").is_some() || env.get("GEMINI_API_KEY").is_some()
+}
+
+fn gemini_code_assist_settings_have_managed_endpoint(value: &serde_json::Value) -> bool {
+    json_string_lookup(value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING]).is_some()
+}
+
+fn opencode_config_has_managed_provider(value: &serde_json::Value) -> bool {
+    json_object_keys(value, &["provider"])
+        .into_iter()
+        .any(|key| key.starts_with("codestudio-"))
+}
+
+fn openclaw_config_has_managed_provider(value: &serde_json::Value) -> bool {
+    json_object_keys(value, &["models", "providers"])
+        .into_iter()
+        .any(|key| key.starts_with("codestudio-"))
+}
+
+fn hermes_config_has_managed_endpoint(value: &serde_norway::Value) -> bool {
+    yaml_string_lookup(value, &["model", "base_url"]).is_some()
+        || yaml_string_lookup(value, &["model", "api_key"]).is_some()
+}
+
 fn profile_api_key_matches_config(profile: &ProfileDraft, token: &str) -> bool {
     let Some(auth_ref) = profile.auth_ref.as_deref() else {
         return false;
@@ -2134,11 +3190,10 @@ pub fn test_profile_connection(
     ensure_app_dirs()?;
 
     let app = canonical_profile_app(&normalize_token("Tool", &request.app)?);
-    let provider = normalize_token("Provider", &request.provider)?;
+    let provider = normalize_provider_token(&request.provider)?;
     let protocol = normalize_protocol(request.protocol.as_deref())?;
     let model = request.model.trim().to_string();
     let base_url = validate_base_url_for_provider(&provider, &request.base_url)?;
-    let timeout_seconds = normalize_timeout(request.timeout_seconds)?;
     let snapshot = detector::detect_environment()?;
     let mut checks = Vec::new();
 
@@ -2248,9 +3303,7 @@ pub fn test_profile_connection(
         id: "network".to_string(),
         label: "Provider ping".to_string(),
         status: Severity::Info,
-        detail: format!(
-            "Network provider checks are not sent yet. Timeout is set to {timeout_seconds}s."
-        ),
+        detail: "Network provider checks are not sent yet.".to_string(),
     });
 
     let status = aggregate_check_status(&checks);
@@ -2285,13 +3338,7 @@ pub fn switch_active_profile(
         );
     }
 
-    let paths = app_paths().map_err(|err| err.to_string())?;
     let mut config = read_app_config()?;
-    backup::backup_files(
-        "switch-profile",
-        Some(&profile.id),
-        &[paths.config_file.clone()],
-    )?;
     activate_profile_for_tool(&mut config, profile, &profiles);
     write_app_config(&config)?;
     activity_log::append(
@@ -2315,6 +3362,35 @@ fn clean_active_profiles(config: &mut AppConfig, drafts: &[ProfileDraft]) -> boo
         ProviderApplyMode::Gateway,
         drafts,
     )
+}
+
+fn replace_deleted_active_profile_with_official(
+    config: &mut AppConfig,
+    app: &str,
+    profile_id: &str,
+) -> bool {
+    let canonical_app = canonical_profile_app(app);
+    let mut changed = false;
+
+    let config_active = &mut config.active_profiles_by_mode.config;
+    let config_keys = config_active.keys().cloned().collect::<Vec<_>>();
+    for key in config_keys {
+        if config_active.get(&key).map(String::as_str) == Some(profile_id) {
+            config_active.remove(&key);
+            config_active.insert(
+                canonical_profile_app(&key),
+                builtin_official_profile_id(&canonical_app),
+            );
+            changed = true;
+        }
+    }
+
+    let gateway_active = &mut config.active_profiles_by_mode.gateway;
+    let before = gateway_active.len();
+    gateway_active.retain(|_, active_profile_id| active_profile_id != profile_id);
+    changed |= gateway_active.len() != before;
+
+    changed
 }
 
 fn clean_active_profile_map(
@@ -2401,32 +3477,35 @@ fn default_active_profile_id(
     })
 }
 
-fn remove_legacy_default_profile(paths: &crate::core::app_paths::AppPaths) -> Result<(), String> {
-    let sample_profile = paths.profiles_dir.join("codex-openai.toml");
-    if !sample_profile.exists() {
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&sample_profile).map_err(|err| err.to_string())?;
-    if content.contains("id = \"codex-openai\"")
-        && content.contains("name = \"OpenAI GPT Gateway\"")
-    {
-        fs::remove_file(&sample_profile).map_err(|err| err.to_string())?;
-    }
-
-    Ok(())
-}
-
 fn read_app_config() -> Result<AppConfig, String> {
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let content = fs::read_to_string(paths.config_file).map_err(|err| err.to_string())?;
-    toml::from_str(&content).map_err(|err| err.to_string())
+    let stored = storage::load_app_config()?;
+    Ok(AppConfig {
+        active_profiles_by_mode: stored.active_profiles_by_mode,
+        ui: UiConfig {
+            theme: stored.theme,
+            language: stored.language,
+        },
+        security: SecurityConfig {
+            backup_before_write: stored.backup_before_write,
+            redact_secrets: stored.redact_secrets,
+            confirm_install_commands: stored.confirm_install_commands,
+            confirm_config_writes: stored.confirm_config_writes,
+            preserve_codex_official_auth: stored.preserve_codex_official_auth,
+        },
+    })
 }
 
 fn write_app_config(config: &AppConfig) -> Result<(), String> {
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let updated_config = toml::to_string_pretty(config).map_err(|err| err.to_string())?;
-    write_atomic(&paths.config_file, updated_config.as_bytes())
+    storage::save_app_config(&storage::StoredAppConfig {
+        active_profiles_by_mode: config.active_profiles_by_mode.clone(),
+        theme: config.ui.theme.clone(),
+        language: config.ui.language.clone(),
+        backup_before_write: config.security.backup_before_write,
+        redact_secrets: config.security.redact_secrets,
+        confirm_install_commands: config.security.confirm_install_commands,
+        confirm_config_writes: config.security.confirm_config_writes,
+        preserve_codex_official_auth: config.security.preserve_codex_official_auth,
+    })
 }
 
 fn settings_from_config(config: &AppConfig) -> AppSettings {
@@ -2480,6 +3559,92 @@ fn detect_codex_auth_status() -> Result<CodexAuthStatus, String> {
         path: Some(display_path(&auth_path)),
         detail: "No Codex auth.json login cache was found.".to_string(),
     })
+}
+
+fn read_codex_auth_json(
+    paths: &crate::core::app_paths::AppPaths,
+) -> Result<serde_json::Value, String> {
+    let auth_path = paths.home_dir.join(".codex").join("auth.json");
+    let content = fs::read_to_string(&auth_path).map_err(|err| {
+        format!(
+            "Codex auth.json could not be read at {}: {err}",
+            display_path(&auth_path)
+        )
+    })?;
+    serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|err| format!("Codex auth.json is not valid JSON: {err}"))
+}
+
+fn codex_auth_json_path(paths: &crate::core::app_paths::AppPaths) -> PathBuf {
+    paths.home_dir.join(".codex").join("auth.json")
+}
+
+fn is_custom_codex_oauth_profile(profile: &ProfileDraft) -> bool {
+    !profile.is_builtin
+        && is_codex_family_app(&profile.app)
+        && provider_is_official(&profile.provider)
+        && profile.mode == ProviderApplyMode::Config
+}
+
+fn capture_codex_oauth_profile_if_needed(profile: &ProfileDraft) -> Result<(), String> {
+    if !is_custom_codex_oauth_profile(profile) {
+        return Ok(());
+    }
+    let paths = app_paths().map_err(|err| err.to_string())?;
+    let source_path = codex_auth_json_path(&paths);
+    let content = fs::read_to_string(&source_path).map_err(|err| {
+        format!(
+            "Codex OAuth auth.json could not be read at {}: {err}",
+            display_path(&source_path)
+        )
+    })?;
+    let status = codex_auth_status_from_file_content(&source_path, "file", &content);
+    if !matches!(
+        status.method,
+        CodexAuthMethod::ChatGpt | CodexAuthMethod::AccessToken
+    ) {
+        return Err(
+            "Codex OAuth authorization is required before saving this profile.".to_string(),
+        );
+    }
+    storage::save_codex_oauth_profile(&profile.id, &content)?;
+    Ok(())
+}
+
+fn clone_codex_oauth_profile_if_needed(
+    source: &ProfileDraft,
+    target: &ProfileDraft,
+) -> Result<(), String> {
+    if !is_custom_codex_oauth_profile(source) || !is_custom_codex_oauth_profile(target) {
+        return Ok(());
+    }
+    storage::copy_codex_oauth_profile(&source.id, &target.id)?;
+    Ok(())
+}
+
+fn delete_codex_oauth_profile_cache_if_needed(profile: &ProfileDraft) -> Result<(), String> {
+    if !is_custom_codex_oauth_profile(profile) {
+        return Ok(());
+    }
+    storage::delete_codex_oauth_profile(&profile.id)
+}
+
+fn load_codex_oauth_profile_content(profile: &ProfileDraft) -> Result<String, String> {
+    storage::load_codex_oauth_profile(&profile.id)?.ok_or_else(|| {
+        format!(
+            "Stored Codex OAuth profile could not be found for '{}'.",
+            profile.name
+        )
+    })
+}
+
+fn verify_codex_auth_json_write(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
+    if !is_custom_codex_oauth_profile(profile) {
+        return Ok(true);
+    }
+    let expected = load_codex_oauth_profile_content(profile)?;
+    let actual = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    Ok(actual == expected)
 }
 
 fn codex_auth_status_from_file(auth_path: &Path, configured_store: &str) -> CodexAuthStatus {
@@ -2579,7 +3744,10 @@ fn infer_codex_auth_method(value: &serde_json::Value) -> CodexAuthMethod {
         return CodexAuthMethod::AccessToken;
     }
 
-    if keys.iter().any(|key| key.contains("api_key") || key.contains("apikey")) {
+    if keys
+        .iter()
+        .any(|key| key.contains("api_key") || key.contains("apikey"))
+    {
         return CodexAuthMethod::ApiKey;
     }
 
@@ -2588,6 +3756,19 @@ fn infer_codex_auth_method(value: &serde_json::Value) -> CodexAuthMethod {
     } else {
         CodexAuthMethod::Unknown
     }
+}
+
+fn codex_auth_api_key_from_value(value: &serde_json::Value) -> Option<String> {
+    ["OPENAI_API_KEY", "openai_api_key", "api_key"]
+        .into_iter()
+        .find_map(|key| {
+            value
+                .get(key)
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+        })
 }
 
 fn collect_json_key_paths(value: &serde_json::Value, prefix: String, keys: &mut Vec<String>) {
@@ -2627,135 +3808,78 @@ fn normalize_language(value: &str) -> Result<String, String> {
     }
 }
 
-fn parse_profile_import_content(content: &str) -> Result<Vec<ProfileDraft>, String> {
-    let value: serde_json::Value = serde_json::from_str(content)
-        .map_err(|err| format!("Import file is not valid JSON: {err}"))?;
-    let profiles_value = if value.is_array() {
-        value
-    } else if let Some(profiles) = value.get("profiles") {
-        profiles.clone()
-    } else if let Some(profiles) = value.get("drafts") {
-        profiles.clone()
-    } else if let Some(profiles) = value
-        .get("bundle")
-        .and_then(|bundle| bundle.get("profiles"))
-    {
-        profiles.clone()
-    } else {
-        return Err("Import file must contain a profiles array.".to_string());
-    };
-
-    if !profiles_value.is_array() {
-        return Err("Import file field 'profiles' must be an array.".to_string());
-    }
-
-    serde_json::from_value::<Vec<ProfileDraft>>(profiles_value)
-        .map_err(|err| format!("Profiles array could not be parsed: {err}"))
-}
-
-fn normalize_import_profile(profile: &ProfileDraft, now: &str) -> Result<ProfileDraft, String> {
-    if profile.is_builtin {
-        return Err("Built-in official profiles cannot be imported.".to_string());
-    }
-    let name = normalize_required("Profile Name", &profile.name)?;
-    let app = canonical_profile_app(&normalize_token("Client", &profile.app)?);
-    let provider = normalize_token("Provider", &profile.provider)?;
-    if provider_is_official(&provider) {
-        return Err("Official profiles are built in and cannot be imported.".to_string());
-    }
-    let mode = normalize_profile_mode(&provider, Some(&profile.mode))?;
-    let protocol = normalize_protocol(Some(&profile.protocol))?;
-    ensure_profile_protocol_supported_for_mode(&app, mode, &provider, &protocol)?;
-    let model = profile.model.trim().to_string();
-    let base_url = validate_base_url_for_provider(&provider, &profile.base_url)?;
-    let timeout_seconds = normalize_timeout(Some(profile.timeout_seconds))?;
-    let preferred_id = slugify(&profile.id);
-    let fallback_id = slugify(&name);
-    if is_builtin_profile_id(&preferred_id) || is_builtin_profile_id(&fallback_id) {
-        return Err("Built-in official profile IDs are reserved.".to_string());
-    }
-    let id = unique_profile_id(if preferred_id.is_empty() {
-        &fallback_id
-    } else {
-        &preferred_id
-    })?;
-    let created_at = profile
-        .created_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(now)
-        .to_string();
-
-    Ok(ProfileDraft {
-        id,
-        name,
-        app,
-        is_builtin: false,
-        mode,
-        provider,
-        protocol,
-        model,
-        base_url,
-        auth_ref: None,
-        timeout_seconds,
-        created_at: Some(created_at),
-        updated_at: Some(now.to_string()),
-        last_test_status: Some("pending".to_string()),
-    })
-}
-
 fn load_profiles() -> Result<Vec<ProfileDraft>, String> {
-    let paths = app_paths().map_err(|err| err.to_string())?;
     let mut profiles = builtin_official_profiles();
-
-    for entry in fs::read_dir(paths.profiles_dir).map_err(|err| err.to_string())? {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+    let usage_enabled_profile_ids = storage::load_usage_enabled_profile_ids()?;
+    for mut profile in storage::load_profiles()? {
+        let app = canonical_profile_app(&profile.app);
+        if is_builtin_profile_id(&profile.id) {
             continue;
         }
-
-        let content = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-        let value: toml::Value = toml::from_str(&content).map_err(|err| err.to_string())?;
-        let app = read_toml_string(&value, "app").unwrap_or_else(|| "unknown".to_string());
-        let provider =
-            read_toml_string(&value, "provider").unwrap_or_else(|| "unknown".to_string());
-        let id = read_toml_string(&value, "id").unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("profile")
-                .to_string()
-        });
-        if provider_is_official(&provider) || is_builtin_profile_id(&id) {
+        let mode = normalize_stored_profile_mode(
+            &profile.provider,
+            Some(provider_apply_mode_value(&profile.mode).to_string()),
+        );
+        if ensure_custom_official_profile_allowed(&app, &profile.provider, mode).is_err() {
             continue;
         }
-        let mode = normalize_stored_profile_mode(&provider, read_toml_string(&value, "mode"));
-        profiles.push(ProfileDraft {
-            id,
-            name: read_toml_string(&value, "name")
-                .unwrap_or_else(|| "Untitled Profile".to_string()),
-            app: canonical_profile_app(&app),
-            is_builtin: false,
-            mode,
-            provider,
-            protocol: normalize_protocol(read_toml_string(&value, "protocol").as_deref())?,
-            model: read_toml_string(&value, "model").unwrap_or_else(|| "manual".to_string()),
-            base_url: read_toml_string(&value, "base_url").unwrap_or_default(),
-            auth_ref: read_toml_string_nested(&value, "auth", "api_key")
-                .or_else(|| read_toml_string_nested(&value, "env", "OPENAI_API_KEY"))
-                .and_then(normalize_auth_ref),
-            timeout_seconds: read_toml_u16(&value, "timeout_seconds")
-                .or_else(|| read_toml_u16_nested(&value, "limits", "timeout_seconds"))
-                .unwrap_or(120),
-            created_at: read_toml_string_nested(&value, "metadata", "created_at"),
-            updated_at: read_toml_string_nested(&value, "metadata", "updated_at"),
-            last_test_status: read_toml_string_nested(&value, "metadata", "last_test_status"),
-        });
+        profile.app = app;
+        profile.is_builtin = false;
+        profile.mode = mode;
+        profile.protocol = normalize_protocol(Some(profile.protocol.as_str()))?;
+        profile.usage_enabled = usage_enabled_profile_ids.contains(&profile.id);
+        profiles.push(profile);
     }
 
+    apply_stored_profile_order(&mut profiles)?;
     profiles.sort_by(compare_profiles);
     Ok(profiles)
+}
+
+fn apply_stored_profile_order(profiles: &mut [ProfileDraft]) -> Result<(), String> {
+    let groups = profiles
+        .iter()
+        .map(|profile| (canonical_profile_app(&profile.app), profile.mode))
+        .collect::<HashSet<_>>();
+    for (app, mode) in groups {
+        let order = storage::load_profile_order(&app, &mode)?;
+        if order.is_empty() {
+            continue;
+        }
+        let order_by_id = order
+            .iter()
+            .enumerate()
+            .map(|(index, profile_id)| (profile_id.as_str(), index as i64))
+            .collect::<HashMap<_, _>>();
+        let mut next_unordered_index = order.len() as i64;
+        let mut group_indexes = profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| {
+                canonical_profile_app(&profile.app) == app && profile.mode == mode
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        group_indexes.sort_by(|left, right| compare_profiles(&profiles[*left], &profiles[*right]));
+        for (index, profile_id) in order.iter().enumerate() {
+            if let Some(profile) = profiles.iter_mut().find(|profile| {
+                profile.id == *profile_id
+                    && canonical_profile_app(&profile.app) == app
+                    && profile.mode == mode
+            }) {
+                profile.sort_order = index as i64;
+            }
+        }
+        for profile_index in group_indexes {
+            let profile = &mut profiles[profile_index];
+            if order_by_id.contains_key(profile.id.as_str()) {
+                continue;
+            }
+            profile.sort_order = next_unordered_index;
+            next_unordered_index += 1;
+        }
+    }
+    Ok(())
 }
 
 fn builtin_official_profiles() -> Vec<ProfileDraft> {
@@ -2764,6 +3888,8 @@ fn builtin_official_profiles() -> Vec<ProfileDraft> {
         .map(|(app, name, protocol)| ProfileDraft {
             id: builtin_official_profile_id(app),
             name: (*name).to_string(),
+            icon: Some(default_builtin_profile_icon(app).to_string()),
+            remark: None,
             app: (*app).to_string(),
             is_builtin: true,
             mode: ProviderApplyMode::Config,
@@ -2772,16 +3898,31 @@ fn builtin_official_profiles() -> Vec<ProfileDraft> {
             model: String::new(),
             base_url: String::new(),
             auth_ref: None,
-            timeout_seconds: 120,
             created_at: None,
             updated_at: None,
             last_test_status: Some("builtin".to_string()),
+            usage_enabled: false,
+            sort_order: 0,
         })
         .collect()
 }
 
 fn builtin_official_profile_id(app: &str) -> String {
     format!("{BUILTIN_OFFICIAL_ID_PREFIX}{}", canonical_profile_app(app))
+}
+
+fn default_builtin_profile_icon(app: &str) -> &'static str {
+    match canonical_profile_app(app).as_str() {
+        "codex" => "C",
+        "claude-desktop" => "CD",
+        "claude" => "CC",
+        "gemini" => "G",
+        "gemini-code-assist" => "GA",
+        "opencode" => "OC",
+        "openclaw" => "O",
+        "hermes" => "H",
+        _ => "?",
+    }
 }
 
 fn is_builtin_profile_id(id: &str) -> bool {
@@ -2791,11 +3932,14 @@ fn is_builtin_profile_id(id: &str) -> bool {
 fn compare_profiles(left: &ProfileDraft, right: &ProfileDraft) -> std::cmp::Ordering {
     left.app
         .cmp(&right.app)
-        .then_with(|| right.is_builtin.cmp(&left.is_builtin))
+        .then_with(|| {
+            provider_apply_mode_value(&left.mode).cmp(provider_apply_mode_value(&right.mode))
+        })
+        .then_with(|| left.sort_order.cmp(&right.sort_order))
         .then_with(|| left.name.cmp(&right.name))
 }
 
-fn load_profile_by_id(profile_id: &str) -> Result<ProfileDraft, String> {
+pub(crate) fn load_profile_by_id(profile_id: &str) -> Result<ProfileDraft, String> {
     load_profiles()?
         .into_iter()
         .find(|profile| profile.id == profile_id)
@@ -2809,36 +3953,12 @@ fn read_toml_string(value: &toml::Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn read_toml_string_nested(value: &toml::Value, table: &str, key: &str) -> Option<String> {
-    value
-        .get(table)
-        .and_then(|item| item.get(key))
-        .and_then(|item| item.as_str())
-        .map(ToString::to_string)
-}
-
-fn normalize_auth_ref(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed == "keychain:codestudio-lite/pending/api_key" {
-        None
-    } else {
-        Some(trimmed.to_string())
+fn parse_toml_or_empty(current: &str, label: &str) -> Result<toml::Value, String> {
+    if current.trim().is_empty() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
     }
-}
-
-fn read_toml_u16(value: &toml::Value, key: &str) -> Option<u16> {
-    value
-        .get(key)
-        .and_then(|item| item.as_integer())
-        .and_then(|item| u16::try_from(item).ok())
-}
-
-fn read_toml_u16_nested(value: &toml::Value, table: &str, key: &str) -> Option<u16> {
-    value
-        .get(table)
-        .and_then(|item| item.get(key))
-        .and_then(|item| item.as_integer())
-        .and_then(|item| u16::try_from(item).ok())
+    toml::from_str::<toml::Value>(current)
+        .map_err(|err| format!("Existing {label} could not be parsed: {err}"))
 }
 
 fn normalize_required(label: &str, value: &str) -> Result<String, String> {
@@ -2848,6 +3968,26 @@ fn normalize_required(label: &str, value: &str) -> Result<String, String> {
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+fn normalize_profile_icon(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.starts_with("data:image/") {
+        if trimmed.len() > 512 * 1024 {
+            return Err("Profile icon image is too large.".to_string());
+        }
+        return Ok(Some(trimmed.to_string()));
+    }
+    if trimmed.chars().count() > 4 {
+        return Err("Profile icon text cannot be longer than 4 characters.".to_string());
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn normalize_token(label: &str, value: &str) -> Result<String, String> {
@@ -2861,6 +4001,18 @@ fn normalize_token(label: &str, value: &str) -> Result<String, String> {
         Err(format!(
             "{label} can only contain letters, numbers, '-' and '_'"
         ))
+    }
+}
+
+fn normalize_provider_token(value: &str) -> Result<String, String> {
+    let trimmed = normalize_required("Provider", value)?;
+    if trimmed
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        Ok(trimmed)
+    } else {
+        Err("Provider can only contain letters, numbers, '-', '_' and '.'".to_string())
     }
 }
 
@@ -2929,15 +4081,6 @@ fn codex_wire_api_for_protocol(protocol: &str) -> Result<&'static str, String> {
     }
 }
 
-fn normalize_timeout(value: Option<u16>) -> Result<u16, String> {
-    let timeout = value.unwrap_or(120);
-    if (5..=600).contains(&timeout) {
-        Ok(timeout)
-    } else {
-        Err("Timeout must be between 5 and 600 seconds.".to_string())
-    }
-}
-
 fn credential_status(provider: &str, secret_provided: bool) -> Severity {
     if provider_is_official(provider) {
         Severity::Info
@@ -2966,6 +4109,22 @@ fn provider_requires_api_key(provider: &str) -> bool {
     !provider_is_official(provider)
 }
 
+fn is_custom_codex_official_profile(app: &str, provider: &str, mode: ProviderApplyMode) -> bool {
+    is_codex_family_app(app) && provider_is_official(provider) && mode == ProviderApplyMode::Config
+}
+
+fn ensure_custom_official_profile_allowed(
+    app: &str,
+    provider: &str,
+    mode: ProviderApplyMode,
+) -> Result<(), String> {
+    if !provider_is_official(provider) || is_custom_codex_official_profile(app, provider, mode) {
+        return Ok(());
+    }
+
+    Err("Only Codex OAuth profiles can be saved as custom official profiles.".to_string())
+}
+
 fn default_profile_mode(provider: &str) -> ProviderApplyMode {
     if provider_is_official(provider) {
         ProviderApplyMode::Config
@@ -2983,7 +4142,7 @@ fn normalize_profile_mode(
         .unwrap_or_else(|| default_profile_mode(provider));
     if provider_is_official(provider) && mode == ProviderApplyMode::Gateway {
         return Err(
-            "Official provider uses the client login directly and cannot use Gateway mode."
+            "Official provider uses the client login directly and cannot use Gateway profiles."
                 .to_string(),
         );
     }
@@ -3056,6 +4215,52 @@ fn aggregate_check_status(checks: &[ProfileConnectionCheck]) -> Severity {
     }
 }
 
+fn profile_sql_preview_content(
+    profile: &ProfileDraft,
+    secret_status: &str,
+    last_test_status: &str,
+) -> Result<String, String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "table": "profiles",
+        "row": {
+            "id": profile.id,
+            "name": profile.name,
+            "icon": profile_icon_preview(profile.icon.as_deref()),
+            "remark": profile.remark,
+            "app": profile.app,
+            "mode": provider_apply_mode_value(&profile.mode),
+            "provider": profile.provider,
+            "protocol": profile.protocol,
+            "model": profile.model,
+            "base_url": profile.base_url,
+            "auth_ref": profile.auth_ref,
+            "created_at": profile.created_at,
+            "updated_at": profile.updated_at,
+            "last_test_status": last_test_status,
+            "secret_status": secret_status,
+        },
+        "secrets": "API keys are stored in the system keychain and never written into SQLite."
+    }))
+    .map_err(|err| err.to_string())
+}
+
+fn profile_icon_preview(icon: Option<&str>) -> Option<String> {
+    icon.map(|value| {
+        if value.starts_with("data:image/") {
+            format!("image data url ({} bytes)", value.len())
+        } else {
+            value.to_string()
+        }
+    })
+}
+
+fn normalize_profile_remark(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn build_profile_write_plan(
     name: &str,
     app: &str,
@@ -3065,29 +4270,23 @@ fn build_profile_write_plan(
     model: &str,
     base_url: &str,
     secret_provided: bool,
-    timeout_seconds: Option<u16>,
 ) -> Result<ProfileWritePlan, String> {
     let name = normalize_required("Profile Name", name)?;
     let app = canonical_profile_app(&normalize_token("Client", app)?);
-    let provider = normalize_token("Provider", provider)?;
-    if provider_is_official(&provider) {
-        return Err(
-            "Official profiles are built in and cannot be saved as custom profiles.".to_string(),
-        );
-    }
+    let provider = normalize_provider_token(provider)?;
     let mode = normalize_profile_mode(&provider, mode)?;
+    ensure_custom_official_profile_allowed(&app, &provider, mode)?;
     let protocol = normalize_protocol(protocol)?;
     ensure_profile_protocol_supported_for_mode(&app, mode, &provider, &protocol)?;
     let model = model.trim().to_string();
     let base_url = validate_base_url_for_provider(&provider, base_url)?;
-    let timeout_seconds = normalize_timeout(timeout_seconds)?;
     if provider_requires_api_key(&provider) && !secret_provided {
         return Err("Provider API key is required for non-official providers.".to_string());
     }
     let id = unique_profile_id(&slugify(&name))?;
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let profile_path = paths.profiles_dir.join(format!("{id}.toml"));
-    let secret_status = if secret_provided {
+    let secret_status = if provider_is_official(&provider) {
+        "oauth"
+    } else if secret_provided {
         "pending_keychain"
     } else {
         "missing"
@@ -3108,8 +4307,6 @@ fn build_profile_write_plan(
         protocol,
         model,
         base_url,
-        timeout_seconds,
-        profile_path,
         secret_status,
         auth_ref,
     })
@@ -3126,103 +4323,30 @@ fn ensure_profile_tool_installed(app: &str) -> Result<(), String> {
 }
 
 fn installed_profile_tool_ids() -> Result<HashSet<String>, String> {
-    Ok(detector::detect_environment()?
-        .tools
-        .into_iter()
-        .filter(|tool| tool.install_state == InstallState::Installed)
-        .map(|tool| canonical_profile_app(&tool.id))
-        .collect())
+    // This is a fast "is the target tool installed?" guard used by profile
+    // create/duplicate. Prefer the on-disk detection cache so it does not block
+    // on a full live environment scan; fall back to a live detect only when no
+    // cache exists (first run / cache cleared).
+    let snapshot = storage::load_detection_cache()
+        .ok()
+        .flatten()
+        .or_else(|| detector::detect_environment().ok());
+    Ok(snapshot
+        .map(|snapshot| {
+            snapshot
+                .tools
+                .into_iter()
+                .filter(|tool| tool.install_state == InstallState::Installed)
+                .map(|tool| canonical_profile_app(&tool.id))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 fn profile_tool_not_installed_error(app: &str) -> String {
     format!(
         "Tool '{}' is not installed, so a profile cannot be created for it.",
         canonical_profile_app(app)
-    )
-}
-
-fn profile_toml_content(
-    profile: &ProfileDraft,
-    created_at: &str,
-    updated_at: &str,
-    last_test_status: &str,
-    secret_status: &str,
-) -> String {
-    format!(
-        r#"id = "{id}"
-name = "{name}"
-app = "{app}"
-provider = "{provider}"
-mode = "{mode}"
-protocol = "{protocol}"
-model = "{model}"
-base_url = "{base_url}"
-timeout_seconds = {timeout_seconds}
-
-[auth]
-api_key = "{auth_ref}"
-
-[metadata]
-created_at = "{created_at}"
-updated_at = "{updated_at}"
-last_test_status = "{last_test_status}"
-secret_status = "{secret_status}"
-"#,
-        id = escape_toml_string(&profile.id),
-        name = escape_toml_string(&profile.name),
-        app = escape_toml_string(&profile.app),
-        provider = escape_toml_string(&profile.provider),
-        mode = provider_apply_mode_value(&profile.mode),
-        protocol = escape_toml_string(&profile.protocol),
-        model = escape_toml_string(&profile.model),
-        base_url = escape_toml_string(&profile.base_url),
-        timeout_seconds = profile.timeout_seconds,
-        auth_ref = escape_toml_string(profile.auth_ref.as_deref().unwrap_or("")),
-        created_at = escape_toml_string(created_at),
-        updated_at = escape_toml_string(updated_at),
-        last_test_status = escape_toml_string(last_test_status),
-        secret_status = escape_toml_string(secret_status)
-    )
-}
-
-fn applied_profile_path(app: &str) -> Result<std::path::PathBuf, String> {
-    let app = canonical_profile_app(&normalize_token("Tool", app)?);
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    Ok(paths.applied_dir.join(format!("{app}-active.toml")))
-}
-
-fn applied_profile_content(profile: &ProfileDraft, mode: &ProviderApplyMode) -> String {
-    let now = Utc::now().to_rfc3339();
-    let mode_value = provider_apply_mode_value(mode);
-    let native_config_write = match mode {
-        ProviderApplyMode::Config => "direct_provider_config",
-        ProviderApplyMode::Gateway => "local_gateway_relay",
-    };
-    format!(
-        r#"profile_id = "{profile_id}"
-profile_name = "{profile_name}"
-app = "{app}"
-provider = "{provider}"
-model = "{model}"
-base_url = "{base_url}"
-protocol = "{protocol}"
-timeout_seconds = {timeout_seconds}
-apply_mode = "{mode_value}"
-native_config_write = "{native_config_write}"
-secret_policy = "never_write_plaintext"
-applied_at = "{now}"
-"#,
-        profile_id = escape_toml_string(&profile.id),
-        profile_name = escape_toml_string(&profile.name),
-        app = escape_toml_string(&profile.app),
-        provider = escape_toml_string(&profile.provider),
-        protocol = escape_toml_string(&profile.protocol),
-        model = escape_toml_string(&profile.model),
-        base_url = escape_toml_string(&profile.base_url),
-        timeout_seconds = profile.timeout_seconds,
-        mode_value = mode_value,
-        native_config_write = native_config_write,
-        now = escape_toml_string(&now)
     )
 }
 
@@ -3275,7 +4399,12 @@ fn native_config_path_for_profile_mode(
     }
 
     if provider_is_official(&profile.provider) && !is_codex_family_app(&profile.app) {
-        return Ok(None);
+        return match canonical_profile_app(&profile.app).as_str() {
+            "claude" | "gemini" | "gemini-code-assist" | "opencode" | "openclaw" | "hermes" => {
+                native_config_path_for_profile(profile, paths).map(Some)
+            }
+            _ => Ok(None),
+        };
     }
 
     native_config_path_for_profile(profile, paths).map(Some)
@@ -3432,6 +4561,24 @@ fn build_native_apply_plan(
     let content = match mode {
         ProviderApplyMode::Config => match canonical_profile_app(&profile.app).as_str() {
             "codex" => codex_direct_config_content(&current, profile)?,
+            "claude" if provider_is_official(&profile.provider) => {
+                claude_official_config_content(&current)?
+            }
+            "gemini" if provider_is_official(&profile.provider) => {
+                gemini_official_env_content(&current)
+            }
+            "gemini-code-assist" if provider_is_official(&profile.provider) => {
+                gemini_code_assist_official_settings_content(&current)?
+            }
+            "opencode" if provider_is_official(&profile.provider) => {
+                opencode_official_config_content(&current)?
+            }
+            "openclaw" if provider_is_official(&profile.provider) => {
+                openclaw_official_config_content(&current)?
+            }
+            "hermes" if provider_is_official(&profile.provider) => {
+                hermes_official_config_content(&current)?
+            }
             "claude" => claude_config_content(&current, profile)?,
             "gemini" => gemini_env_content(&current, profile)?,
             "gemini-code-assist" => gemini_code_assist_settings_content(&current, profile)?,
@@ -3440,7 +4587,7 @@ fn build_native_apply_plan(
             "hermes" => hermes_config_content(&current, profile)?,
             _ => {
                 return Err(format!(
-                    "Config file mode is not implemented for tool '{}'.",
+                    "Config profile adapter is not implemented for tool '{}'.",
                     profile.app
                 ))
             }
@@ -3454,7 +4601,7 @@ fn build_native_apply_plan(
             "hermes" => hermes_gateway_config_content(&current, profile)?,
             _ => {
                 return Err(format!(
-                    "Gateway mode adapter is not implemented for tool '{}'.",
+                    "Gateway profile adapter is not implemented for tool '{}'.",
                     profile.app
                 ))
             }
@@ -3469,6 +4616,14 @@ fn build_native_apply_plan(
             _ => NativeConfigWriteKind::ProfileConfig,
         },
     )];
+
+    if *mode == ProviderApplyMode::Config && is_custom_codex_oauth_profile(profile) {
+        plans.push(NativeConfigWritePlan::write(
+            paths.home_dir.join(".codex").join("auth.json"),
+            load_codex_oauth_profile_content(profile)?,
+            NativeConfigWriteKind::CodexAuthJson,
+        ));
+    }
 
     if *mode == ProviderApplyMode::Config
         && canonical_profile_app(&profile.app) == "claude"
@@ -3660,6 +4815,32 @@ fn apply_native_config_write_plan(plan: &NativeConfigWritePlan) -> Result<(), St
     write_native_config(&plan.path, &plan.content)
 }
 
+fn filter_native_write_plans(
+    plans: Vec<NativeConfigWritePlan>,
+) -> Result<Vec<NativeConfigWritePlan>, String> {
+    plans
+        .into_iter()
+        .filter_map(|plan| match native_write_plan_changes_file(&plan) {
+            Ok(true) => Some(Ok(plan)),
+            Ok(false) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
+}
+
+fn native_write_plan_changes_file(plan: &NativeConfigWritePlan) -> Result<bool, String> {
+    if plan.delete {
+        return Ok(plan.path.exists());
+    }
+
+    if !plan.path.exists() {
+        return Ok(true);
+    }
+
+    let current = fs::read(&plan.path).map_err(|err| err.to_string())?;
+    Ok(current != plan.content.as_bytes())
+}
+
 pub(crate) fn codex_native_config_content(current: &str, tool_id: &str) -> Result<String, String> {
     let client = gateway::client_config_for_tool(tool_id)?;
     let mut document = current
@@ -3690,7 +4871,18 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
     if provider_is_official(&profile.provider) {
         return codex_official_config_content(current, profile);
     }
+    let api_key = load_provider_api_key_for_direct_config(profile)?;
+    codex_direct_config_content_with_api_key(current, profile, &api_key)
+}
 
+fn codex_direct_config_content_with_api_key(
+    current: &str,
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
+    if provider_is_official(&profile.provider) {
+        return codex_official_config_content(current, profile);
+    }
     let mut document = current
         .parse::<toml_edit::DocumentMut>()
         .map_err(|err| format!("Existing Codex config could not be parsed: {err}"))?;
@@ -3702,7 +4894,6 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
     } else {
         profile.model.trim()
     };
-    let api_key = load_provider_api_key_for_direct_config(profile)?;
 
     document["model_provider"] = toml_edit::value(provider_id.clone());
     document["model"] = toml_edit::value(model);
@@ -3712,7 +4903,7 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
         toml_edit::value(profile.base_url.trim().to_string());
     document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(false);
     document["model_providers"][&provider_id]["experimental_bearer_token"] =
-        toml_edit::value(api_key);
+        toml_edit::value(api_key.to_string());
     if codex_official_auth_preservation_enabled() {
         repair_codex_preserved_auth_config(&mut document);
     }
@@ -3854,12 +5045,19 @@ fn claude_desktop_developer_settings_content(current: &str) -> Result<String, St
 }
 
 fn claude_desktop_direct_profile_content(profile: &ProfileDraft) -> Result<String, String> {
-    require_profile_protocol(profile, &[PROTOCOL_ANTHROPIC_MESSAGES])?;
     let api_key = load_provider_api_key_for_direct_config(profile)?;
+    claude_desktop_direct_profile_content_with_api_key(profile, &api_key)
+}
+
+fn claude_desktop_direct_profile_content_with_api_key(
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
+    require_profile_protocol(profile, &[PROTOCOL_ANTHROPIC_MESSAGES])?;
     let model_specs = claude_desktop_direct_inference_models(profile);
     let value = claude_desktop_gateway_profile_value(
         profile.base_url.trim(),
-        &api_key,
+        api_key,
         (!model_specs.is_empty()).then_some(model_specs.as_slice()),
     );
     render_json_config(value, "Claude Desktop 3P profile")
@@ -4047,16 +5245,24 @@ fn claude_desktop_meta_content(current: &str, applied: bool) -> Result<String, S
 }
 
 fn claude_config_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
+    let api_key = load_provider_api_key_for_direct_config(profile)?;
+    claude_config_content_with_api_key(current, profile, &api_key)
+}
+
+fn claude_config_content_with_api_key(
+    current: &str,
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_ANTHROPIC_MESSAGES])?;
     let mut value = parse_json5_or_empty(current, "Claude settings")?;
-    let api_key = load_provider_api_key_for_direct_config(profile)?;
 
     set_json_string_path(
         &mut value,
         &["env", "ANTHROPIC_BASE_URL"],
         profile.base_url.trim(),
     );
-    set_json_string_path(&mut value, &["env", "ANTHROPIC_AUTH_TOKEN"], &api_key);
+    set_json_string_path(&mut value, &["env", "ANTHROPIC_AUTH_TOKEN"], api_key);
     if let Some(model) = profile_model(profile) {
         set_json_string_path(&mut value, &["model"], model);
         set_json_string_path(&mut value, &["env", "ANTHROPIC_MODEL"], model);
@@ -4065,6 +5271,15 @@ fn claude_config_content(current: &str, profile: &ProfileDraft) -> Result<String
         remove_json_path(&mut value, &["env", "ANTHROPIC_MODEL"]);
     }
 
+    render_json_config(value, "Claude settings")
+}
+
+fn claude_official_config_content(current: &str) -> Result<String, String> {
+    let mut value = parse_json5_or_empty(current, "Claude settings")?;
+    remove_json_path(&mut value, &["env", "ANTHROPIC_BASE_URL"]);
+    remove_json_path(&mut value, &["env", "ANTHROPIC_AUTH_TOKEN"]);
+    remove_json_path(&mut value, &["model"]);
+    remove_json_path(&mut value, &["env", "ANTHROPIC_MODEL"]);
     render_json_config(value, "Claude settings")
 }
 
@@ -4109,10 +5324,18 @@ fn claude_vscode_plugin_config_content(current: &str) -> Result<String, String> 
 }
 
 fn gemini_env_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
-    require_profile_protocol(profile, &[PROTOCOL_GOOGLE_GEMINI])?;
     let api_key = load_provider_api_key_for_direct_config(profile)?;
+    gemini_env_content_with_api_key(current, profile, &api_key)
+}
+
+fn gemini_env_content_with_api_key(
+    current: &str,
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
+    require_profile_protocol(profile, &[PROTOCOL_GOOGLE_GEMINI])?;
     let mut updates = vec![
-        ("GEMINI_API_KEY", Some(api_key)),
+        ("GEMINI_API_KEY", Some(api_key.to_string())),
         (
             "GOOGLE_GEMINI_BASE_URL",
             Some(profile.base_url.trim().to_string()),
@@ -4124,6 +5347,17 @@ fn gemini_env_content(current: &str, profile: &ProfileDraft) -> Result<String, S
     ));
 
     Ok(update_env_content(current, &updates))
+}
+
+fn gemini_official_env_content(current: &str) -> String {
+    update_env_content(
+        current,
+        &[
+            ("GEMINI_API_KEY", None),
+            ("GOOGLE_GEMINI_BASE_URL", None),
+            ("GEMINI_MODEL", None),
+        ],
+    )
 }
 
 fn gemini_gateway_env_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
@@ -4165,22 +5399,44 @@ fn gemini_code_assist_settings_content(
     current: &str,
     profile: &ProfileDraft,
 ) -> Result<String, String> {
+    let api_key = load_provider_api_key_for_direct_config(profile)?;
+    gemini_code_assist_settings_content_with_api_key(current, profile, &api_key)
+}
+
+fn gemini_code_assist_settings_content_with_api_key(
+    current: &str,
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_GOOGLE_GEMINI])?;
     let mut value = parse_json5_or_empty(current, "VS Code user settings")?;
-    let api_key = load_provider_api_key_for_direct_config(profile)?;
 
-    set_json_string_path(&mut value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING], &api_key);
+    set_json_string_path(&mut value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING], api_key);
 
     render_json_config(value, "VS Code user settings")
 }
 
+fn gemini_code_assist_official_settings_content(current: &str) -> Result<String, String> {
+    let mut value = parse_json5_or_empty(current, "VS Code user settings")?;
+    remove_json_path(&mut value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING]);
+    render_json_config(value, "VS Code user settings")
+}
+
 fn opencode_config_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
+    let api_key = load_provider_api_key_for_direct_config(profile)?;
+    opencode_config_content_with_api_key(current, profile, &api_key)
+}
+
+fn opencode_config_content_with_api_key(
+    current: &str,
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
     require_profile_protocol(
         profile,
         &[PROTOCOL_OPENAI_CHAT_COMPLETIONS, PROTOCOL_OPENAI_RESPONSES],
     )?;
     let mut value = parse_json5_or_empty(current, "OpenCode config")?;
-    let api_key = load_provider_api_key_for_direct_config(profile)?;
     let provider_id = managed_provider_id_for_profile(profile);
     let provider_name = format!("CodeStudio {}", profile.provider);
 
@@ -4203,7 +5459,7 @@ fn opencode_config_content(current: &str, profile: &ProfileDraft) -> Result<Stri
     set_json_string_path(
         &mut value,
         &["provider", &provider_id, "options", "apiKey"],
-        &api_key,
+        api_key,
     );
 
     if let Some(model) = profile_model(profile) {
@@ -4217,6 +5473,26 @@ fn opencode_config_content(current: &str, profile: &ProfileDraft) -> Result<Stri
         remove_json_path(&mut value, &["model"]);
     }
 
+    render_json_config(value, "OpenCode config")
+}
+
+fn opencode_official_config_content(current: &str) -> Result<String, String> {
+    let mut value = parse_json5_or_empty(current, "OpenCode config")?;
+    for provider_id in json_object_keys(&value, &["provider"])
+        .into_iter()
+        .filter(|provider_id| provider_id.starts_with("codestudio-"))
+        .collect::<Vec<_>>()
+    {
+        let model_prefix = format!("{provider_id}/");
+        if json_string_lookup(&value, &["model"])
+            .as_deref()
+            .map(|model| model.starts_with(&model_prefix))
+            .unwrap_or(false)
+        {
+            remove_json_path(&mut value, &["model"]);
+        }
+        remove_json_path(&mut value, &["provider", &provider_id]);
+    }
     render_json_config(value, "OpenCode config")
 }
 
@@ -4276,9 +5552,17 @@ fn opencode_gateway_cleanup_config_content(current: &str, tool_id: &str) -> Resu
 }
 
 fn openclaw_config_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
+    let api_key = load_provider_api_key_for_direct_config(profile)?;
+    openclaw_config_content_with_api_key(current, profile, &api_key)
+}
+
+fn openclaw_config_content_with_api_key(
+    current: &str,
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_OPENAI_CHAT_COMPLETIONS])?;
     let mut value = parse_json5_or_empty(current, "OpenClaw config")?;
-    let api_key = load_provider_api_key_for_direct_config(profile)?;
     let provider_id = managed_provider_id_for_profile(profile);
     let provider_name = format!("CodeStudio {}", profile.provider);
 
@@ -4301,7 +5585,7 @@ fn openclaw_config_content(current: &str, profile: &ProfileDraft) -> Result<Stri
     set_json_string_path(
         &mut value,
         &["models", "providers", &provider_id, "apiKey"],
-        &api_key,
+        api_key,
     );
 
     if let Some(model) = profile_model(profile) {
@@ -4324,6 +5608,26 @@ fn openclaw_config_content(current: &str, profile: &ProfileDraft) -> Result<Stri
         );
     }
 
+    render_json_config(value, "OpenClaw config")
+}
+
+fn openclaw_official_config_content(current: &str) -> Result<String, String> {
+    let mut value = parse_json5_or_empty(current, "OpenClaw config")?;
+    for provider_id in json_object_keys(&value, &["models", "providers"])
+        .into_iter()
+        .filter(|provider_id| provider_id.starts_with("codestudio-"))
+        .collect::<Vec<_>>()
+    {
+        let model_prefix = format!("{provider_id}/");
+        if json_string_lookup(&value, &["agents", "defaults", "model", "primary"])
+            .as_deref()
+            .map(|model| model.starts_with(&model_prefix))
+            .unwrap_or(false)
+        {
+            remove_json_path(&mut value, &["agents", "defaults", "model", "primary"]);
+        }
+        remove_json_path(&mut value, &["models", "providers", &provider_id]);
+    }
     render_json_config(value, "OpenClaw config")
 }
 
@@ -4394,13 +5698,21 @@ fn openclaw_gateway_cleanup_config_content(current: &str, tool_id: &str) -> Resu
 }
 
 fn hermes_config_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
+    let api_key = load_provider_api_key_for_direct_config(profile)?;
+    hermes_config_content_with_api_key(current, profile, &api_key)
+}
+
+fn hermes_config_content_with_api_key(
+    current: &str,
+    profile: &ProfileDraft,
+    api_key: &str,
+) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_OPENAI_CHAT_COMPLETIONS])?;
     let mut value = parse_yaml_or_empty(current, "Hermes config")?;
-    let api_key = load_provider_api_key_for_direct_config(profile)?;
 
     set_yaml_string_path(&mut value, &["model", "provider"], "custom");
     set_yaml_string_path(&mut value, &["model", "base_url"], profile.base_url.trim());
-    set_yaml_string_path(&mut value, &["model", "api_key"], &api_key);
+    set_yaml_string_path(&mut value, &["model", "api_key"], api_key);
     set_yaml_string_path(&mut value, &["model", "api_mode"], "chat_completions");
     if let Some(model) = profile_model(profile) {
         set_yaml_string_path(&mut value, &["model", "default"], model);
@@ -4408,6 +5720,16 @@ fn hermes_config_content(current: &str, profile: &ProfileDraft) -> Result<String
         remove_yaml_path(&mut value, &["model", "default"]);
     }
 
+    render_yaml_config(value, "Hermes config")
+}
+
+fn hermes_official_config_content(current: &str) -> Result<String, String> {
+    let mut value = parse_yaml_or_empty(current, "Hermes config")?;
+    remove_yaml_string_path_if(&mut value, &["model", "provider"], "custom");
+    remove_yaml_path(&mut value, &["model", "base_url"]);
+    remove_yaml_path(&mut value, &["model", "api_key"]);
+    remove_yaml_path(&mut value, &["model", "api_mode"]);
+    remove_yaml_path(&mut value, &["model", "default"]);
     render_yaml_config(value, "Hermes config")
 }
 
@@ -4624,6 +5946,9 @@ fn verify_codex_direct_config(path: &Path, profile: &ProfileDraft) -> Result<boo
 fn verify_claude_config(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
     let value = parse_json5_or_empty(&content, "Claude settings")?;
+    if provider_is_official(&profile.provider) {
+        return Ok(claude_config_matches_profile(&value, profile));
+    }
     let model_matches = match profile_model(profile) {
         Some(model) => {
             json_string_lookup(&value, &["model"]).as_deref() == Some(model)
@@ -4665,6 +5990,9 @@ fn verify_claude_gateway_config(path: &Path, profile: &ProfileDraft) -> Result<b
 fn verify_gemini_env_config(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
     let env = parse_env_content(&content);
+    if provider_is_official(&profile.provider) {
+        return Ok(gemini_env_matches_profile(&env, profile));
+    }
     let model_matches = match profile_model(profile) {
         Some(model) => env.get("GEMINI_MODEL").map(String::as_str) == Some(model),
         None => env.get("GEMINI_MODEL").is_none(),
@@ -4708,6 +6036,9 @@ fn verify_gemini_code_assist_settings(path: &Path, profile: &ProfileDraft) -> Re
 fn verify_opencode_config(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
     let value = parse_json5_or_empty(&content, "OpenCode config")?;
+    if provider_is_official(&profile.provider) {
+        return Ok(opencode_config_matches_profile(&value, profile));
+    }
     let provider_id = managed_provider_id_for_profile(profile);
     let expected_model = profile_model(profile).map(|model| format!("{provider_id}/{model}"));
     let model_matches = match expected_model.as_deref() {
@@ -4747,6 +6078,9 @@ fn verify_opencode_gateway_config(path: &Path, profile: &ProfileDraft) -> Result
 fn verify_openclaw_config(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
     let value = parse_json5_or_empty(&content, "OpenClaw config")?;
+    if provider_is_official(&profile.provider) {
+        return Ok(openclaw_config_matches_profile(&value, profile));
+    }
     let provider_id = managed_provider_id_for_profile(profile);
     let expected_model = profile_model(profile).map(|model| format!("{provider_id}/{model}"));
     let model_matches = match expected_model.as_deref() {
@@ -4790,6 +6124,9 @@ fn verify_openclaw_gateway_config(path: &Path, profile: &ProfileDraft) -> Result
 fn verify_hermes_config(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
     let value = parse_yaml_or_empty(&content, "Hermes config")?;
+    if provider_is_official(&profile.provider) {
+        return Ok(hermes_config_matches_profile(&value, profile));
+    }
     let model_matches = match profile_model(profile) {
         Some(model) => yaml_string_lookup(&value, &["model", "default"]).as_deref() == Some(model),
         None => yaml_string_lookup(&value, &["model", "default"]).is_none(),
@@ -4866,6 +6203,7 @@ fn verify_native_config_write(
 
     match plan.kind {
         NativeConfigWriteKind::ProfileConfig => verify_native_config(&plan.path, profile, mode),
+        NativeConfigWriteKind::CodexAuthJson => verify_codex_auth_json_write(&plan.path, profile),
         NativeConfigWriteKind::ClaudeVsCodePluginConfig => {
             verify_claude_vscode_plugin_config(&plan.path)
         }
@@ -4903,7 +6241,7 @@ fn load_provider_api_key_for_direct_config(profile: &ProfileDraft) -> Result<Str
     let Some(auth_ref) = profile.auth_ref.as_deref() else {
         if provider_requires_api_key(&profile.provider) {
             return Err(
-                "Config file mode needs a stored Provider API key. Edit this profile and save an API key first."
+                "Config profiles need a stored Provider API key. Edit this profile and save an API key first."
                     .to_string(),
             );
         }
@@ -4916,13 +6254,89 @@ fn load_provider_api_key_for_direct_config(profile: &ProfileDraft) -> Result<Str
     Ok(api_key)
 }
 
+fn redact_native_config_preview_content(
+    content: &str,
+    profile: &ProfileDraft,
+    mode: ProviderApplyMode,
+) -> String {
+    let mut output = content.to_string();
+    if let Ok(api_key) = load_provider_api_key_for_direct_config(profile) {
+        output = replace_nonempty(&output, &api_key, secret_preview(profile));
+    }
+    if mode == ProviderApplyMode::Gateway {
+        if let Ok(client) = gateway::client_config_for_tool(&profile.app) {
+            output = replace_nonempty(&output, &client.token, &client.token_preview);
+        }
+    }
+    redact_oauth_like_tokens(&output)
+}
+
+fn replace_nonempty(content: &str, needle: &str, replacement: &str) -> String {
+    let trimmed = needle.trim();
+    if trimmed.is_empty() {
+        content.to_string()
+    } else {
+        content.replace(trimmed, replacement)
+    }
+}
+
+fn redact_oauth_like_tokens(content: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return content.to_string();
+    };
+    redact_sensitive_json_value(&mut value);
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| content.to_string())
+}
+
+fn redact_sensitive_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                if json_key_looks_sensitive(key) {
+                    if let Some(text) = item.as_str() {
+                        if !is_safe_secret_preview_value(text) {
+                            *item = serde_json::Value::String("<redacted>".to_string());
+                        }
+                    } else {
+                        redact_sensitive_json_value(item);
+                    }
+                } else {
+                    redact_sensitive_json_value(item);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_sensitive_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_key_looks_sensitive(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    lowered.contains("token")
+        || lowered.contains("secret")
+        || lowered.contains("api_key")
+        || lowered.contains("apikey")
+        || lowered == "password"
+}
+
+fn is_safe_secret_preview_value(value: &str) -> bool {
+    matches!(
+        value.trim(),
+        "keychain:****" | "(no api key required)" | "(missing keychain secret)"
+    )
+}
+
 fn require_profile_protocol(profile: &ProfileDraft, supported: &[&str]) -> Result<(), String> {
     let protocol = normalize_protocol(Some(&profile.protocol))?;
     if supported.iter().any(|candidate| *candidate == protocol) {
         Ok(())
     } else {
         Err(format!(
-            "{} does not support {} in Config file mode.",
+            "{} does not support {} in Config profiles.",
             profile.app,
             protocol_display_name(&protocol)
         ))
@@ -4976,7 +6390,7 @@ fn ensure_profile_protocol_supported_for_mode(
         return Ok(());
     }
     Err(format!(
-        "Config file mode does not support {} for '{}'.",
+        "Config profiles do not support {} for '{}'.",
         protocol_display_name(protocol),
         canonical_profile_app(app)
     ))
@@ -5066,6 +6480,13 @@ fn remove_json_string_path_if(root: &mut serde_json::Value, path: &[&str], expec
 
 fn json_string_lookup(root: &serde_json::Value, path: &[&str]) -> Option<String> {
     json_lookup(root, path).and_then(|value| value.as_str().map(ToString::to_string))
+}
+
+fn json_object_keys(root: &serde_json::Value, path: &[&str]) -> Vec<String> {
+    json_lookup(root, path)
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn json_lookup<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
@@ -5323,12 +6744,12 @@ fn build_native_config_preview(
             "Changing Codex config usually requires restarting Codex or opening a new Codex session.".to_string(),
         ],
         ProviderApplyMode::Config => vec![
-            "Config file mode writes Codex's provider entry directly to the selected upstream Provider.".to_string(),
+            "Config profiles write Codex's provider entry directly to the selected upstream Provider.".to_string(),
             "The preview masks the Provider API key. The actual key is loaded from the system keychain during apply.".to_string(),
             "Changing Codex config usually requires restarting Codex or opening a new Codex session.".to_string(),
         ],
         ProviderApplyMode::Gateway => vec![
-            "Gateway mode is a one-time relay injection target, not a direct Provider switch.".to_string(),
+            "Gateway profiles are a one-time relay injection target, not a direct Provider switch.".to_string(),
             "Switching profiles later changes only the Gateway active profile for this tool.".to_string(),
             "The preview masks the local CodeStudio token. Real Provider API keys are never written to Codex config.".to_string(),
             "Codex official login is still required for the desktop app; the Local Gateway only takes over model requests.".to_string(),
@@ -5531,6 +6952,7 @@ fn build_native_config_preview(
         write_enabled: true,
         changes,
         warnings,
+        content: None,
     }))
 }
 
@@ -5549,10 +6971,6 @@ fn build_non_codex_native_config_preview(
         );
     }
 
-    if provider_is_official(&profile.provider) {
-        return Ok(None);
-    }
-
     if mode == ProviderApplyMode::Gateway {
         return build_non_codex_gateway_native_config_preview(profile, native_config_path, paths);
     }
@@ -5569,19 +6987,35 @@ fn build_non_codex_native_config_preview(
         .unwrap_or_else(|| display_path(&path_buf));
     let app = canonical_profile_app(&profile.app);
     let provider_id = managed_provider_id_for_profile(profile);
+    let is_official = provider_is_official(&profile.provider);
     let mut warnings = match app.as_str() {
+        "claude" if is_official => vec![
+            "Official provider restores Claude Code to its own login.".to_string(),
+            "CodeStudio Lite removes managed API or Gateway fields from Claude settings."
+                .to_string(),
+        ],
         "claude" => vec![
-            "Config file mode writes Claude Code user settings under the env section."
+            "Config profiles write Claude Code user settings under the env section."
                 .to_string(),
             "The selected endpoint must be Anthropic/Claude-compatible; generic OpenAI-only endpoints need a translator."
                 .to_string(),
             "Restart Claude Code or open a new session after applying so settings reload."
                 .to_string(),
         ],
+        "gemini" if is_official => vec![
+            "Official provider restores Gemini CLI to its own login.".to_string(),
+            "CodeStudio Lite removes managed API or Gateway values from ~/.gemini/.env."
+                .to_string(),
+        ],
         "gemini" => vec![
             "Gemini CLI reads API key and base URL from environment variables, so this adapter writes ~/.gemini/.env."
                 .to_string(),
             "Restart Gemini CLI or open a new terminal session after applying so environment variables reload."
+                .to_string(),
+        ],
+        "gemini-code-assist" if is_official => vec![
+            "Official provider restores Gemini Code Assist to its own login.".to_string(),
+            "CodeStudio Lite removes the managed API key setting from VS Code user settings."
                 .to_string(),
         ],
         "gemini-code-assist" => vec![
@@ -5592,10 +7026,18 @@ fn build_non_codex_native_config_preview(
             "Restart VS Code or reload the Gemini Code Assist extension after applying so settings reload."
                 .to_string(),
         ],
+        "opencode" if is_official => vec![
+            "Official provider removes CodeStudio Lite managed OpenCode provider entries."
+                .to_string(),
+        ],
         "opencode" => vec![
             "OpenCode custom providers are written to opencode.json using the OpenAI-compatible provider package."
                 .to_string(),
             "Existing JSONC/JSON5 comments are not preserved when CodeStudio Lite writes the file."
+                .to_string(),
+        ],
+        "openclaw" if is_official => vec![
+            "Official provider removes CodeStudio Lite managed OpenClaw provider entries."
                 .to_string(),
         ],
         "openclaw" => vec![
@@ -5604,171 +7046,181 @@ fn build_non_codex_native_config_preview(
             "Existing JSON5 comments are not preserved when CodeStudio Lite writes the file."
                 .to_string(),
         ],
+        "hermes" if is_official => vec![
+            "Official provider removes CodeStudio Lite managed Hermes custom endpoint fields."
+                .to_string(),
+        ],
         "hermes" => vec![
             "Hermes custom providers are written to ~/.hermes/config.yaml under the model section."
                 .to_string(),
             "Existing YAML comments are not preserved when CodeStudio Lite writes the file."
                 .to_string(),
-            "Hermes config file mode currently targets OpenAI Chat Completions endpoints."
+            "Hermes config profiles currently target OpenAI Chat Completions endpoints."
                 .to_string(),
         ],
         _ => return Ok(None),
     };
 
-    let (status, changes) = match app.as_str() {
-        "gemini" => {
-            let (env, status) = read_env_preview(&path_buf, &mut warnings)?;
-            let mut changes = vec![
-                env_diff_line(
-                    &env,
-                    "GEMINI_API_KEY",
-                    secret_preview(profile),
-                    "Stores the selected Provider API key for Gemini CLI.",
-                ),
-                env_diff_line(
-                    &env,
-                    "GOOGLE_GEMINI_BASE_URL",
-                    profile.base_url.trim(),
-                    "Points Gemini CLI at the selected upstream Provider Base URL.",
-                ),
-            ];
-            if let Some(model) = profile_model(profile) {
-                changes.push(env_diff_line(
-                    &env,
-                    "GEMINI_MODEL",
-                    model,
-                    "Sets Gemini CLI to the selected upstream model.",
-                ));
-            } else {
-                changes.push(env_diff_remove_line(
-                    &env,
-                    "GEMINI_MODEL",
-                    "Model is optional; no Gemini model override will be written.",
-                ));
+    let (status, changes) = if is_official {
+        build_non_codex_official_native_config_preview_changes(&app, &path_buf, &mut warnings)?
+    } else {
+        match app.as_str() {
+            "gemini" => {
+                let (env, status) = read_env_preview(&path_buf, &mut warnings)?;
+                let mut changes = vec![
+                    env_diff_line(
+                        &env,
+                        "GEMINI_API_KEY",
+                        secret_preview(profile),
+                        "Stores the selected Provider API key for Gemini CLI.",
+                    ),
+                    env_diff_line(
+                        &env,
+                        "GOOGLE_GEMINI_BASE_URL",
+                        profile.base_url.trim(),
+                        "Points Gemini CLI at the selected upstream Provider Base URL.",
+                    ),
+                ];
+                if let Some(model) = profile_model(profile) {
+                    changes.push(env_diff_line(
+                        &env,
+                        "GEMINI_MODEL",
+                        model,
+                        "Sets Gemini CLI to the selected upstream model.",
+                    ));
+                } else {
+                    changes.push(env_diff_remove_line(
+                        &env,
+                        "GEMINI_MODEL",
+                        "Model is optional; no Gemini model override will be written.",
+                    ));
+                }
+                (status, changes)
             }
-            (status, changes)
-        }
-        "claude" => {
-            let (json, status) = read_json_preview(&path_buf, "Claude settings", &mut warnings)?;
-            let mut changes = vec![
-                json_diff_line(
-                    &json,
-                    &["env", "ANTHROPIC_BASE_URL"],
-                    profile.base_url.trim(),
-                    "Points Claude Code at the selected upstream Provider Base URL.",
-                ),
-                json_diff_line(
-                    &json,
-                    &["env", "ANTHROPIC_AUTH_TOKEN"],
-                    secret_preview(profile),
-                    "Stores the selected Provider API key as Claude Code's bearer token.",
-                ),
-            ];
-            if let Some(model) = profile_model(profile) {
-                changes.push(json_diff_line(
-                    &json,
-                    &["model"],
-                    model,
-                    "Sets Claude Code to the selected upstream model.",
-                ));
-                changes.push(json_diff_line(
-                    &json,
-                    &["env", "ANTHROPIC_MODEL"],
-                    model,
-                    "Keeps the model override available to Claude Code environment consumers.",
-                ));
-            } else {
-                changes.push(json_diff_remove_line(
-                    &json,
-                    &["model"],
-                    "Model is optional; no Claude model override will be written.",
-                ));
-                changes.push(json_diff_remove_line(
-                    &json,
-                    &["env", "ANTHROPIC_MODEL"],
-                    "Model is optional; no Claude model environment override will be written.",
-                ));
+            "claude" => {
+                let (json, status) =
+                    read_json_preview(&path_buf, "Claude settings", &mut warnings)?;
+                let mut changes = vec![
+                    json_diff_line(
+                        &json,
+                        &["env", "ANTHROPIC_BASE_URL"],
+                        profile.base_url.trim(),
+                        "Points Claude Code at the selected upstream Provider Base URL.",
+                    ),
+                    json_diff_line(
+                        &json,
+                        &["env", "ANTHROPIC_AUTH_TOKEN"],
+                        secret_preview(profile),
+                        "Stores the selected Provider API key as Claude Code's bearer token.",
+                    ),
+                ];
+                if let Some(model) = profile_model(profile) {
+                    changes.push(json_diff_line(
+                        &json,
+                        &["model"],
+                        model,
+                        "Sets Claude Code to the selected upstream model.",
+                    ));
+                    changes.push(json_diff_line(
+                        &json,
+                        &["env", "ANTHROPIC_MODEL"],
+                        model,
+                        "Keeps the model override available to Claude Code environment consumers.",
+                    ));
+                } else {
+                    changes.push(json_diff_remove_line(
+                        &json,
+                        &["model"],
+                        "Model is optional; no Claude model override will be written.",
+                    ));
+                    changes.push(json_diff_remove_line(
+                        &json,
+                        &["env", "ANTHROPIC_MODEL"],
+                        "Model is optional; no Claude model environment override will be written.",
+                    ));
+                }
+                (status, changes)
             }
-            (status, changes)
-        }
-        "gemini-code-assist" => {
-            let (json, status) =
-                read_json_preview(&path_buf, "VS Code user settings", &mut warnings)?;
-            let mut changes = vec![json_diff_line(
-                &json,
-                &[GEMINI_CODE_ASSIST_API_KEY_SETTING],
-                secret_preview(profile),
-                "Stores the selected Provider API key for Gemini Code Assist.",
-            )];
-            changes.push(diff_value_line(
+            "gemini-code-assist" => {
+                let (json, status) =
+                    read_json_preview(&path_buf, "VS Code user settings", &mut warnings)?;
+                let mut changes = vec![json_diff_line(
+                    &json,
+                    &[GEMINI_CODE_ASSIST_API_KEY_SETTING],
+                    secret_preview(profile),
+                    "Stores the selected Provider API key for Gemini Code Assist.",
+                )];
+                changes.push(diff_value_line(
                 "Provider Base URL".to_string(),
                 None,
                 Some(profile.base_url.trim().to_string()),
                 "Gemini Code Assist does not expose a VS Code setting for custom Base URL; this stays in the CodeStudio Lite profile.",
             ));
-            if let Some(model) = profile_model(profile) {
-                changes.push(diff_value_line(
+                if let Some(model) = profile_model(profile) {
+                    changes.push(diff_value_line(
                     "Model".to_string(),
                     None,
                     Some(model.to_string()),
                     "Gemini Code Assist does not expose a VS Code setting for model override; this stays in the CodeStudio Lite profile.",
                 ));
+                }
+                (status, changes)
             }
-            (status, changes)
-        }
-        "opencode" => {
-            let (json, status) = read_json_preview(&path_buf, "OpenCode config", &mut warnings)?;
-            let mut changes = vec![
-                json_diff_line(
-                    &json,
-                    &["$schema"],
-                    "https://opencode.ai/config.json",
-                    "Keeps OpenCode config aligned with the published schema.",
-                ),
-                json_diff_line(
-                    &json,
-                    &["provider", &provider_id, "npm"],
-                    "@ai-sdk/openai-compatible",
-                    "Uses OpenCode's OpenAI-compatible provider package.",
-                ),
-                json_diff_line(
-                    &json,
-                    &["provider", &provider_id, "options", "baseURL"],
-                    profile.base_url.trim(),
-                    "Points OpenCode at the selected upstream Provider Base URL.",
-                ),
-                json_diff_line(
-                    &json,
-                    &["provider", &provider_id, "options", "apiKey"],
-                    secret_preview(profile),
-                    "Stores the selected Provider API key for OpenCode.",
-                ),
-            ];
-            if let Some(model) = profile_model(profile) {
-                changes.push(json_diff_line(
-                    &json,
-                    &["model"],
-                    &format!("{provider_id}/{model}"),
-                    "Selects the provider/model pair in OpenCode.",
-                ));
-                changes.push(json_diff_line(
-                    &json,
-                    &["provider", &provider_id, "models", model, "name"],
-                    model,
-                    "Registers the selected model under the managed provider.",
-                ));
-            } else {
-                changes.push(json_diff_remove_line(
-                    &json,
-                    &["model"],
-                    "Model is optional; no OpenCode model override will be written.",
-                ));
+            "opencode" => {
+                let (json, status) =
+                    read_json_preview(&path_buf, "OpenCode config", &mut warnings)?;
+                let mut changes = vec![
+                    json_diff_line(
+                        &json,
+                        &["$schema"],
+                        "https://opencode.ai/config.json",
+                        "Keeps OpenCode config aligned with the published schema.",
+                    ),
+                    json_diff_line(
+                        &json,
+                        &["provider", &provider_id, "npm"],
+                        "@ai-sdk/openai-compatible",
+                        "Uses OpenCode's OpenAI-compatible provider package.",
+                    ),
+                    json_diff_line(
+                        &json,
+                        &["provider", &provider_id, "options", "baseURL"],
+                        profile.base_url.trim(),
+                        "Points OpenCode at the selected upstream Provider Base URL.",
+                    ),
+                    json_diff_line(
+                        &json,
+                        &["provider", &provider_id, "options", "apiKey"],
+                        secret_preview(profile),
+                        "Stores the selected Provider API key for OpenCode.",
+                    ),
+                ];
+                if let Some(model) = profile_model(profile) {
+                    changes.push(json_diff_line(
+                        &json,
+                        &["model"],
+                        &format!("{provider_id}/{model}"),
+                        "Selects the provider/model pair in OpenCode.",
+                    ));
+                    changes.push(json_diff_line(
+                        &json,
+                        &["provider", &provider_id, "models", model, "name"],
+                        model,
+                        "Registers the selected model under the managed provider.",
+                    ));
+                } else {
+                    changes.push(json_diff_remove_line(
+                        &json,
+                        &["model"],
+                        "Model is optional; no OpenCode model override will be written.",
+                    ));
+                }
+                (status, changes)
             }
-            (status, changes)
-        }
-        "openclaw" => {
-            let (json, status) = read_json_preview(&path_buf, "OpenClaw config", &mut warnings)?;
-            let mut changes = vec![
+            "openclaw" => {
+                let (json, status) =
+                    read_json_preview(&path_buf, "OpenClaw config", &mut warnings)?;
+                let mut changes = vec![
                 json_diff_line(
                     &json,
                     &["models", "mode"],
@@ -5794,61 +7246,62 @@ fn build_non_codex_native_config_preview(
                     "Stores the selected Provider API key for OpenClaw.",
                 ),
             ];
-            if let Some(model) = profile_model(profile) {
-                changes.push(json_diff_line(
-                    &json,
-                    &["agents", "defaults", "model", "primary"],
-                    &format!("{provider_id}/{model}"),
-                    "Selects the provider/model pair as OpenClaw's primary default.",
-                ));
+                if let Some(model) = profile_model(profile) {
+                    changes.push(json_diff_line(
+                        &json,
+                        &["agents", "defaults", "model", "primary"],
+                        &format!("{provider_id}/{model}"),
+                        "Selects the provider/model pair as OpenClaw's primary default.",
+                    ));
+                }
+                (status, changes)
             }
-            (status, changes)
-        }
-        "hermes" => {
-            let (yaml, status) = read_yaml_preview(&path_buf, "Hermes config", &mut warnings)?;
-            let mut changes = vec![
-                yaml_diff_line(
-                    &yaml,
-                    &["model", "provider"],
-                    "custom",
-                    "Selects Hermes custom provider mode.",
-                ),
-                yaml_diff_line(
-                    &yaml,
-                    &["model", "base_url"],
-                    profile.base_url.trim(),
-                    "Points Hermes at the selected upstream Provider Base URL.",
-                ),
-                yaml_diff_line(
-                    &yaml,
-                    &["model", "api_key"],
-                    secret_preview(profile),
-                    "Stores the selected Provider API key for Hermes.",
-                ),
-                yaml_diff_line(
-                    &yaml,
-                    &["model", "api_mode"],
-                    "chat_completions",
-                    "Uses Hermes' OpenAI Chat Completions custom endpoint mode.",
-                ),
-            ];
-            if let Some(model) = profile_model(profile) {
-                changes.push(yaml_diff_line(
-                    &yaml,
-                    &["model", "default"],
-                    model,
-                    "Sets Hermes to the selected upstream model.",
-                ));
-            } else {
-                changes.push(yaml_diff_remove_line(
-                    &yaml,
-                    &["model", "default"],
-                    "Model is optional; no Hermes model override will be written.",
-                ));
+            "hermes" => {
+                let (yaml, status) = read_yaml_preview(&path_buf, "Hermes config", &mut warnings)?;
+                let mut changes = vec![
+                    yaml_diff_line(
+                        &yaml,
+                        &["model", "provider"],
+                        "custom",
+                        "Selects Hermes custom provider mode.",
+                    ),
+                    yaml_diff_line(
+                        &yaml,
+                        &["model", "base_url"],
+                        profile.base_url.trim(),
+                        "Points Hermes at the selected upstream Provider Base URL.",
+                    ),
+                    yaml_diff_line(
+                        &yaml,
+                        &["model", "api_key"],
+                        secret_preview(profile),
+                        "Stores the selected Provider API key for Hermes.",
+                    ),
+                    yaml_diff_line(
+                        &yaml,
+                        &["model", "api_mode"],
+                        "chat_completions",
+                        "Uses Hermes' OpenAI Chat Completions custom endpoint mode.",
+                    ),
+                ];
+                if let Some(model) = profile_model(profile) {
+                    changes.push(yaml_diff_line(
+                        &yaml,
+                        &["model", "default"],
+                        model,
+                        "Sets Hermes to the selected upstream model.",
+                    ));
+                } else {
+                    changes.push(yaml_diff_remove_line(
+                        &yaml,
+                        &["model", "default"],
+                        "Model is optional; no Hermes model override will be written.",
+                    ));
+                }
+                (status, changes)
             }
-            (status, changes)
+            _ => unreachable!(),
         }
-        _ => unreachable!(),
     };
 
     Ok(Some(NativeConfigPreview {
@@ -5858,7 +7311,151 @@ fn build_non_codex_native_config_preview(
         write_enabled: true,
         changes,
         warnings,
+        content: None,
     }))
+}
+
+fn build_non_codex_official_native_config_preview_changes(
+    app: &str,
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<(String, Vec<NativeConfigDiffLine>), String> {
+    match app {
+        "claude" => {
+            let (json, status) = read_json_preview(path, "Claude settings", warnings)?;
+            Ok((
+                status,
+                vec![
+                    json_diff_remove_line(
+                        &json,
+                        &["env", "ANTHROPIC_BASE_URL"],
+                        "Restores Claude Code to the client's own official endpoint.",
+                    ),
+                    json_diff_remove_line(
+                        &json,
+                        &["env", "ANTHROPIC_AUTH_TOKEN"],
+                        "Removes the CodeStudio Lite managed API token from Claude settings.",
+                    ),
+                    json_diff_remove_line(
+                        &json,
+                        &["model"],
+                        "Removes the CodeStudio Lite managed model override.",
+                    ),
+                    json_diff_remove_line(
+                        &json,
+                        &["env", "ANTHROPIC_MODEL"],
+                        "Removes the CodeStudio Lite managed model environment override.",
+                    ),
+                ],
+            ))
+        }
+        "gemini" => {
+            let (env, status) = read_env_preview(path, warnings)?;
+            Ok((
+                status,
+                vec![
+                    env_diff_remove_line(
+                        &env,
+                        "GEMINI_API_KEY",
+                        "Removes the CodeStudio Lite managed Gemini API key.",
+                    ),
+                    env_diff_remove_line(
+                        &env,
+                        "GOOGLE_GEMINI_BASE_URL",
+                        "Restores Gemini CLI to the client's own official endpoint.",
+                    ),
+                    env_diff_remove_line(
+                        &env,
+                        "GEMINI_MODEL",
+                        "Removes the CodeStudio Lite managed model override.",
+                    ),
+                ],
+            ))
+        }
+        "gemini-code-assist" => {
+            let (json, status) = read_json_preview(path, "VS Code user settings", warnings)?;
+            Ok((
+                status,
+                vec![json_diff_remove_line(
+                    &json,
+                    &[GEMINI_CODE_ASSIST_API_KEY_SETTING],
+                    "Removes the CodeStudio Lite managed Gemini Code Assist API key.",
+                )],
+            ))
+        }
+        "opencode" => {
+            let (json, status) = read_json_preview(path, "OpenCode config", warnings)?;
+            Ok((
+                status,
+                vec![
+                    diff_value_line(
+                        "provider.codestudio-*".to_string(),
+                        Some("managed provider entries".to_string()),
+                        None,
+                        "Removes CodeStudio Lite managed OpenCode provider entries.",
+                    ),
+                    json_diff_remove_line(
+                        &json,
+                        &["model"],
+                        "Removes the active model only when it points to a CodeStudio Lite managed provider.",
+                    ),
+                ],
+            ))
+        }
+        "openclaw" => {
+            let (json, status) = read_json_preview(path, "OpenClaw config", warnings)?;
+            Ok((
+                status,
+                vec![
+                    diff_value_line(
+                        "models.providers.codestudio-*".to_string(),
+                        Some("managed provider entries".to_string()),
+                        None,
+                        "Removes CodeStudio Lite managed OpenClaw provider entries.",
+                    ),
+                    json_diff_remove_line(
+                        &json,
+                        &["agents", "defaults", "model", "primary"],
+                        "Removes the primary model only when it points to a CodeStudio Lite managed provider.",
+                    ),
+                ],
+            ))
+        }
+        "hermes" => {
+            let (yaml, status) = read_yaml_preview(path, "Hermes config", warnings)?;
+            Ok((
+                status,
+                vec![
+                    yaml_diff_remove_line(
+                        &yaml,
+                        &["model", "provider"],
+                        "Restores Hermes away from the CodeStudio Lite managed custom provider mode.",
+                    ),
+                    yaml_diff_remove_line(
+                        &yaml,
+                        &["model", "base_url"],
+                        "Removes the CodeStudio Lite managed Base URL.",
+                    ),
+                    yaml_diff_remove_line(
+                        &yaml,
+                        &["model", "api_key"],
+                        "Removes the CodeStudio Lite managed API key.",
+                    ),
+                    yaml_diff_remove_line(
+                        &yaml,
+                        &["model", "api_mode"],
+                        "Removes the CodeStudio Lite managed API mode.",
+                    ),
+                    yaml_diff_remove_line(
+                        &yaml,
+                        &["model", "default"],
+                        "Removes the CodeStudio Lite managed model override.",
+                    ),
+                ],
+            ))
+        }
+        _ => Ok(("unsupported".to_string(), Vec::new())),
+    }
 }
 
 fn build_claude_desktop_native_config_preview(
@@ -5884,13 +7481,13 @@ fn build_claude_desktop_native_config_preview(
             "No Provider API key or model override is required.".to_string(),
         ],
         ProviderApplyMode::Config => vec![
-            "Claude Desktop config file mode writes the 3P profile system used by Claude Desktop.".to_string(),
+            "Claude Desktop config profile writes the 3P profile system used by Claude Desktop.".to_string(),
             "CodeStudio Lite enables Claude Desktop developer mode before writing the 3P profile if it is not already enabled.".to_string(),
-            "The selected endpoint must be Anthropic Messages compatible; generic OpenAI-only endpoints need Gateway mode.".to_string(),
+            "The selected endpoint must be Anthropic Messages compatible; generic OpenAI-only endpoints need Gateway profiles.".to_string(),
             "Restart Claude Desktop after applying so it reloads the config library.".to_string(),
         ],
         ProviderApplyMode::Gateway => vec![
-            "Claude Desktop gateway mode writes the 3P profile to the tool-scoped CodeStudio Lite Local Gateway URL.".to_string(),
+            "Claude Desktop gateway profile writes the 3P profile to the tool-scoped CodeStudio Lite Local Gateway URL.".to_string(),
             "CodeStudio Lite enables Claude Desktop developer mode before writing the Gateway profile if it is not already enabled.".to_string(),
             "Applying a Gateway profile does not start the Gateway automatically; use the sidebar Gateway controls when you want it running.".to_string(),
             "Restart Claude Desktop after applying so it reloads the config library.".to_string(),
@@ -6046,6 +7643,7 @@ fn build_claude_desktop_native_config_preview(
         write_enabled: true,
         changes,
         warnings,
+        content: None,
     }))
 }
 
@@ -6078,31 +7676,31 @@ fn build_non_codex_gateway_native_config_preview(
     let model_ref = format!("{provider_id}/{}", client.model);
     let mut warnings = match app.as_str() {
         "claude" => vec![
-            "Gateway mode writes Claude Code settings to the tool-scoped local gateway URL."
+            "Gateway profiles write Claude Code settings to the tool-scoped local gateway URL."
                 .to_string(),
             "Restart Claude Code or open a new session after applying so settings reload."
                 .to_string(),
         ],
         "gemini" => vec![
-            "Gateway mode writes Gemini CLI environment values to the tool-scoped local gateway URL."
+            "Gateway profiles write Gemini CLI environment values to the tool-scoped local gateway URL."
                 .to_string(),
             "Restart Gemini CLI or open a new terminal session after applying so environment variables reload."
                 .to_string(),
         ],
         "opencode" => vec![
-            "Gateway mode writes OpenCode's provider entry to the tool-scoped local gateway URL."
+            "Gateway profiles write OpenCode's provider entry to the tool-scoped local gateway URL."
                 .to_string(),
             "Existing JSONC/JSON5 comments are not preserved when CodeStudio Lite writes the file."
                 .to_string(),
         ],
         "openclaw" => vec![
-            "Gateway mode writes OpenClaw's provider entry to the tool-scoped local gateway URL."
+            "Gateway profiles write OpenClaw's provider entry to the tool-scoped local gateway URL."
                 .to_string(),
             "Existing JSON5 comments are not preserved when CodeStudio Lite writes the file."
                 .to_string(),
         ],
         "hermes" => vec![
-            "Gateway mode writes Hermes custom provider settings to the tool-scoped local gateway URL."
+            "Gateway profiles write Hermes custom provider settings to the tool-scoped local gateway URL."
                 .to_string(),
             "Existing YAML comments are not preserved when CodeStudio Lite writes the file."
                 .to_string(),
@@ -6307,6 +7905,7 @@ fn build_non_codex_gateway_native_config_preview(
         write_enabled: true,
         changes,
         warnings,
+        content: None,
     }))
 }
 
@@ -6586,29 +8185,16 @@ fn looks_like_local_gateway_token(value: &str) -> bool {
     value.trim().starts_with("codestudio-local-")
 }
 
-fn verify_applied_profile(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
-    let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let value: toml::Value = toml::from_str(&content).map_err(|err| err.to_string())?;
-
-    Ok(
-        read_toml_string(&value, "profile_id").as_deref() == Some(profile.id.as_str())
-            && read_toml_string(&value, "app").as_deref() == Some(profile.app.as_str())
-            && read_toml_string(&value, "provider").as_deref() == Some(profile.provider.as_str())
-            && read_toml_string(&value, "protocol").as_deref() == Some(profile.protocol.as_str())
-            && read_toml_string(&value, "model").as_deref() == Some(profile.model.as_str())
-            && read_toml_string(&value, "base_url").as_deref() == Some(profile.base_url.as_str())
-            && read_toml_string(&value, "secret_policy").as_deref()
-                == Some("never_write_plaintext"),
-    )
-}
-
 fn unique_profile_id(base_id: &str) -> Result<String, String> {
-    let paths = app_paths().map_err(|err| err.to_string())?;
     let base_id = if base_id.is_empty() {
         "profile"
     } else {
         base_id
     };
+    let existing_ids = load_profiles()?
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect::<HashSet<_>>();
 
     for index in 0..1000 {
         let candidate = if index == 0 {
@@ -6616,12 +8202,7 @@ fn unique_profile_id(base_id: &str) -> Result<String, String> {
         } else {
             format!("{base_id}-{index}")
         };
-        if !is_builtin_profile_id(&candidate)
-            && !paths
-                .profiles_dir
-                .join(format!("{candidate}.toml"))
-                .exists()
-        {
+        if !is_builtin_profile_id(&candidate) && !existing_ids.contains(&candidate) {
             return Ok(candidate);
         }
     }
@@ -6676,11 +8257,6 @@ mod tests {
                 confirm_config_writes: true,
                 preserve_codex_official_auth: true,
             },
-            paths: PathConfig {
-                profiles_dir: "~/.codestudio-lite/profiles".to_string(),
-                backups_dir: "~/.codestudio-lite/backups".to_string(),
-                logs_dir: "~/.codestudio-lite/logs".to_string(),
-            },
         }
     }
 
@@ -6698,6 +8274,23 @@ requires_openai_auth = true
 "#,
         )
         .expect("config should parse");
+
+        assert!(sync_codex_config_profile(
+            &mut config,
+            &drafts,
+            &codex_config
+        ));
+        assert_eq!(
+            config.active_profiles_by_mode.config.get("codex"),
+            Some(&builtin_official_profile_id("codex"))
+        );
+    }
+
+    #[test]
+    fn sync_codex_config_profile_marks_empty_config_as_official() {
+        let mut config = test_app_config();
+        let drafts = builtin_official_profiles();
+        let codex_config = parse_toml_or_empty("", "Codex config").expect("config should parse");
 
         assert!(sync_codex_config_profile(
             &mut config,
@@ -6734,6 +8327,432 @@ requires_openai_auth = true
             &codex_config
         ));
         assert!(!config.active_profiles_by_mode.config.contains_key("codex"));
+    }
+
+    #[test]
+    fn sync_codex_config_profile_rejects_managed_openai_override() {
+        let mut config = test_app_config();
+        config
+            .active_profiles_by_mode
+            .config
+            .insert("codex".to_string(), builtin_official_profile_id("codex"));
+        let drafts = builtin_official_profiles();
+        let codex_config: toml::Value = toml::from_str(
+            r#"
+model_provider = "openai"
+
+[model_providers.openai]
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://example.test/v1"
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(sync_codex_config_profile(
+            &mut config,
+            &drafts,
+            &codex_config
+        ));
+        assert!(!config.active_profiles_by_mode.config.contains_key("codex"));
+    }
+
+    #[test]
+    fn official_non_codex_configs_match_when_not_managed() {
+        let drafts = builtin_official_profiles();
+
+        assert!(sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "claude",
+            |profile| claude_config_matches_profile(&serde_json::json!({}), profile)
+        ));
+        assert!(sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "gemini",
+            |profile| gemini_env_matches_profile(&HashMap::new(), profile)
+        ));
+        assert!(sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "gemini-code-assist",
+            |profile| {
+                gemini_code_assist_settings_match_profile(&serde_json::json!({}), profile)
+            }
+        ));
+        assert!(sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "opencode",
+            |profile| opencode_config_matches_profile(&serde_json::json!({}), profile)
+        ));
+        assert!(sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "openclaw",
+            |profile| openclaw_config_matches_profile(&serde_json::json!({}), profile)
+        ));
+        assert!(sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "hermes",
+            |profile| {
+                hermes_config_matches_profile(
+                    &serde_norway::Value::Mapping(Default::default()),
+                    profile,
+                )
+            }
+        ));
+    }
+
+    #[test]
+    fn official_non_codex_configs_do_not_match_managed_values() {
+        let drafts = builtin_official_profiles();
+
+        assert!(!sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "claude",
+            |profile| claude_config_matches_profile(
+                &serde_json::json!({ "env": { "ANTHROPIC_BASE_URL": "https://example.test" } }),
+                profile,
+            )
+        ));
+        assert!(!sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "gemini",
+            |profile| {
+                let env = HashMap::from([(
+                    "GOOGLE_GEMINI_BASE_URL".to_string(),
+                    "https://example.test".to_string(),
+                )]);
+                gemini_env_matches_profile(&env, profile)
+            }
+        ));
+        assert!(!sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "opencode",
+            |profile| opencode_config_matches_profile(
+                &serde_json::json!({ "provider": { "codestudio-openai": {} } }),
+                profile,
+            )
+        ));
+        assert!(!sync_native_config_profile(
+            &mut test_app_config(),
+            &drafts,
+            "openclaw",
+            |profile| openclaw_config_matches_profile(
+                &serde_json::json!({ "models": { "providers": { "codestudio-openai": {} } } }),
+                profile,
+            )
+        ));
+    }
+
+    #[test]
+    fn detects_codex_custom_native_profile() {
+        let value: toml::Value = toml::from_str(
+            r#"
+model_provider = "codestudio-openrouter"
+model = "gpt-5.5"
+
+[model_providers.codestudio-openrouter]
+name = "CodeStudio OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "sk-router"
+"#,
+        )
+        .expect("config should parse");
+        let detected = detect_codex_native_profile(&value).expect("custom profile should import");
+
+        assert_eq!(detected.app, "codex");
+        assert_eq!(
+            normalize_detected_provider(&detected.provider, &detected.base_url),
+            "openrouter.ai"
+        );
+        assert_eq!(detected.protocol, PROTOCOL_OPENAI_RESPONSES);
+        assert_eq!(detected.model, "gpt-5.5");
+        assert_eq!(detected.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(detected.api_key, "sk-router");
+    }
+
+    #[test]
+    fn provider_slug_preserves_second_level_domain() {
+        assert_eq!(
+            provider_slug_from_base_url("https://api.apikey.fun/v1").as_deref(),
+            Some("apikey.fun")
+        );
+        assert_eq!(
+            provider_slug_from_base_url("https://openrouter.ai/api/v1").as_deref(),
+            Some("openrouter.ai")
+        );
+    }
+
+    #[test]
+    fn detected_provider_preserves_dotted_display_tokens() {
+        assert_eq!(
+            normalize_detected_provider("APIKEY.FUN", "https://api.apikey.fun/v1"),
+            "apikey.fun"
+        );
+        assert_eq!(
+            normalize_detected_provider("CodeStudio OpenRouter", "https://openrouter.ai/api/v1"),
+            "openrouter.ai"
+        );
+    }
+
+    #[test]
+    fn auto_detected_native_profile_name_allows_provider_correction() {
+        assert!(is_auto_detected_native_profile_name(
+            "Claude Code fun",
+            "claude",
+            "fun"
+        ));
+        assert!(is_auto_detected_native_profile_name(
+            "Claude Code fun 1",
+            "claude",
+            "fun"
+        ));
+        assert!(!is_auto_detected_native_profile_name(
+            "My Claude Code fun",
+            "claude",
+            "fun"
+        ));
+    }
+
+    #[test]
+    fn detects_codex_native_profile_with_api_key_from_auth_json() {
+        let value: toml::Value = toml::from_str(
+            r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "APIKEY.FUN"
+base_url = "https://api.apikey.fun/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+        )
+        .expect("config should parse");
+        let auth = serde_json::json!({
+            "OPENAI_API_KEY": "sk-auth-json"
+        });
+
+        let detected = detect_codex_native_profile_with_auth(&value, Some(&auth))
+            .expect("auth json backed profile should import");
+
+        assert_eq!(detected.app, "codex");
+        assert_eq!(
+            normalize_detected_provider(&detected.provider, &detected.base_url),
+            "apikey.fun"
+        );
+        assert_eq!(detected.protocol, PROTOCOL_OPENAI_RESPONSES);
+        assert_eq!(detected.model, "gpt-5.5");
+        assert_eq!(detected.base_url, "https://api.apikey.fun/v1");
+        assert_eq!(detected.api_key, "sk-auth-json");
+    }
+
+    #[test]
+    fn codex_direct_profile_matches_api_key_from_auth_json() {
+        let value: toml::Value = toml::from_str(
+            r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "APIKEY.FUN"
+base_url = "https://api.apikey.fun/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+        )
+        .expect("config should parse");
+        let auth = serde_json::json!({
+            "OPENAI_API_KEY": "sk-auth-json"
+        });
+        let profile = ProfileDraft {
+            id: "detected-codex".to_string(),
+            name: "Detected Codex API".to_string(),
+            icon: None,
+            remark: None,
+            app: "codex".to_string(),
+            is_builtin: false,
+            mode: ProviderApplyMode::Config,
+            provider: "apikey.fun".to_string(),
+            protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
+            model: "gpt-5.5".to_string(),
+            base_url: "https://api.apikey.fun/v1".to_string(),
+            auth_ref: Some("keychain:test/codex-auth-json/api_key".to_string()),
+            created_at: None,
+            updated_at: None,
+            last_test_status: Some("detected".to_string()),
+            usage_enabled: false,
+            sort_order: 0,
+        };
+        credentials::store_keychain_secret(
+            profile.auth_ref.as_deref().expect("auth ref"),
+            "sk-auth-json",
+        )
+        .expect("test key should store");
+
+        assert!(codex_direct_config_matches_profile(
+            &value,
+            Some(&auth),
+            &profile
+        ));
+    }
+
+    #[test]
+    fn skips_official_and_local_gateway_native_profiles() {
+        let official: toml::Value = toml::from_str(
+            r#"
+model_provider = "openai"
+
+[model_providers.openai]
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+        )
+        .expect("config should parse");
+        assert!(detect_codex_native_profile(&official).is_none());
+
+        let gateway: toml::Value = toml::from_str(
+            r#"
+model_provider = "codestudio-local"
+model = "codestudio-default"
+
+[model_providers.codestudio-local]
+base_url = "http://127.0.0.1:43112/tools/codex/v1"
+wire_api = "responses"
+experimental_bearer_token = "codestudio-local-token"
+"#,
+        )
+        .expect("config should parse");
+        assert!(detect_codex_native_profile(&gateway).is_none());
+
+        let env = HashMap::from([
+            (
+                "GOOGLE_GEMINI_BASE_URL".to_string(),
+                "http://127.0.0.1:43112/tools/gemini".to_string(),
+            ),
+            (
+                "GEMINI_API_KEY".to_string(),
+                "codestudio-local-token".to_string(),
+            ),
+        ]);
+        assert!(detect_gemini_native_profile(&env).is_none());
+    }
+
+    #[test]
+    fn detects_json_env_native_profiles() {
+        let claude = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.test/v1",
+                "ANTHROPIC_AUTH_TOKEN": "sk-claude"
+            }
+        });
+        let detected = detect_claude_native_profile(&claude).expect("claude profile");
+        assert_eq!(detected.app, "claude");
+        assert_eq!(detected.protocol, PROTOCOL_ANTHROPIC_MESSAGES);
+        assert_eq!(detected.model, "claude-sonnet-4-6");
+        assert_eq!(detected.base_url, "https://api.anthropic.test/v1");
+        assert_eq!(detected.api_key, "sk-claude");
+
+        let gemini = HashMap::from([
+            (
+                "GOOGLE_GEMINI_BASE_URL".to_string(),
+                "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            ),
+            ("GEMINI_API_KEY".to_string(), "sk-gemini".to_string()),
+            ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
+        ]);
+        let detected = detect_gemini_native_profile(&gemini).expect("gemini profile");
+        assert_eq!(detected.app, "gemini");
+        assert_eq!(detected.protocol, PROTOCOL_GOOGLE_GEMINI);
+        assert_eq!(detected.model, "gemini-3-pro");
+
+        let gemini_code_assist =
+            serde_json::json!({ GEMINI_CODE_ASSIST_API_KEY_SETTING: "sk-code-assist" });
+        let detected = detect_gemini_code_assist_native_profile(&gemini_code_assist)
+            .expect("gemini code assist profile");
+        assert_eq!(detected.app, "gemini-code-assist");
+        assert_eq!(detected.protocol, PROTOCOL_GOOGLE_GEMINI);
+        assert_eq!(
+            detected.base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+    }
+
+    #[test]
+    fn detects_json_provider_native_profiles() {
+        let opencode = serde_json::json!({
+            "model": "openrouter/gpt-5.5",
+            "provider": {
+                "openrouter": {
+                    "name": "OpenRouter",
+                    "options": {
+                        "baseURL": "https://openrouter.ai/api/v1",
+                        "apiKey": "sk-openrouter"
+                    }
+                }
+            }
+        });
+        let detected = detect_opencode_native_profile(&opencode).expect("opencode profile");
+        assert_eq!(detected.app, "opencode");
+        assert_eq!(detected.provider, "OpenRouter");
+        assert_eq!(detected.protocol, PROTOCOL_OPENAI_CHAT_COMPLETIONS);
+        assert_eq!(detected.model, "gpt-5.5");
+
+        let openclaw = serde_json::json!({
+            "agents": {
+                "defaults": {
+                    "model": {
+                        "primary": "openrouter/claude-sonnet"
+                    }
+                }
+            },
+            "models": {
+                "providers": {
+                    "openrouter": {
+                        "name": "OpenRouter",
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        "apiKey": "sk-openrouter"
+                    }
+                }
+            }
+        });
+        let detected = detect_openclaw_native_profile(&openclaw).expect("openclaw profile");
+        assert_eq!(detected.app, "openclaw");
+        assert_eq!(detected.provider, "OpenRouter");
+        assert_eq!(detected.model, "claude-sonnet");
+    }
+
+    #[test]
+    fn detects_hermes_native_profile() {
+        let value = parse_yaml_or_empty(
+            r#"
+model:
+  provider: custom
+  base_url: https://openrouter.ai/api/v1
+  api_key: sk-hermes
+  api_mode: chat_completions
+  default: gpt-5.5
+"#,
+            "Hermes config",
+        )
+        .expect("yaml should parse");
+        let detected = detect_hermes_native_profile(&value).expect("hermes profile");
+
+        assert_eq!(detected.app, "hermes");
+        assert_eq!(detected.protocol, PROTOCOL_OPENAI_CHAT_COMPLETIONS);
+        assert_eq!(detected.model, "gpt-5.5");
+        assert_eq!(detected.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(detected.api_key, "sk-hermes");
     }
 
     #[test]
@@ -6799,9 +8818,7 @@ experimental_bearer_token = "legacy-provider-key"
         assert!(toml_lookup(&value, "experimental_bearer_token").is_none());
         assert!(toml_lookup(&value, "auth.api_key").is_none());
         assert!(toml_lookup(&value, "model_providers.openai.base_url").is_none());
-        assert!(
-            toml_lookup(&value, "model_providers.openai.experimental_bearer_token").is_none()
-        );
+        assert!(toml_lookup(&value, "model_providers.openai.experimental_bearer_token").is_none());
     }
 
     #[test]
@@ -6840,6 +8857,18 @@ experimental_bearer_token = "legacy-provider-key"
         assert!(status.available);
         assert!(matches!(status.method, CodexAuthMethod::ApiKey));
         assert!(!status.detail.contains("sk-secret"));
+
+        let upper_status = codex_auth_status_from_file_content(
+            auth_path,
+            "file",
+            r#"{
+  "OPENAI_API_KEY": "sk-secret"
+}"#,
+        );
+
+        assert!(upper_status.available);
+        assert!(matches!(upper_status.method, CodexAuthMethod::ApiKey));
+        assert!(!upper_status.detail.contains("sk-secret"));
     }
 
     #[test]
@@ -7172,6 +9201,138 @@ experimental_bearer_token = "provider-key"
     }
 
     #[test]
+    fn non_codex_native_preview_includes_redacted_content() {
+        let paths = test_paths();
+        let profile = test_profile("claude", ProviderApplyMode::Gateway);
+        let preview =
+            build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Gateway)
+                .expect("preview should build");
+        let preview = attach_native_config_content_preview(
+            preview,
+            &profile,
+            &paths,
+            ProviderApplyMode::Gateway,
+        )
+        .expect("preview should be available");
+        let content = preview.content.expect("content preview should be included");
+
+        assert!(content.contains("ANTHROPIC_BASE_URL"));
+        assert!(content.contains("<redacted>"));
+        assert!(!content.contains("codestudio-local-test"));
+    }
+
+    #[test]
+    fn non_codex_config_preview_includes_placeholder_content_without_keychain_secret() {
+        let paths = test_paths();
+        let mut profile = test_profile("claude", ProviderApplyMode::Config);
+        profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+        let preview =
+            build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Config)
+                .expect("preview should build");
+        let preview = attach_native_config_content_preview(
+            preview,
+            &profile,
+            &paths,
+            ProviderApplyMode::Config,
+        )
+        .expect("preview should be available");
+        let content = preview.content.expect("content preview should be included");
+
+        assert!(content.contains("ANTHROPIC_BASE_URL"));
+        assert!(content.contains("keychain:****"));
+    }
+
+    #[test]
+    fn official_claude_config_preview_includes_restore_content() {
+        let paths = test_paths();
+        let settings_path = paths.home_dir.join(".claude").join("settings.json");
+        fs::create_dir_all(settings_path.parent().expect("settings parent"))
+            .expect("settings parent should be created");
+        fs::write(
+            &settings_path,
+            r#"{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://example.test/v1",
+    "ANTHROPIC_AUTH_TOKEN": "sk-test",
+    "ANTHROPIC_MODEL": "claude-test",
+    "OTHER_VALUE": "keep"
+  },
+  "model": "claude-test"
+}"#,
+        )
+        .expect("settings should be written");
+        let mut profile = test_profile("claude", ProviderApplyMode::Config);
+        profile.provider = "official".to_string();
+        profile.auth_ref = None;
+        profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+        let preview =
+            build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Config)
+                .expect("preview should build");
+        let preview = attach_native_config_content_preview(
+            preview,
+            &profile,
+            &paths,
+            ProviderApplyMode::Config,
+        )
+        .expect("preview should be available");
+        assert!(preview
+            .changes
+            .iter()
+            .any(|change| { change.key == "env.ANTHROPIC_BASE_URL" && change.action == "remove" }));
+        let content = preview.content.expect("content preview should be included");
+
+        assert!(content.contains("OTHER_VALUE"));
+        assert!(!content.contains("ANTHROPIC_BASE_URL"));
+        assert!(!content.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!content.contains("keychain:****"));
+    }
+
+    #[test]
+    fn unchanged_native_preview_is_not_write_enabled() {
+        let paths = test_paths();
+        let mut profile = test_profile("gemini", ProviderApplyMode::Config);
+        profile.provider = "official".to_string();
+        profile.auth_ref = None;
+        profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
+
+        let preview =
+            build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Config)
+                .expect("preview should build");
+        let preview = attach_native_config_content_preview(
+            preview,
+            &profile,
+            &paths,
+            ProviderApplyMode::Config,
+        )
+        .expect("preview should be available");
+
+        assert!(!preview.write_enabled);
+        assert!(preview.changes.is_empty());
+        assert!(preview.content.is_none());
+    }
+
+    #[test]
+    fn unchanged_native_apply_plan_is_filtered_out() {
+        let paths = test_paths();
+        let profile = test_profile("gemini", ProviderApplyMode::Gateway);
+        let plans = build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Gateway, false)
+            .expect("plan should build");
+        assert_eq!(plans.len(), 1);
+
+        let path = plans[0].path.clone();
+        fs::create_dir_all(path.parent().expect("env parent"))
+            .expect("env parent should be created");
+        fs::write(&path, &plans[0].content).expect("env content should be written");
+
+        let plans = filter_native_write_plans(
+            build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Gateway, false)
+                .expect("plan should rebuild"),
+        )
+        .expect("plans should filter");
+        assert!(plans.is_empty());
+    }
+
+    #[test]
     fn gemini_env_update_preserves_unrelated_values_and_removes_empty_model() {
         let current = "# user note\nOTHER=1\nGEMINI_MODEL=\"old\"\n";
         let updated = update_env_content(
@@ -7306,6 +9467,113 @@ experimental_bearer_token = "provider-key"
     }
 
     #[test]
+    fn claude_desktop_restart_uses_packaged_app_fallback() {
+        let targets = restart_targets_for_app("claude-desktop");
+
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(
+            targets[0].launch,
+            RestartLaunch::MsixPackage {
+                package_identities: &["Claude", "Anthropic.Claude"]
+            }
+        ));
+    }
+
+    #[test]
+    fn custom_codex_oauth_profile_write_plan_is_allowed_without_api_key() {
+        let plan = build_profile_write_plan(
+            "Codex OAuth Test",
+            "codex",
+            Some(&ProviderApplyMode::Config),
+            "official",
+            Some(PROTOCOL_OPENAI_RESPONSES),
+            "",
+            "",
+            false,
+        )
+        .expect("codex oauth profile should be allowed");
+
+        assert_eq!(plan.app, "codex");
+        assert_eq!(plan.provider, "official");
+        assert_eq!(plan.mode, ProviderApplyMode::Config);
+        assert_eq!(plan.secret_status, "oauth");
+        assert!(plan.auth_ref.is_none());
+    }
+
+    #[test]
+    fn custom_official_profile_write_plan_rejects_non_codex_tools() {
+        let result = build_profile_write_plan(
+            "Claude Official Copy",
+            "claude",
+            Some(&ProviderApplyMode::Config),
+            "official",
+            Some(PROTOCOL_ANTHROPIC_MESSAGES),
+            "",
+            "",
+            false,
+        );
+        let error = match result {
+            Ok(_) => panic!("non-codex official profiles should remain built-in only"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "Only Codex OAuth profiles can be saved as custom official profiles."
+        );
+    }
+
+    #[test]
+    fn profile_icon_normalization_accepts_short_text_and_image_data() {
+        assert_eq!(
+            normalize_profile_icon(Some(" API ")).expect("short icon should be accepted"),
+            Some("API".to_string())
+        );
+        assert_eq!(
+            normalize_profile_icon(Some(" data:image/png;base64,abcd "))
+                .expect("image data url should be accepted"),
+            Some("data:image/png;base64,abcd".to_string())
+        );
+        assert_eq!(
+            normalize_profile_icon(Some("")).expect("blank icon should clear"),
+            None
+        );
+        assert!(normalize_profile_icon(Some("TOO-LONG")).is_err());
+    }
+
+    #[test]
+    fn replace_deleted_active_profile_uses_official_for_config_mode() {
+        let mut config = test_app_config();
+        config
+            .active_profiles_by_mode
+            .config
+            .insert("codex".to_string(), "delete-me".to_string());
+        config
+            .active_profiles_by_mode
+            .gateway
+            .insert("codex".to_string(), "delete-me".to_string());
+        config
+            .active_profiles_by_mode
+            .gateway
+            .insert("gemini".to_string(), "keep-me".to_string());
+
+        assert!(replace_deleted_active_profile_with_official(
+            &mut config,
+            "codex",
+            "delete-me"
+        ));
+        assert_eq!(
+            config.active_profiles_by_mode.config.get("codex"),
+            Some(&builtin_official_profile_id("codex"))
+        );
+        assert!(!config.active_profiles_by_mode.gateway.contains_key("codex"));
+        assert_eq!(
+            config.active_profiles_by_mode.gateway.get("gemini"),
+            Some(&"keep-me".to_string())
+        );
+    }
+
+    #[test]
     fn claude_vscode_alias_uses_claude_profile_category() {
         assert_eq!(canonical_profile_app("claude-vscode"), "claude");
         assert_eq!(canonical_profile_app("claude-code-vscode"), "claude");
@@ -7319,6 +9587,8 @@ experimental_bearer_token = "provider-key"
         ProfileDraft {
             id: format!("{app}-custom"),
             name: "Custom".to_string(),
+            icon: None,
+            remark: None,
             app: app.to_string(),
             is_builtin: false,
             mode,
@@ -7327,41 +9597,26 @@ experimental_bearer_token = "provider-key"
             model: String::new(),
             base_url: "https://example.test/v1".to_string(),
             auth_ref: Some(format!("keychain:test/{app}/api_key")),
-            timeout_seconds: 120,
             created_at: None,
             updated_at: None,
             last_test_status: None,
+            usage_enabled: false,
+            sort_order: 0,
         }
     }
 
     fn test_paths() -> crate::core::app_paths::AppPaths {
-        let root = PathBuf::from("C:/Users/example");
+        let root = env::temp_dir().join(format!(
+            "codestudio-lite-profile-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
         crate::core::app_paths::AppPaths {
             home_dir: root.clone(),
             config_dir: root.join(".codestudio-lite"),
-            profiles_dir: root.join(".codestudio-lite").join("profiles"),
-            applied_dir: root.join(".codestudio-lite").join("applied"),
-            backups_dir: root.join(".codestudio-lite").join("backups"),
-            logs_dir: root.join(".codestudio-lite").join("logs"),
-            config_file: root.join(".codestudio-lite").join("config.toml"),
-            activity_log_file: root
-                .join(".codestudio-lite")
-                .join("logs")
-                .join("activity.jsonl"),
-            gateway_request_log_file: root
-                .join(".codestudio-lite")
-                .join("logs")
-                .join("gateway-requests.jsonl"),
+            downloads_dir: root.join(".codestudio-lite").join("downloads"),
+            database_file: root.join(".codestudio-lite").join("app_state.sqlite"),
         }
     }
-}
-
-fn escape_toml_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {

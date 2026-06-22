@@ -15,8 +15,9 @@
         "title": "CodeStudio Lite",
         "width": 1100,
         "height": 760,
+        "center": true,
         "minWidth": 760,
-        "minHeight": 620
+        "minHeight": 560
       }
     ],
     "security": {

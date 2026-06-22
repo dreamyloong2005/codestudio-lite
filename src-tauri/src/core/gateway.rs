@@ -1,18 +1,18 @@
 use crate::core::activity_log;
-use crate::core::app_paths::{app_paths, display_path};
 use crate::core::credentials;
 use crate::core::gateway_request_log;
+use crate::core::privacy_filter::{self, PrivacyFilterAction, PrivacyFilterMode};
 use crate::core::profile;
+use crate::core::storage;
 use crate::core::types::{
     GatewayControlResult, GatewayRequestLogEntry, GatewayStatus, ProfileDraft, ProfileSummary,
-    Severity,
+    Severity, UpdateGatewaySettingsRequest,
 };
 use crate::core::upstream_http;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Sender};
@@ -28,10 +28,12 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const CLIENT_PROVIDER_ID: &str = "codestudio-local";
 const CLIENT_MODEL: &str = "codestudio-default";
 const TOOL_SCOPED_PREFIX: &str = "/tools/";
+const UPSTREAM_TIMEOUT_SECONDS: u16 = 120;
 const PROTOCOL_OPENAI_CHAT_COMPLETIONS: &str = "openai-chat-completions";
 const PROTOCOL_OPENAI_RESPONSES: &str = "openai-responses";
 const PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
 const PROTOCOL_GOOGLE_GEMINI: &str = "google-gemini";
+const GATEWAY_CONFIG_STATE_KEY: &str = "gateway.config";
 
 #[derive(Debug, Clone)]
 pub struct GatewayClientConfig {
@@ -51,6 +53,7 @@ struct GatewayConfig {
     port: u16,
     auth_enabled: bool,
     model_override: bool,
+    privacy_filter_mode: PrivacyFilterMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +63,7 @@ struct PartialGatewayConfig {
     port: Option<u16>,
     auth_enabled: Option<bool>,
     model_override: Option<bool>,
+    privacy_filter_mode: Option<PrivacyFilterMode>,
 }
 
 #[derive(Default)]
@@ -110,7 +114,7 @@ pub fn start_gateway() -> Result<GatewayControlResult, String> {
         .map_err(|err| err.to_string())?;
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
-    let server_config = config.clone();
+    let fallback_config = config.clone();
     let started_at = Utc::now().to_rfc3339();
     let handle = thread::spawn(move || loop {
         if shutdown_rx.try_recv().is_ok() {
@@ -119,7 +123,8 @@ pub fn start_gateway() -> Result<GatewayControlResult, String> {
 
         match listener.accept() {
             Ok((stream, _)) => {
-                let server_config = server_config.clone();
+                let server_config =
+                    load_or_create_gateway_config().unwrap_or_else(|_| fallback_config.clone());
                 thread::spawn(move || {
                     let _ = handle_connection(stream, &server_config);
                 });
@@ -178,6 +183,21 @@ pub fn stop_gateway() -> Result<GatewayControlResult, String> {
 pub fn restart_gateway() -> Result<GatewayControlResult, String> {
     let _ = stop_gateway()?;
     start_gateway()
+}
+
+pub fn update_gateway_settings(
+    request: UpdateGatewaySettingsRequest,
+) -> Result<GatewayControlResult, String> {
+    profile::ensure_app_dirs()?;
+    let mut config = load_or_create_gateway_config()?;
+    if let Some(mode) = request.privacy_filter_mode {
+        config.privacy_filter_mode = mode;
+    }
+    persist_gateway_config(&config)?;
+
+    Ok(GatewayControlResult {
+        status: build_status(&config)?,
+    })
 }
 
 pub fn shutdown_for_app_exit() {
@@ -260,7 +280,7 @@ fn apply_gateway_native_configs_after_start() -> Result<(), String> {
     if written > 0 {
         activity_log::append(
             Severity::Info,
-            format!("Updated {written} client config file(s) for Local Gateway mode."),
+            format!("Updated {written} client config file(s) for Local Gateway profiles."),
         )?;
     }
     Ok(())
@@ -285,6 +305,7 @@ fn build_status(config: &GatewayConfig) -> Result<GatewayStatus, String> {
         health_url: format!("http://{}:{}/health", config.host, config.port),
         auth_enabled: config.auth_enabled,
         token_preview: mask_token(&config.token),
+        privacy_filter_mode: config.privacy_filter_mode,
         active_profile_id: active.as_ref().map(|profile| profile.id.clone()),
         active_profile_name: active.as_ref().map(|profile| profile.name.clone()),
         active_model: active.as_ref().and_then(|profile| profile_model(&profile)),
@@ -330,22 +351,18 @@ fn default_active_profile_from_summary(summary: &ProfileSummary) -> Option<Profi
 }
 
 fn load_or_create_gateway_config() -> Result<GatewayConfig, String> {
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let config_path = paths.config_dir.join("gateway.toml");
-
-    if config_path.exists() {
-        if let Ok(content) = fs::read_to_string(&config_path) {
-            if let Ok(partial) = toml::from_str::<PartialGatewayConfig>(&content) {
-                let config = GatewayConfig {
-                    token: normalize_token(partial.token),
-                    host: partial.host.unwrap_or_else(|| DEFAULT_HOST.to_string()),
-                    port: partial.port.unwrap_or(DEFAULT_PORT),
-                    auth_enabled: partial.auth_enabled.unwrap_or(true),
-                    model_override: partial.model_override.unwrap_or(true),
-                };
-                persist_gateway_config(&config)?;
-                return Ok(config);
-            }
+    if let Some(content) = storage::load_state_json(GATEWAY_CONFIG_STATE_KEY)? {
+        if let Ok(partial) = toml::from_str::<PartialGatewayConfig>(&content) {
+            let config = GatewayConfig {
+                token: normalize_token(partial.token),
+                host: partial.host.unwrap_or_else(|| DEFAULT_HOST.to_string()),
+                port: partial.port.unwrap_or(DEFAULT_PORT),
+                auth_enabled: partial.auth_enabled.unwrap_or(true),
+                model_override: partial.model_override.unwrap_or(true),
+                privacy_filter_mode: partial.privacy_filter_mode.unwrap_or_default(),
+            };
+            persist_gateway_config(&config)?;
+            return Ok(config);
         }
     }
 
@@ -355,6 +372,7 @@ fn load_or_create_gateway_config() -> Result<GatewayConfig, String> {
         port: DEFAULT_PORT,
         auth_enabled: true,
         model_override: true,
+        privacy_filter_mode: PrivacyFilterMode::default(),
     };
     persist_gateway_config(&config)?;
     Ok(config)
@@ -365,34 +383,8 @@ fn persist_gateway_config(config: &GatewayConfig) -> Result<(), String> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|err| err.to_string())?;
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    let path = paths.config_dir.join("gateway.toml");
     let content = toml::to_string_pretty(config).map_err(|err| err.to_string())?;
-    let tmp_path = path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
-    fs::write(&tmp_path, content).map_err(|err| err.to_string())?;
-    if path.exists() {
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.to_string()),
-        }
-    }
-    match fs::rename(&tmp_path, &path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&path);
-            fs::rename(&tmp_path, &path).map_err(|err| {
-                format!(
-                    "Could not write gateway config at {}: {err}",
-                    display_path(&path)
-                )
-            })
-        }
-        Err(err) => Err(format!(
-            "Could not write gateway config at {}: {err}",
-            display_path(&path)
-        )),
-    }
+    storage::save_state_json(GATEWAY_CONFIG_STATE_KEY, &content)
 }
 
 fn normalize_token(token: Option<String>) -> String {
@@ -441,7 +433,7 @@ fn handle_connection(mut stream: TcpStream, config: &GatewayConfig) -> Result<()
         .map_err(|err| err.to_string())?;
     let request = read_http_request(&mut stream)?;
     let started = Instant::now();
-    let log_context = RequestLogContext::from_request(&request);
+    let log_context = RequestLogContext::from_request(&request, config);
     let response = route_request(request, config);
     let expected_status = response.status();
     let write_result = write_route_response(&mut stream, response);
@@ -552,10 +544,13 @@ struct RequestLogContext {
     path: String,
     provider: Option<String>,
     model: Option<String>,
+    privacy_filter_mode: PrivacyFilterMode,
+    privacy_filter_hit_count: usize,
+    privacy_filter_action: PrivacyFilterAction,
 }
 
 impl RequestLogContext {
-    fn from_request(request: &HttpRequest) -> Self {
+    fn from_request(request: &HttpRequest, config: &GatewayConfig) -> Self {
         let target = GatewayRouteTarget::from_request(request);
         let active = active_profile_for_target(&target);
         let request_body = if request.method == "POST"
@@ -576,6 +571,12 @@ impl RequestLogContext {
                 .and_then(|value| value.as_str())
                 .map(ToString::to_string)
         });
+        let privacy_report = request_body
+            .clone()
+            .map(|mut value| {
+                privacy_filter::filter_json_value(&mut value, config.privacy_filter_mode)
+            })
+            .unwrap_or(privacy_filter::PrivacyFilterReport { hit_count: 0 });
 
         Self {
             client: detect_client(request, target.tool_id.as_deref()),
@@ -583,6 +584,9 @@ impl RequestLogContext {
             path: target.original_path,
             provider: active.map(|profile| profile.provider),
             model,
+            privacy_filter_mode: config.privacy_filter_mode,
+            privacy_filter_hit_count: privacy_report.hit_count,
+            privacy_filter_action: privacy_report.action_for_mode(config.privacy_filter_mode),
         }
     }
 }
@@ -751,11 +755,25 @@ fn log_gateway_request(
         return;
     }
 
+    let mut context = context;
+    let entry = gateway_request_log_entry(&mut context, status, latency, write_error);
+    let _ = gateway_request_log::append(&entry);
+}
+
+fn gateway_request_log_entry(
+    context: &mut RequestLogContext,
+    status: u16,
+    latency: Duration,
+    write_error: Option<&String>,
+) -> GatewayRequestLogEntry {
     let error_summary = if let Some(err) = write_error {
         Some(format!("Gateway write failed: {err}"))
     } else if status >= 400 {
         Some(match status {
             401 => "Unauthorized local gateway request".to_string(),
+            400 if matches!(context.privacy_filter_action, PrivacyFilterAction::Blocked) => {
+                "Request blocked by privacy filter".to_string()
+            }
             404 => "Gateway route not implemented".to_string(),
             _ => format!("Gateway returned HTTP {status}"),
         })
@@ -763,20 +781,21 @@ fn log_gateway_request(
         None
     };
 
-    let entry = GatewayRequestLogEntry {
+    GatewayRequestLogEntry {
         id: Uuid::new_v4().to_string(),
         timestamp: Utc::now().to_rfc3339(),
-        client: context.client,
-        method: context.method,
-        path: context.path,
-        provider: context.provider,
-        model: context.model,
+        client: std::mem::take(&mut context.client),
+        method: std::mem::take(&mut context.method),
+        path: std::mem::take(&mut context.path),
+        provider: context.provider.take(),
+        model: context.model.take(),
         status,
         latency_ms: latency.as_millis(),
         error_summary,
-    };
-
-    let _ = gateway_request_log::append(&entry);
+        privacy_filter_mode: context.privacy_filter_mode,
+        privacy_filter_hit_count: context.privacy_filter_hit_count,
+        privacy_filter_action: context.privacy_filter_action,
+    }
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -1341,6 +1360,10 @@ fn forward_gateway_request(
         Err(err) => return unsupported_protocol_response(err),
     };
 
+    if let Err(response) = apply_gateway_privacy_filter(&mut request_body, config) {
+        return response;
+    }
+
     let api_key = match load_gateway_profile_api_key(&profile) {
         Ok(api_key) => api_key,
         Err(response) => return response,
@@ -1358,7 +1381,6 @@ fn forward_gateway_request(
             upstream_headers_with_passthrough(upstream_protocol, &api_key, request_headers);
 
         if stream {
-            let timeout_seconds = profile.timeout_seconds;
             return RouteResponse::Stream(StreamingResponse {
                 expected_status: 200,
                 run: Box::new(move |stream| {
@@ -1366,7 +1388,7 @@ fn forward_gateway_request(
                         &endpoint,
                         &headers,
                         &request_body,
-                        timeout_seconds,
+                        UPSTREAM_TIMEOUT_SECONDS,
                         stream,
                     )
                 }),
@@ -1377,7 +1399,7 @@ fn forward_gateway_request(
             &endpoint,
             &headers,
             &request_body,
-            profile.timeout_seconds,
+            UPSTREAM_TIMEOUT_SECONDS,
         );
     }
 
@@ -1396,7 +1418,6 @@ fn forward_gateway_request(
         let headers = converted.headers;
         let body = converted.body;
         let model = converted.model;
-        let timeout_seconds = profile.timeout_seconds;
         return RouteResponse::Stream(StreamingResponse {
             expected_status: 200,
             run: Box::new(move |stream| {
@@ -1404,7 +1425,7 @@ fn forward_gateway_request(
                     &endpoint,
                     &headers,
                     &body,
-                    timeout_seconds,
+                    UPSTREAM_TIMEOUT_SECONDS,
                     upstream_protocol,
                     client_protocol,
                     &model,
@@ -1417,7 +1438,7 @@ fn forward_gateway_request(
         &converted.endpoint,
         &converted.headers,
         &converted.body,
-        profile.timeout_seconds,
+        UPSTREAM_TIMEOUT_SECONDS,
     ) {
         Ok(response) => response,
         Err(err) => {
@@ -1480,6 +1501,27 @@ fn forward_gateway_request(
             }),
         )),
     }
+}
+
+fn apply_gateway_privacy_filter(
+    request_body: &mut Value,
+    config: &GatewayConfig,
+) -> Result<privacy_filter::PrivacyFilterReport, RouteResponse> {
+    let report = privacy_filter::filter_json_value(request_body, config.privacy_filter_mode);
+    if matches!(config.privacy_filter_mode, PrivacyFilterMode::Block) && report.hit_count > 0 {
+        return Err(RouteResponse::Buffered(json_response(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Request blocked by Local Gateway privacy filter.",
+                    "type": "privacy_filter_blocked",
+                    "hit_count": report.hit_count
+                }
+            }),
+        )));
+    }
+    Ok(report)
 }
 
 fn unsupported_protocol_response(message: String) -> RouteResponse {
@@ -4908,6 +4950,17 @@ mod tests {
             port: DEFAULT_PORT,
             auth_enabled,
             model_override: true,
+            privacy_filter_mode: PrivacyFilterMode::Off,
+        }
+    }
+
+    fn test_config_with_privacy_filter(
+        auth_enabled: bool,
+        privacy_filter_mode: PrivacyFilterMode,
+    ) -> GatewayConfig {
+        GatewayConfig {
+            privacy_filter_mode,
+            ..test_config(auth_enabled)
         }
     }
 
@@ -4952,6 +5005,8 @@ mod tests {
         ProfileDraft {
             id: "profile-test".to_string(),
             name: "Test".to_string(),
+            icon: None,
+            remark: None,
             app: "codex".to_string(),
             is_builtin: false,
             mode: Default::default(),
@@ -4960,10 +5015,11 @@ mod tests {
             model: "test-model".to_string(),
             base_url: "https://api.example.test/v1".to_string(),
             auth_ref: Some("test-key".to_string()),
-            timeout_seconds: 30,
             created_at: None,
             updated_at: None,
             last_test_status: None,
+            usage_enabled: false,
+            sort_order: 0,
         }
     }
 
@@ -5384,6 +5440,104 @@ mod tests {
             "authorization",
             "Bearer local-token"
         ));
+    }
+
+    #[test]
+    fn privacy_filter_redacts_request_body_before_protocol_conversion() {
+        let mut request_body = json!({
+            "model": "codestudio-default",
+            "messages": [{
+                "role": "user",
+                "content": "Send alice@example.com with token sk-test1234567890abcdef"
+            }]
+        });
+        let config = test_config_with_privacy_filter(false, PrivacyFilterMode::Redact);
+        let result = apply_gateway_privacy_filter(&mut request_body, &config);
+
+        assert!(result.is_ok());
+        let parts = request_parts_from_client(
+            GatewayProtocol::OpenAiChatCompletions,
+            &request_body,
+            "claude",
+        );
+        let body = request_body_for_protocol(GatewayProtocol::AnthropicMessages, &parts, false);
+        let content = body["messages"][0]["content"].as_str().unwrap();
+
+        assert!(content.contains("[邮箱]"));
+        assert!(content.contains("[密钥]"));
+        assert!(!content.contains("alice@example.com"));
+        assert!(!content.contains("sk-test"));
+    }
+
+    #[test]
+    fn privacy_filter_block_mode_rejects_sensitive_request_body() {
+        let mut request_body = json!({
+            "input": "My email is alice@example.com"
+        });
+        let config = test_config_with_privacy_filter(false, PrivacyFilterMode::Block);
+        let result = apply_gateway_privacy_filter(&mut request_body, &config);
+
+        assert!(result.is_err());
+        let response = result.err().unwrap();
+        assert_eq!(response.status(), 400);
+        let body = response_body_json(response);
+        assert_eq!(
+            body["error"]["type"].as_str(),
+            Some("privacy_filter_blocked")
+        );
+    }
+
+    #[test]
+    fn privacy_filter_metadata_records_action_without_prompt_content() {
+        let mut context = RequestLogContext {
+            client: "Codex".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/responses".to_string(),
+            provider: Some("test-provider".to_string()),
+            model: Some("test-model".to_string()),
+            privacy_filter_mode: PrivacyFilterMode::Redact,
+            privacy_filter_hit_count: 2,
+            privacy_filter_action: PrivacyFilterAction::Redacted,
+        };
+
+        let entry = gateway_request_log_entry(&mut context, 200, Duration::from_millis(12), None);
+
+        assert_eq!(entry.privacy_filter_mode, PrivacyFilterMode::Redact);
+        assert_eq!(entry.privacy_filter_hit_count, 2);
+        assert_eq!(entry.privacy_filter_action, PrivacyFilterAction::Redacted);
+        let serialized = serde_json::to_string(&entry).expect("entry should serialize");
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(!serialized.contains("sk-test"));
+    }
+
+    #[test]
+    fn privacy_filter_metadata_detects_all_client_protocol_shapes() {
+        let config = test_config_with_privacy_filter(false, PrivacyFilterMode::Detect);
+        let mut requests = vec![
+            json!({
+                "model": "gpt",
+                "input": "alice@example.com"
+            }),
+            json!({
+                "model": "gpt",
+                "messages": [{ "role": "user", "content": "alice@example.com" }]
+            }),
+            json!({
+                "model": "claude",
+                "messages": [{ "role": "user", "content": [{ "type": "text", "text": "alice@example.com" }] }]
+            }),
+            json!({
+                "contents": [{ "parts": [{ "text": "alice@example.com" }] }]
+            }),
+        ];
+
+        for request_body in &mut requests {
+            let report = match apply_gateway_privacy_filter(request_body, &config) {
+                Ok(report) => report,
+                Err(_) => panic!("detect mode should not block"),
+            };
+            assert_eq!(report.hit_count, 1);
+        }
     }
 
     #[test]

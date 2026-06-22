@@ -92,6 +92,56 @@ if ($null -ne $p) {{
     serde_json::from_str(&output).ok()
 }
 
+pub fn detect_first_msix_package(package_identities: &[&str]) -> Option<InstalledMsixPackage> {
+    package_identities
+        .iter()
+        .find_map(|package_identity| detect_msix_package(package_identity))
+        // Fallback for environments where the Get-AppxPackage cmdlet returns
+        // nothing even though the package is registered (observed on some VMs
+        // where the Appx module/profile load behaves differently). The AppModel
+        // package repository is the same registry hive Get-AppxPackage reads
+        // from, so reading it directly via Get-ItemProperty avoids the cmdlet
+        // entirely. Scans for any Claude_*_x64__* package regardless of the
+        // package-identity list, since the registry key is keyed by full
+        // PackageFullName.
+        .or_else(detect_claude_msix_package_from_registry)
+}
+
+/// Read the AppModel package repository registry directly to detect a Claude
+/// MSIX install without relying on the Get-AppxPackage cmdlet. Returns the
+/// highest-version Claude_*_x64__* package found under the current user's
+/// package repository. Used as a fallback when Get-AppxPackage yields nothing.
+fn detect_claude_msix_package_from_registry() -> Option<InstalledMsixPackage> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let script = r#"
+$root = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages"
+if (-not (Test-Path $root)) { exit 0 }
+$best = Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object {
+  $_.PSChildName -like "Claude_*_x64__*"
+} | Sort-Object -Descending | Select-Object -First 1
+if (-not $best) { exit 0 }
+$props = Get-ItemProperty $best.PSPath -ErrorAction SilentlyContinue
+$id = [string]$best.PSChildName
+$parts = $id -split '_'
+$name = $parts[0]
+$version = $parts[1]
+$pfn = $name + "_" + ($id -replace '^.*_x64__','')
+[pscustomobject]@{
+  path = [string]$props.PackageRootFolder
+  version = $version
+  arch = $null
+  packageFamilyName = $pfn
+} | ConvertTo-Json -Compress
+"#;
+    let output = run_powershell(script).ok()?;
+    if output.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str(&output).ok()
+}
+
 pub fn detect_macos_app(
     candidate_paths: &[PathBuf],
     bundle_identifier: Option<&str>,
@@ -172,7 +222,7 @@ try {{
         name = ps_quote(package_identity)
     );
     let json = run_powershell(&script)?;
-    serde_json::from_str(&json).map_err(|err| format!("解析 MSIX 安装结果失败：{err}"))
+    serde_json::from_str(&json).map_err(|err| format!("Failed to parse MSIX install result: {err}"))
 }
 
 pub fn remove_msix_package(package_identity: &str) -> Result<MsixRemoveReport, String> {
@@ -197,16 +247,17 @@ try {{
         name = ps_quote(package_identity)
     );
     let json = run_powershell(&script)?;
-    serde_json::from_str(&json).map_err(|err| format!("解析 MSIX 卸载结果失败：{err}"))
+    serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse MSIX uninstall result: {err}"))
 }
 
 pub fn probe_msix_capabilities() -> Vec<PackageCapability> {
     if !cfg!(target_os = "windows") {
         return vec![PackageCapability {
             id: "platform".to_string(),
-            label: "平台".to_string(),
+            label: "Platform".to_string(),
             status: Severity::Info,
-            detail: "当前不是 Windows，MSIX/便携版执行链路不可用。".to_string(),
+            detail: "The current platform is not Windows, so the MSIX/portable execution path is unavailable.".to_string(),
         }];
     }
 
@@ -238,9 +289,9 @@ try {
     let Some(value) = value else {
         return vec![PackageCapability {
             id: "probe".to_string(),
-            label: "能力探测".to_string(),
+            label: "Capability check".to_string(),
             status: Severity::Warning,
-            detail: "PowerShell 能力探测失败，将保守允许便携版 fallback。".to_string(),
+            detail: "PowerShell capability probing failed; portable fallback will be allowed conservatively.".to_string(),
         }];
     };
 
@@ -275,9 +326,9 @@ try {
                 Severity::Error
             },
             detail: if add_appx {
-                "MSIX 安装命令可用。".to_string()
+                "MSIX install command is available.".to_string()
             } else {
-                "Add-AppxPackage 不可用，将使用便携版 fallback。".to_string()
+                "Add-AppxPackage is unavailable; portable fallback will be used.".to_string()
             },
         },
         PackageCapability {
@@ -289,21 +340,21 @@ try {
                 Severity::Error
             },
             detail: if appx_svc {
-                format!("AppXSvc 启动类型：{appx_start}")
+                format!("AppXSvc start type: {appx_start}")
             } else {
-                "AppXSvc 服务缺失。".to_string()
+                "AppXSvc service is missing.".to_string()
             },
         },
         PackageCapability {
             id: "msix-runtime".to_string(),
-            label: "MSIX 运行时".to_string(),
+            label: "MSIX runtime".to_string(),
             status: if package_manager {
                 Severity::Ok
             } else {
                 Severity::Error
             },
             detail: if package_manager {
-                "Windows PackageManager 可激活。".to_string()
+                "Windows PackageManager can be activated.".to_string()
             } else {
                 msix_runtime_unavailable_message(Some(package_manager_error))
             },
@@ -315,9 +366,10 @@ pub fn probe_macos_dmg_capabilities() -> Vec<PackageCapability> {
     if !cfg!(target_os = "macos") {
         return vec![PackageCapability {
             id: "platform".to_string(),
-            label: "平台".to_string(),
+            label: "Platform".to_string(),
             status: Severity::Info,
-            detail: "当前不是 macOS，DMG 安装链路不可用。".to_string(),
+            detail: "The current platform is not macOS, so the DMG install path is unavailable."
+                .to_string(),
         }];
     }
 
@@ -333,9 +385,9 @@ pub fn probe_macos_dmg_capabilities() -> Vec<PackageCapability> {
                 Severity::Error
             },
             detail: if hdiutil {
-                "DMG 挂载命令可用。".to_string()
+                "DMG mount command is available.".to_string()
             } else {
-                "hdiutil 不可用，无法挂载 DMG。".to_string()
+                "hdiutil is unavailable, so DMG files cannot be mounted.".to_string()
             },
         },
         PackageCapability {
@@ -343,15 +395,111 @@ pub fn probe_macos_dmg_capabilities() -> Vec<PackageCapability> {
             label: "ditto".to_string(),
             status: if ditto { Severity::Ok } else { Severity::Error },
             detail: if ditto {
-                "应用复制命令可用。".to_string()
+                "App copy command is available.".to_string()
             } else {
-                "ditto 不可用，无法复制 .app 应用包。".to_string()
+                "ditto is unavailable, so .app bundles cannot be copied.".to_string()
             },
         },
     ]
 }
 
-pub fn launch_msix_package(package_identity: &str) -> Result<(), String> {
+pub fn launch_msix_package_with_args(
+    package_identity: &str,
+    arguments: &[String],
+) -> Result<u32, String> {
+    if !cfg!(target_os = "windows") {
+        return Err("MSIX launch arguments are only supported on Windows.".to_string());
+    }
+    let app_user_model_id = msix_app_user_model_id(package_identity)?;
+    let arguments = command_line_arguments(arguments);
+    activate_packaged_app(&app_user_model_id, &arguments)
+}
+
+pub fn register_msix_manifest(manifest_path: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "windows") {
+        return Err("MSIX registration is only supported on Windows.".to_string());
+    }
+    if !manifest_path.is_file() {
+        return Err(format!(
+            "MSIX manifest was not found: {}",
+            manifest_path.display()
+        ));
+    }
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+Add-AppxPackage -Register {manifest} -DisableDevelopmentMode -ForceApplicationShutdown -ErrorAction Stop
+"#,
+        manifest = ps_quote(&manifest_path.to_string_lossy())
+    );
+    run_powershell(&script).map(|_| ())
+}
+
+pub fn launch_first_msix_package_with_args(
+    package_identities: &[&str],
+    arguments: &[String],
+) -> Result<u32, String> {
+    if !cfg!(target_os = "windows") {
+        return Err("MSIX launch arguments are only supported on Windows.".to_string());
+    }
+    let Some(installed) = detect_first_msix_package(package_identities) else {
+        return Err("Packaged app is not installed.".to_string());
+    };
+    let Some(package_name) = installed
+        .package_family_name
+        .as_deref()
+        .and_then(|family| {
+            package_identities
+                .iter()
+                .find(|identity| family.starts_with(&format!("{identity}_")))
+                .copied()
+        })
+        .or_else(|| {
+            package_identities
+                .iter()
+                .find(|identity| installed.path.contains(**identity))
+                .copied()
+        })
+    else {
+        return Err("Unable to resolve packaged app identity.".to_string());
+    };
+    launch_msix_package_with_args(package_name, arguments).or_else(|activation_err| {
+        launch_desktop_package_fallback(&installed, arguments)
+            .map(|_| 0)
+            .map_err(|fallback_err| {
+                format!("{activation_err}; desktop package fallback failed: {fallback_err}")
+            })
+    })
+}
+
+pub fn launch_first_desktop_package_with_args(
+    package_identities: &[&str],
+    arguments: &[String],
+) -> Result<(), String> {
+    if !cfg!(target_os = "windows") {
+        return Err("Desktop package execution is only supported on Windows.".to_string());
+    }
+    let Some(installed) = detect_first_msix_package(package_identities) else {
+        return Err("Packaged desktop app is not installed.".to_string());
+    };
+    launch_desktop_package_fallback(&installed, arguments)
+}
+
+fn launch_desktop_package_fallback(
+    installed: &InstalledMsixPackage,
+    arguments: &[String],
+) -> Result<(), String> {
+    if !cfg!(target_os = "windows") {
+        return Err("Desktop package fallback is only supported on Windows.".to_string());
+    }
+    let Some(package_family_name) = installed.package_family_name.as_deref() else {
+        return Err("Package family name is unavailable.".to_string());
+    };
+    let script = desktop_package_fallback_script(package_family_name, arguments);
+    run_powershell(&script).map(|_| ())
+}
+
+fn msix_app_user_model_id(package_identity: &str) -> Result<String, String> {
     let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
@@ -361,23 +509,141 @@ $app = (Get-AppxPackageManifest $pkg).Package.Applications.Application
 if ($app -is [array]) {{ $app = $app[0] }}
 $id = $app.Id
 if (-not $id) {{ $id = 'App' }}
-Start-Process ("shell:AppsFolder\" + $pkg.PackageFamilyName + "!" + $id)
+$pkg.PackageFamilyName + "!" + $id
 "#,
         name = ps_quote(package_identity)
     );
-    run_powershell(&script).map(|_| ())
+    let id = run_powershell(&script)?;
+    if id.trim().is_empty() {
+        Err("MSIX app user model id is empty.".to_string())
+    } else {
+        Ok(id.trim().to_string())
+    }
+}
+
+fn command_line_arguments(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| quote_windows_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn desktop_package_fallback_script(package_family_name: &str, arguments: &[String]) -> String {
+    let argument_line = command_line_arguments(arguments);
+    format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+if (-not (Get-Command Invoke-CommandInDesktopPackage -ErrorAction SilentlyContinue)) {{
+  throw 'Invoke-CommandInDesktopPackage is unavailable.'
+}}
+$pkg = Get-AppxPackage -ErrorAction SilentlyContinue |
+  Where-Object {{ $_.PackageFamilyName -eq {package_family_name} }} |
+  Sort-Object -Property Version -Descending |
+  Select-Object -First 1
+if ($null -eq $pkg) {{ throw 'Package is not installed.' }}
+$app = (Get-AppxPackageManifest $pkg).Package.Applications.Application
+if ($app -is [array]) {{ $app = $app[0] }}
+$appId = [string]$app.Id
+if (-not $appId) {{ $appId = 'App' }}
+$command = [string]$app.Executable
+if (-not $command) {{ throw 'Package executable is unavailable.' }}
+$argsLine = {arguments}
+$startCommand = "Start-Process -FilePath '" + $command.Replace("'", "''") + "'"
+if ($argsLine) {{
+  $startCommand += " -ArgumentList '" + $argsLine.Replace("'", "''") + "'"
+}}
+$innerArgs = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + $startCommand.Replace('"', '\"') + '"'
+Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId $appId -Command 'powershell.exe' -Args $innerArgs -ErrorAction Stop
+"#,
+        package_family_name = ps_quote(package_family_name),
+        arguments = ps_quote(&argument_line),
+    )
+}
+
+fn quote_windows_argument(arg: &str) -> String {
+    if !arg.is_empty() && !arg.bytes().any(|byte| matches!(byte, b' ' | b'\t' | b'"')) {
+        return arg.to_string();
+    }
+    let mut output = String::from("\"");
+    let mut backslashes = 0;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                output.push_str(&"\\".repeat(backslashes * 2 + 1));
+                output.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                output.push_str(&"\\".repeat(backslashes));
+                output.push(ch);
+                backslashes = 0;
+            }
+        }
+    }
+    output.push_str(&"\\".repeat(backslashes * 2));
+    output.push('"');
+    output
+}
+
+#[cfg(windows)]
+fn activate_packaged_app(app_user_model_id: &str, arguments: &str) -> Result<u32, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        ApplicationActivationManager, IApplicationActivationManager, ACTIVATEOPTIONS,
+    };
+
+    unsafe {
+        let coinit = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let should_uninitialize = coinit.is_ok();
+        coinit
+            .ok()
+            .or_else(|error| {
+                const RPC_E_CHANGED_MODE: i32 = -2147417850;
+                if error.code().0 == RPC_E_CHANGED_MODE {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|err| format!("Failed to initialize COM for MSIX launch: {err}"))?;
+
+        let result: windows::core::Result<u32> = (|| {
+            let manager: IApplicationActivationManager =
+                CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)?;
+            manager.ActivateApplication(
+                &HSTRING::from(app_user_model_id),
+                &HSTRING::from(arguments),
+                ACTIVATEOPTIONS(0),
+            )
+        })();
+
+        if should_uninitialize {
+            CoUninitialize();
+        }
+        result.map_err(|err| format!("Failed to launch MSIX app with arguments: {err}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn activate_packaged_app(_app_user_model_id: &str, _arguments: &str) -> Result<u32, String> {
+    Err("Packaged app activation is only supported on Windows.".to_string())
 }
 
 pub fn launch_macos_app(path: &Path) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
-        return Err("当前平台暂不支持启动 macOS 应用。".to_string());
+        return Err("Launching macOS apps is not supported on the current platform.".to_string());
     }
 
     hidden_command("open")
         .arg(path)
         .spawn()
         .map(|_| ())
-        .map_err(|err| format!("启动 macOS 应用失败：{err}"))
+        .map_err(|err| format!("Failed to launch macOS app: {err}"))
 }
 
 pub fn quit_macos_app(app_name: &str) -> Result<(), String> {
@@ -405,7 +671,7 @@ pub fn quit_macos_app(app_name: &str) -> Result<(), String> {
         .output();
     thread::sleep(Duration::from_millis(500));
     if macos_process_running(display_name) {
-        Err(format!("{display_name} 仍在运行。"))
+        Err(format!("{display_name} is still running."))
     } else {
         Ok(())
     }
@@ -418,21 +684,26 @@ pub fn install_macos_dmg(
     bundle_identifier: Option<&str>,
 ) -> Result<MacosDmgInstallReport, String> {
     if !cfg!(target_os = "macos") {
-        return Err("当前平台暂不支持安装 macOS DMG。".to_string());
+        return Err(
+            "Installing macOS DMG packages is not supported on the current platform.".to_string(),
+        );
     }
     if !dmg_path.is_file() {
-        return Err("macOS DMG 安装包不存在。".to_string());
+        return Err("The macOS DMG installer does not exist.".to_string());
     }
     let parent = destination
         .parent()
-        .ok_or_else(|| "macOS 应用安装位置缺少父目录。".to_string())?;
-    fs::create_dir_all(parent).map_err(|err| format!("创建 macOS 应用父目录失败：{err}"))?;
+        .ok_or_else(|| "The macOS app install path has no parent directory.".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("Failed to create macOS app parent directory: {err}"))?;
 
     let mount_point = temporary_macos_mount_point();
     if mount_point.exists() {
-        fs::remove_dir_all(&mount_point).map_err(|err| format!("清理旧挂载目录失败：{err}"))?;
+        fs::remove_dir_all(&mount_point)
+            .map_err(|err| format!("Failed to clean old mount directory: {err}"))?;
     }
-    fs::create_dir_all(&mount_point).map_err(|err| format!("创建 DMG 挂载目录失败：{err}"))?;
+    fs::create_dir_all(&mount_point)
+        .map_err(|err| format!("Failed to create DMG mount directory: {err}"))?;
 
     let attach = hidden_command("hdiutil")
         .arg("attach")
@@ -442,11 +713,11 @@ pub fn install_macos_dmg(
         .arg(&mount_point)
         .arg(dmg_path)
         .output()
-        .map_err(|err| format!("启动 hdiutil 挂载 DMG 失败：{err}"))?;
+        .map_err(|err| format!("Failed to start hdiutil to mount DMG: {err}"))?;
     if !attach.status.success() {
         let _ = fs::remove_dir_all(&mount_point);
         return Err(format!(
-            "挂载 macOS DMG 失败：{}",
+            "Failed to mount macOS DMG: {}",
             String::from_utf8_lossy(&attach.stderr).trim()
         ));
     }
@@ -464,9 +735,9 @@ pub fn install_macos_dmg(
 }
 
 pub fn msix_runtime_unavailable_message(detail: Option<&str>) -> String {
-    let mut message = "Windows MSIX 部署运行时不可用，通常出现在精简版系统、虚拟机镜像或被移除 App Installer/AppXSvc/应用部署组件的环境。本应用会自动改用便携版安装；如需使用 MSIX，请恢复 App Installer、启用 AppXSvc，并确保 Windows 应用部署运行时完整。".to_string();
+    let mut message = "Windows MSIX deployment runtime is unavailable. This often happens on trimmed systems, virtual machine images, or environments where App Installer, AppXSvc, or app deployment components were removed. The app will automatically use portable installation; to use MSIX, restore App Installer, enable AppXSvc, and make sure the Windows app deployment runtime is intact.".to_string();
     if let Some(detail) = detail.map(str::trim).filter(|value| !value.is_empty()) {
-        message.push_str(" 原始错误：");
+        message.push_str(" Original error: ");
         message.push_str(detail);
     }
     message
@@ -611,7 +882,7 @@ fn install_macos_app_from_mount(
     let source_app = find_macos_app_bundle(mount_point, app_name)?;
     let parent = destination
         .parent()
-        .ok_or_else(|| "macOS 应用安装位置缺少父目录。".to_string())?;
+        .ok_or_else(|| "The macOS app install path has no parent directory.".to_string())?;
     let rollback = parent.join(format!(
         "{}.rollback",
         destination
@@ -620,20 +891,21 @@ fn install_macos_app_from_mount(
             .unwrap_or("Codex")
     ));
     if rollback.exists() {
-        fs::remove_dir_all(&rollback).map_err(|err| format!("清理旧回滚目录失败：{err}"))?;
+        fs::remove_dir_all(&rollback)
+            .map_err(|err| format!("Failed to clean old rollback directory: {err}"))?;
     }
 
     let had_previous = destination.exists();
     if had_previous {
         fs::rename(destination, &rollback)
-            .map_err(|err| format!("创建 macOS 回滚备份失败：{err}"))?;
+            .map_err(|err| format!("Failed to create macOS rollback backup: {err}"))?;
     }
 
     let copy = hidden_command("ditto")
         .arg(&source_app)
         .arg(destination)
         .output()
-        .map_err(|err| format!("启动 ditto 复制 macOS 应用失败：{err}"));
+        .map_err(|err| format!("Failed to start ditto to copy macOS app: {err}"));
     match copy {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
@@ -641,7 +913,7 @@ fn install_macos_app_from_mount(
                 let _ = fs::rename(&rollback, destination);
             }
             return Err(format!(
-                "复制 macOS 应用失败，已尝试回滚：{}",
+                "Failed to copy macOS app; rollback was attempted: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
@@ -656,7 +928,7 @@ fn install_macos_app_from_mount(
     let mut notes = Vec::new();
     if had_previous && rollback.exists() {
         if let Err(err) = fs::remove_dir_all(&rollback) {
-            notes.push(format!("macOS 回滚备份清理失败：{err}"));
+            notes.push(format!("Failed to clean macOS rollback backup: {err}"));
         }
     }
     let installed =
@@ -673,13 +945,15 @@ fn install_macos_app_from_mount(
 fn find_macos_app_bundle(root: &Path, app_name: &str) -> Result<PathBuf, String> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).map_err(|err| format!("扫描 DMG 挂载目录失败：{err}"))?
+        for entry in fs::read_dir(&dir)
+            .map_err(|err| format!("Failed to scan DMG mount directory: {err}"))?
         {
-            let entry = entry.map_err(|err| format!("读取 DMG 挂载目录项失败：{err}"))?;
+            let entry =
+                entry.map_err(|err| format!("Failed to read DMG mount directory entry: {err}"))?;
             let path = entry.path();
             let file_type = entry
                 .file_type()
-                .map_err(|err| format!("读取 DMG 文件类型失败：{err}"))?;
+                .map_err(|err| format!("Failed to read DMG file type: {err}"))?;
             if file_type.is_dir()
                 && path
                     .file_name()
@@ -693,7 +967,7 @@ fn find_macos_app_bundle(root: &Path, app_name: &str) -> Result<PathBuf, String>
             }
         }
     }
-    Err(format!("DMG 中没有找到 {app_name}。"))
+    Err(format!("{app_name} was not found in the DMG."))
 }
 
 fn detach_macos_mount(mount_point: &Path) -> Result<(), String> {
@@ -702,7 +976,7 @@ fn detach_macos_mount(mount_point: &Path) -> Result<(), String> {
         .arg(mount_point)
         .arg("-quiet")
         .output()
-        .map_err(|err| format!("启动 hdiutil 卸载 DMG 失败：{err}"))?;
+        .map_err(|err| format!("Failed to start hdiutil to unmount DMG: {err}"))?;
     if output.status.success() {
         return Ok(());
     }
@@ -712,19 +986,20 @@ fn detach_macos_mount(mount_point: &Path) -> Result<(), String> {
         .arg("-force")
         .arg("-quiet")
         .output()
-        .map_err(|err| format!("启动 hdiutil 强制卸载 DMG 失败：{err}"))?;
+        .map_err(|err| format!("Failed to start hdiutil to force-unmount DMG: {err}"))?;
     if forced.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "DMG 挂载点卸载失败：{}",
+            "Failed to unmount DMG mount point: {}",
             String::from_utf8_lossy(&forced.stderr).trim()
         ))
     }
 }
 
 fn start_menu_shortcut_path(shortcut_name: &str) -> Result<PathBuf, String> {
-    let appdata = std::env::var_os("APPDATA").ok_or_else(|| "APPDATA 不可用。".to_string())?;
+    let appdata =
+        std::env::var_os("APPDATA").ok_or_else(|| "APPDATA is unavailable.".to_string())?;
     Ok(PathBuf::from(appdata)
         .join("Microsoft")
         .join("Windows")
@@ -761,7 +1036,7 @@ fn ps_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::plist_string_value;
+    use super::{desktop_package_fallback_script, plist_string_value};
 
     #[test]
     fn reads_string_values_from_macos_info_plist() {
@@ -784,5 +1059,21 @@ mod tests {
             plist_string_value(plist, "CFBundleShortVersionString").as_deref(),
             Some("1.2.3")
         );
+    }
+
+    #[test]
+    fn desktop_package_fallback_script_launches_async_without_placeholders() {
+        let script = desktop_package_fallback_script(
+            "Claude_pzs8sxrjxfjjc",
+            &["--remote-debugging-port=9229".to_string()],
+        );
+
+        assert!(script.contains("Invoke-CommandInDesktopPackage"));
+        assert!(script.contains("Start-Process"));
+        assert!(script.contains("-Command"));
+        assert!(script.contains("powershell.exe"));
+        assert!(script.contains("'Claude_pzs8sxrjxfjjc'"));
+        assert!(script.contains("--remote-debugging-port=9229"));
+        assert!(!script.contains("__CODESTUDIO"));
     }
 }

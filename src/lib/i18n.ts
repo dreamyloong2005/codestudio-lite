@@ -1,16 +1,16 @@
 import { derived, writable } from "svelte/store";
-import { createZhTWDictionary } from "./locales/zh-TW";
 import { enUS } from "./locales/en-US";
 import { zhCN, type TranslationKey } from "./locales/zh-CN";
+import { zhTW } from "./locales/zh-TW";
 import type { Locale } from "../types";
 
-const fallbackLocale: Locale = "zh-CN";
+const fallbackLocale: Locale = "en-US";
 
 export type { TranslationKey };
 
 const dictionaries: Record<Locale, Record<TranslationKey, string>> = {
   "zh-CN": zhCN,
-  "zh-TW": createZhTWDictionary(zhCN),
+  "zh-TW": zhTW,
   "en-US": enUS
 };
 

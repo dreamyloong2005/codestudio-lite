@@ -4,7 +4,7 @@ CodeStudio Lite is a desktop-only Local AI Gateway and Provider Switcher. It is 
 
 ```text
 Svelte UI
-  Dashboard / Gateway controls / Doctor / Setup Wizard / Profiles / Backups / Settings
+  Dashboard / Gateway controls / Setup Wizard / Profiles / Settings
         |
         | Tauri commands
         v
@@ -25,7 +25,6 @@ The frontend lives in `src/`.
 - `src/App.svelte` owns the route shell and refresh lifecycle.
 - `src/lib/i18n.ts` owns frontend locale state, translation resources, and the typed translation helper.
 - `src/routes/Dashboard.svelte` shows Local Gateway state first, then active profile state, connected client status, Provider Profiles, problems, and activity.
-- `src/routes/Doctor.svelte` shows grouped diagnostics.
 - `src/routes/SetupWizard.svelte` is the MVP 0.2 wizard skeleton.
 - `src/components/` contains shared status, problem, activity, and secret-input components.
 - `src/lib/api.ts` wraps Tauri commands and provides browser-preview mock data when the app is opened outside Tauri.
@@ -38,11 +37,11 @@ The Rust backend lives in `src-tauri/src/`.
 - `core/gateway.rs` owns the desktop-local OpenAI-compatible gateway skeleton.
 - `core/tool_registry.rs` defines supported tools, commands, config paths, and suggested install commands.
 - `core/detector.rs` executes version checks and derives install/config states.
-- `core/profile.rs` creates `~/.codestudio-lite`, writes default config, and loads profile summaries.
+- `core/profile.rs` creates `~/.codestudio-lite`, manages SQLite-backed profiles, and loads profile summaries.
 - `core/profile.rs` also reads and updates `ui.language` and other application settings through Tauri commands.
 - `core/doctor.rs` turns detection and file checks into a Doctor report.
 - `core/activity_log.rs` stores local events in JSONL.
-- `core/gateway_request_log.rs` stores metadata-only gateway request records in JSONL.
+- `core/gateway_request_log.rs` stores metadata-only gateway request records in SQLite.
 - `core/credentials.rs` stores Provider API keys in the Windows Credential Manager for the current Windows build.
 - `core/upstream_http.rs` forwards upstream HTTP requests through the OS networking stack, including chunked SSE pass-through.
 
@@ -78,7 +77,7 @@ The gateway reads the active Provider Profile on each request. Switching a profi
 
 ## Localization
 
-The frontend uses `src/lib/i18n.ts` for locale state and translation dictionaries. The current MVP ships `zh-CN` and `en-US`. Language preference is persisted in `~/.codestudio-lite/config.toml` under `ui.language`; browser preview also keeps a localStorage fallback.
+The frontend uses `src/lib/i18n.ts` for locale state and translation dictionaries. The current MVP ships `zh-CN`, `zh-TW`, and `en-US`. Language preference is persisted in `~/.codestudio-lite/app_state.sqlite` under `ui.language`; browser preview also keeps a localStorage fallback.
 
 New UI strings should be added to `zhCN` first, mirrored in `enUS`, and consumed through `$t("key")` rather than embedded directly in route components.
 
@@ -95,7 +94,7 @@ metadata.created_at / metadata.updated_at / metadata.last_test_status
 
 ## Request Monitor
 
-Gateway request monitoring writes metadata-only records to `~/.codestudio-lite/logs/gateway-requests.jsonl`. It does not persist prompts, completions, tool arguments, or file contents by default.
+Gateway request monitoring writes metadata-only records to `~/.codestudio-lite/app_state.sqlite`. It does not persist prompts, completions, tool arguments, or file contents by default.
 
 ## Forwarding
 
@@ -111,20 +110,11 @@ The app stores its own state under:
 
 ```text
 ~/.codestudio-lite/
-  config.toml
-  gateway.toml
-  profiles/
-  backups/
-  logs/
-    activity.jsonl
-    gateway-requests.jsonl
+  app_state.sqlite
+  downloads/
 ```
 
-The first-stage skeleton creates a sample profile so the UI has a real local file to read:
-
-```text
-~/.codestudio-lite/profiles/codex-openai.toml
-```
+Profiles, active selections, settings, gateway state, usage-query state, request logs, and internal backup data are stored in SQLite. Downloaded installers and temporary packages are kept under `downloads/`.
 
 ## Write Policy
 

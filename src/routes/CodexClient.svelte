@@ -8,14 +8,17 @@
     ensureCodexClientLoaded,
     installOrUpdateCodexClient,
     launchManagedCodexClient,
+    refreshCodexClient,
     removeCodexClient,
     setCodexClientConfirmUninstall,
     stageCodexClientPackage,
     startCodexClientProgressListener,
-    updateCodexClientDraft
+    updateCodexClientDraft,
+    type CodexClientNoticeMessage
   } from "../lib/codexClientStore";
-  import { t } from "../lib/i18n";
+  import { t, type TranslationKey } from "../lib/i18n";
   import AppIcon from "../components/AppIcon.svelte";
+  import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import type {
     CodexClientProgress,
@@ -41,6 +44,7 @@
   $: statusTone = (installed ? "ok" : "warning") as Severity;
   $: canStage = Boolean(plan && !plan.upToDate && plan.route !== "unsupported");
   $: canInstall = canStage;
+  $: isRunning = state?.running ?? false;
   $: canLaunch = Boolean(installed);
   $: canUninstall = Boolean(installed);
   $: progressPercent = progress?.percent ?? null;
@@ -70,6 +74,10 @@
     await launchManagedCodexClient();
   }
 
+  async function refreshCodex() {
+    await refreshCodexClient();
+  }
+
   function formatBytes(value: number | null | undefined) {
     if (!value) {
       return $t("common.unknown");
@@ -90,6 +98,23 @@
     return label === key ? value : label;
   }
 
+  function formatNoticeMessage(message: CodexClientNoticeMessage | null) {
+    if (!message) {
+      return "";
+    }
+    if (typeof message === "string") {
+      return message;
+    }
+    return $t(message.key, message.values);
+  }
+
+  function formatProgressMessage(message: string) {
+    if (message.startsWith("codexClient.")) {
+      return $t(message as TranslationKey);
+    }
+    return message;
+  }
+
   function progressByteLabel(value: CodexClientProgress) {
     if (value.downloaded !== null && value.total !== null) {
       return $t("codexClient.progressBytes", {
@@ -103,6 +128,14 @@
       });
     }
     return $t("codexClient.progressWorking");
+  }
+
+  function dismissError() {
+    codexClientView.update((current) => ({ ...current, error: null }));
+  }
+
+  function dismissSuccess() {
+    codexClientView.update((current) => ({ ...current, success: null }));
   }
 </script>
 
@@ -120,17 +153,53 @@
     <div class="top-actions">
       <button class="primary-button" disabled={!canLaunch || busyAction !== null} on:click={launchCodex}>
         <AppIcon name="play" size={16} />
-        {$t("codexClient.launch")}
+        {$t(isRunning ? "codexClient.restart" : "codexClient.launch")}
+      </button>
+      <button class="secondary-button" disabled={view.loading || busyAction !== null} on:click={refreshCodex}>
+        <AppIcon name={view.loading ? "loading" : "refresh"} size={16} class={view.loading ? "spin" : ""} />
+        {$t(view.loading ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
   </section>
 
   {#if error}
-    <div class="inline-error">{error}</div>
+    <DismissibleNotice tone="error" message={error} on:dismiss={dismissError} />
   {/if}
   {#if success}
-    <div class="inline-success">{success}</div>
+    <DismissibleNotice tone="success" message={formatNoticeMessage(success)} on:dismiss={dismissSuccess} />
   {/if}
+
+  <section class="panel-band">
+    <div class="section-heading">
+      <div>
+        <h2>{$t("codexClient.launchOptionsTitle")}</h2>
+      </div>
+    </div>
+    {#if settingsDraft}
+      <div class="settings-list codex-client-settings launch-options-grid">
+        <label class="native-write-toggle">
+          <input
+            type="checkbox"
+            checked={settingsDraft.syncHistoryOnLaunch}
+            on:change={(event) => updateCodexClientDraft({ syncHistoryOnLaunch: event.currentTarget.checked })}
+          />
+          <span>
+            <strong>{$t("codexClient.syncHistoryOnLaunch")}</strong>
+          </span>
+        </label>
+        <label class="native-write-toggle">
+          <input
+            type="checkbox"
+            checked={settingsDraft.patchForcePluginUnlock}
+            on:change={(event) => updateCodexClientDraft({ patchForcePluginUnlock: event.currentTarget.checked })}
+          />
+          <span>
+            <strong>{$t("codexClient.patchForcePluginUnlock")}</strong>
+          </span>
+        </label>
+      </div>
+    {/if}
+  </section>
 
   <section class="panel-band">
     <div class="section-heading">
@@ -179,7 +248,7 @@
       <div class="install-progress" aria-live="polite">
         <div class="progress-copy">
           <strong>{progressStepLabel ? `${progressStepLabel} / ${progressPhaseLabel(progress.phase)}` : progressPhaseLabel(progress.phase)}</strong>
-          <span>{progress.message}</span>
+          <span>{formatProgressMessage(progress.message)}</span>
         </div>
         <div class="progress-track" class:indeterminate={progressPercent === null}>
           <span
@@ -335,12 +404,14 @@
       </div>
     {/if}
   </section>
+
 </div>
 
 {#if confirmUninstall}
   <div class="modal-backdrop">
     <div class="modal-panel">
-      <div>
+      <div class="modal-body">
+        <div>
         <span class="eyebrow">{$t("codexClient.uninstallEyebrow")}</span>
         <h2>{$t("codexClient.uninstallTitle")}</h2>
         <p>{$t("codexClient.uninstallDescription")}</p>
@@ -355,6 +426,8 @@
           <span>{settingsDraft?.keepUserDataOnUninstall ? $t("common.enabled") : $t("common.disabled")}</span>
         </div>
       </div>
+      </div>
+
       <div class="modal-actions">
         <button class="secondary-button" on:click={() => setCodexClientConfirmUninstall(false)}>{$t("common.cancel")}</button>
         <button class="primary-button" disabled={busyAction !== null} on:click={removeCodex}>

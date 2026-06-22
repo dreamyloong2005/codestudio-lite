@@ -1,15 +1,20 @@
 use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path, ensure_dirs};
+use crate::core::codex_provider_sync;
 use crate::core::platform::{hidden_command, package, run_powershell};
 use crate::core::process_control;
+use crate::core::storage;
 use crate::core::types::{ConfigState, InstallState, Severity, ToolCategory, ToolStatus};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use zip::ZipArchive;
@@ -27,6 +32,10 @@ const CODEX_SHORTCUT_NAME: &str = "Codex.lnk";
 const CODEX_UNINSTALL_KEY: &str =
     r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex";
 const CODEX_MACOS_BUNDLE_ID: &str = "com.openai.codex";
+const CODEX_CLIENT_SETTINGS_STATE_KEY: &str = "codex_client.settings";
+const CODEX_CLIENT_MARKER_STATE_KEY: &str = "codex_client.managed_marker";
+const CODEX_PATCH_INJECTION_RETRY_COUNT: usize = 30;
+const CODEX_PATCH_INJECTION_RETRY_MS: u64 = 500;
 pub const CODEX_CLIENT_PROGRESS_EVENT: &str = "codex-client://progress";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +49,10 @@ pub struct CodexClientSettings {
     pub windows_install_mode: String,
     pub install_root: String,
     pub keep_user_data_on_uninstall: bool,
+    #[serde(default)]
+    pub sync_history_on_launch: bool,
+    #[serde(default)]
+    pub patch_force_plugin_unlock: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +72,10 @@ pub struct UpdateCodexClientSettingsRequest {
     pub install_root: Option<String>,
     #[serde(default)]
     pub keep_user_data_on_uninstall: Option<bool>,
+    #[serde(default)]
+    pub sync_history_on_launch: Option<bool>,
+    #[serde(default)]
+    pub patch_force_plugin_unlock: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +145,8 @@ pub struct CodexClientState {
     pub plan: Option<CodexClientPlan>,
     pub staging_dir: String,
     pub notes: Vec<String>,
+    #[serde(default)]
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,8 +287,88 @@ impl Default for CodexClientSettings {
             windows_install_mode: "msix".to_string(),
             install_root: default_install_root(),
             keep_user_data_on_uninstall: true,
+            sync_history_on_launch: false,
+            patch_force_plugin_unlock: false,
         }
     }
+}
+
+const CODEX_CLIENT_LATEST_CACHE_TTL: Duration = Duration::from_secs(600);
+const CODEX_CLIENT_LATEST_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Default)]
+struct CodexClientLatestCache {
+    version: Option<String>,
+    checked_at: Option<Instant>,
+    in_progress: bool,
+}
+
+static CODEX_CLIENT_LATEST_CACHE: OnceLock<Mutex<CodexClientLatestCache>> = OnceLock::new();
+
+fn codex_client_latest_cache() -> &'static Mutex<CodexClientLatestCache> {
+    CODEX_CLIENT_LATEST_CACHE.get_or_init(|| Mutex::new(CodexClientLatestCache::default()))
+}
+
+/// Fetch the latest Codex version from the mirror manifest in a
+/// background thread and cache the result in-process. Returns the cached
+/// version if fresh, waits up to wait_budget for an in-flight fetch, and
+/// otherwise returns whatever is cached so the caller is never blocked for
+/// long. Mirrors the Claude Desktop latest-version cache in detector.rs.
+pub fn latest_version_cached(wait_budget: Duration) -> Option<String> {
+    let should_start = {
+        let mut cache = codex_client_latest_cache().lock().unwrap();
+        if cache
+            .checked_at
+            .map(|checked_at| checked_at.elapsed() < CODEX_CLIENT_LATEST_CACHE_TTL)
+            .unwrap_or(false)
+        {
+            return cache.version.clone();
+        }
+        if cache.in_progress {
+            false
+        } else {
+            cache.in_progress = true;
+            true
+        }
+    };
+
+    if should_start {
+        thread::spawn(|| {
+            let version = (|| {
+                let settings = load_settings().unwrap_or_default();
+                load_release(&settings).ok().map(|release| release.version)
+            })();
+            let mut cache = codex_client_latest_cache().lock().unwrap();
+            cache.version = version;
+            cache.checked_at = Some(Instant::now());
+            cache.in_progress = false;
+        });
+    }
+
+    let started_at = Instant::now();
+    loop {
+        {
+            let cache = codex_client_latest_cache().lock().unwrap();
+            if !cache.in_progress
+                || cache
+                    .checked_at
+                    .map(|checked_at| checked_at.elapsed() < CODEX_CLIENT_LATEST_CACHE_TTL)
+                    .unwrap_or(false)
+            {
+                return cache.version.clone();
+            }
+            if started_at.elapsed() >= wait_budget {
+                return cache.version.clone();
+            }
+        }
+        thread::sleep(CODEX_CLIENT_LATEST_POLL_INTERVAL);
+    }
+}
+
+/// Load the most recent Codex state cached to disk by inspect_state(true).
+/// Used by the page to hydrate instantly on startup before an async re-fetch.
+pub fn load_cached_state() -> Option<CodexClientState> {
+    storage::load_codex_client_state().ok().flatten()
 }
 
 pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> {
@@ -286,16 +385,19 @@ pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> 
         .transpose()?;
     let install_class = install_class(installed.as_ref());
     let mut notes = vec![
-        "Codex 客户端管理复刻 Codex-App-Manager 的安装、更新、卸载、启动和镜像源流程。".to_string(),
-        "不会修改 Codex 安装包内容；下载后先做 SHA-256 校验，再进入安装步骤。".to_string(),
+        "Codex management covers install, update, uninstall, launch, and mirror-source flows.".to_string(),
+        "The Codex installer content is not modified; downloads are SHA-256 verified before installation.".to_string(),
     ];
     if cfg!(target_os = "macos") {
-        notes.push("macOS 会使用 DMG 安装包并复制 Codex.app 到目标应用目录。".to_string());
+        notes.push(
+            "macOS uses a DMG installer and copies Codex.app to the target Applications directory."
+                .to_string(),
+        );
     } else if !cfg!(target_os = "windows") {
-        notes.push("当前平台暂未提供 Codex 桌面客户端安装执行链路。".to_string());
+        notes.push("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
     }
 
-    Ok(CodexClientState {
+    let state = CodexClientState {
         generated_at: Utc::now().to_rfc3339(),
         platform: platform_label(),
         settings,
@@ -305,7 +407,12 @@ pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> 
         plan,
         staging_dir: display_path(&staging_dir()?),
         notes,
-    })
+        running: process_control::is_process_running("Codex"),
+    };
+    if include_network {
+        let _ = storage::store_codex_client_state(&state);
+    }
+    Ok(state)
 }
 
 pub fn plan_update() -> Result<CodexClientState, String> {
@@ -323,7 +430,7 @@ where
     emit_step_progress(
         &on_progress,
         "preparing",
-        "正在读取镜像 manifest 与 checksums...",
+        "Reading mirror manifest and checksums...",
         None,
         None,
         Some(1),
@@ -350,13 +457,16 @@ where
     F: Fn(CodexClientProgress),
 {
     if !request.confirm {
-        return Err("拒绝执行：安装或更新 Codex 客户端必须显式确认。".to_string());
+        return Err(
+            "Refused: installing or updating Codex requires explicit confirmation."
+                .to_string(),
+        );
     }
 
     emit_step_progress(
         &on_progress,
         "preparing",
-        "正在确认安装状态与更新计划...",
+        "Confirming install state and update plan...",
         None,
         None,
         Some(1),
@@ -372,15 +482,15 @@ where
         let actual = installed_before.as_ref().map(|item| item.version.as_str());
         if actual != Some(expected) && !(expected.is_empty() && actual.is_none()) {
             return Err(format!(
-                "Codex 客户端状态已变化：确认时版本为 {expected}，当前为 {}。请刷新后重试。",
-                actual.unwrap_or("未安装")
+                "Codex state changed: expected version {expected}, current version is {}. Refresh and try again.",
+                actual.unwrap_or("not installed")
             ));
         }
     }
     if let Some(expected) = request.expected_latest_version.as_deref() {
         if expected != release.version {
             return Err(format!(
-                "镜像最新版本已变化：确认时为 {expected}，当前为 {}。请刷新后重试。",
+                "Mirror latest version changed: expected {expected}, current version is {}. Refresh and try again.",
                 release.version
             ));
         }
@@ -388,7 +498,7 @@ where
     if let Some(expected) = request.expected_route.as_deref() {
         if expected != plan.route {
             return Err(format!(
-                "安装方式已变化：确认时为 {expected}，当前为 {}。请刷新后重试。",
+                "Install route changed: expected {expected}, current route is {}. Refresh and try again.",
                 plan.route
             ));
         }
@@ -398,7 +508,7 @@ where
         emit_step_progress(
             &on_progress,
             "done",
-            "Codex 客户端已经是最新版本。",
+            "codexClient.progressAlreadyUpToDate",
             Some(1),
             Some(1),
             Some(7),
@@ -407,7 +517,7 @@ where
         return Ok(CodexClientOperationResult {
             success: true,
             action: "none".to_string(),
-            message: "Codex 客户端已经是最新版本。".to_string(),
+            message: "Codex is already up to date.".to_string(),
             installed: installed_before,
             stage: None,
             notes: Vec::new(),
@@ -419,34 +529,34 @@ where
         .staged_path
         .as_ref()
         .map(PathBuf::from)
-        .ok_or_else(|| "没有可安装的暂存文件。".to_string())?;
+        .ok_or_else(|| "No staged file is available to install.".to_string())?;
     let mut notes = stage.notes.clone();
     if plan.route == "unsupported" {
-        return Err("当前平台暂未提供 Codex 桌面客户端安装执行链路。".to_string());
+        return Err("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
     }
 
     let action = plan.route.clone();
     if let Some(installed) = installed_before.as_ref() {
         if cfg!(target_os = "windows") {
             let mut termination = if installed.source == "msix" {
-                process_control::close_appx_package_for_update("Codex 客户端", PACKAGE_IDENTITY)?
+                process_control::close_appx_package_for_update("Codex", PACKAGE_IDENTITY)?
             } else {
                 process_control::ProcessTerminationReport::default()
             };
             let fallback = process_control::close_processes_for_update(
-                "Codex 客户端",
+                "Codex",
                 &["Codex"],
                 Some(Path::new(&installed.path)),
             )?;
             termination.total += fallback.total;
             termination.forced += fallback.forced;
             termination.remaining += fallback.remaining;
-            if let Some(note) = termination.note("Codex 客户端") {
+            if let Some(note) = termination.note("Codex") {
                 notes.push(note);
             }
         } else if cfg!(target_os = "macos") {
             if let Err(err) = package::quit_macos_app(CODEX_DISPLAY_NAME) {
-                notes.push(format!("关闭 Codex 客户端失败：{err}"));
+                notes.push(format!("Failed to close Codex: {err}"));
             }
         }
     }
@@ -459,7 +569,7 @@ where
         emit_step_progress(
             &on_progress,
             "installing",
-            "正在安装便携版 Codex 客户端...",
+            "codexClient.progressInstallingPortable",
             None,
             None,
             Some(4),
@@ -476,7 +586,7 @@ where
         emit_step_progress(
             &on_progress,
             "installing",
-            "正在安装 macOS Codex 客户端...",
+            "codexClient.progressInstallingMacos",
             None,
             None,
             Some(4),
@@ -494,7 +604,7 @@ where
         emit_step_progress(
             &on_progress,
             "msix-installing",
-            "正在执行 MSIX 安装...",
+            "codexClient.progressInstallingMsix",
             None,
             None,
             Some(4),
@@ -506,15 +616,15 @@ where
                 .map(installed_from_msix)
                 .or_else(|| detect_installed(&settings)),
             Ok(report) => {
-                notes.push(format!("MSIX 安装失败：{}", report.message));
+                notes.push(format!("MSIX install failed: {}", report.message));
                 if preserve_existing_msix {
-                    return Err(format!("MSIX 更新失败：{}。", report.message));
+                    return Err(format!("MSIX update failed: {}.", report.message));
                 }
-                notes.push("已自动切换到便携版安装。".to_string());
+                notes.push("Automatically switched to portable installation.".to_string());
                 emit_step_progress(
                     &on_progress,
                     "portable-fallback",
-                    "MSIX 不可用，正在切换到便携版安装...",
+                    "codexClient.progressMsixPortableFallback",
                     None,
                     None,
                     Some(5),
@@ -529,15 +639,15 @@ where
                 portable.installed
             }
             Err(err) => {
-                notes.push(format!("MSIX 安装执行失败：{err}"));
+                notes.push(format!("MSIX install execution failed: {err}"));
                 if preserve_existing_msix {
-                    return Err(format!("MSIX 更新执行失败：{err}。"));
+                    return Err(format!("MSIX update execution failed: {err}."));
                 }
-                notes.push("已自动切换到便携版安装。".to_string());
+                notes.push("Automatically switched to portable installation.".to_string());
                 emit_step_progress(
                     &on_progress,
                     "portable-fallback",
-                    "MSIX 执行失败，正在切换到便携版安装...",
+                    "codexClient.progressMsixExecutionPortableFallback",
                     None,
                     None,
                     Some(5),
@@ -577,7 +687,7 @@ where
     let _ = activity_log::append(
         Severity::Ok,
         format!(
-            "Installed or updated Codex Client to {} via {}.",
+            "Installed or updated Codex to {} via {}.",
             release.version, action
         ),
     );
@@ -585,7 +695,7 @@ where
     emit_step_progress(
         &on_progress,
         "done",
-        "Codex 客户端安装流程已完成。",
+        "codexClient.progressInstallDone",
         Some(1),
         Some(1),
         Some(7),
@@ -597,8 +707,11 @@ where
         action,
         message: installed
             .as_ref()
-            .map(|item| format!("Codex 客户端已就绪：{} ({})", item.version, item.source))
-            .unwrap_or_else(|| "安装流程结束，但未能重新检测到 Codex 客户端。".to_string()),
+            .map(|item| format!("Codex is ready: {} ({})", item.version, item.source))
+            .unwrap_or_else(|| {
+                "Installation flow finished, but Codex was not detected again."
+                    .to_string()
+            }),
         installed,
         stage: Some(stage),
         notes,
@@ -609,10 +722,12 @@ pub fn uninstall(
     request: CodexClientUninstallRequest,
 ) -> Result<CodexClientOperationResult, String> {
     if !request.confirm {
-        return Err("拒绝执行：卸载 Codex 客户端必须显式确认。".to_string());
+        return Err(
+            "Refused: uninstalling Codex requires explicit confirmation.".to_string(),
+        );
     }
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
-        return Err("当前平台暂未提供 Codex 桌面客户端卸载执行链路。".to_string());
+        return Err("The current platform does not provide an executable Codex desktop client uninstall path yet.".to_string());
     }
 
     let settings = load_settings()?;
@@ -621,7 +736,7 @@ pub fn uninstall(
         return Ok(CodexClientOperationResult {
             success: true,
             action: "none".to_string(),
-            message: "没有检测到可卸载的 Codex 客户端。".to_string(),
+            message: "No uninstallable Codex was detected.".to_string(),
             installed: None,
             stage: None,
             notes: Vec::new(),
@@ -633,25 +748,26 @@ pub fn uninstall(
         terminate_codex_process_for_uninstall(Some(Path::new(&installed_before.path)), &mut notes)?;
     } else if cfg!(target_os = "macos") {
         if let Err(err) = package::quit_macos_app(CODEX_DISPLAY_NAME) {
-            notes.push(format!("关闭 Codex 客户端失败：{err}"));
+            notes.push(format!("Failed to close Codex: {err}"));
         }
     }
     let action = if installed_before.source == "portable" {
         if Path::new(&installed_before.path).exists() {
             fs::remove_dir_all(&installed_before.path)
-                .map_err(|err| format!("移除便携版目录失败：{err}"))?;
+                .map_err(|err| format!("Failed to remove portable directory: {err}"))?;
         }
         if let Err(err) = package::remove_portable_start_menu_shortcut(CODEX_SHORTCUT_NAME) {
-            notes.push(format!("开始菜单快捷方式清理失败：{err}"));
+            notes.push(format!("Failed to clean Start menu shortcut: {err}"));
         }
         if let Err(err) = package::remove_portable_uninstall_entry(CODEX_UNINSTALL_KEY) {
-            notes.push(format!("卸载项清理失败：{err}"));
+            notes.push(format!("Failed to clean uninstall entry: {err}"));
         }
         "remove-portable"
     } else if installed_before.source == "macos" {
         let app_path = Path::new(&installed_before.path);
         if app_path.exists() {
-            fs::remove_dir_all(app_path).map_err(|err| format!("移除 macOS 应用失败：{err}"))?;
+            fs::remove_dir_all(app_path)
+                .map_err(|err| format!("Failed to remove macOS app: {err}"))?;
         }
         "remove-macos"
     } else if installed_before.source == "msix" {
@@ -663,28 +779,28 @@ pub fn uninstall(
         "remove-msix"
     } else {
         return Err(format!(
-            "不支持卸载当前 Codex 客户端安装类型：{}。",
+            "Unsupported Codex install type for uninstall: {}.",
             installed_before.source
         ));
     };
 
     if request.purge_user_data {
         if purge_user_data()? {
-            notes.push("已删除 ~/.codex 用户数据。".to_string());
+            notes.push("Deleted ~/.codex user data.".to_string());
         } else {
-            notes.push("未发现 ~/.codex 用户数据目录。".to_string());
+            notes.push("No ~/.codex user data directory was found.".to_string());
         }
     } else {
-        notes.push("已保留 ~/.codex 用户数据。".to_string());
+        notes.push("Kept ~/.codex user data.".to_string());
     }
 
-    let _ = fs::remove_file(marker_file()?);
-    let _ = activity_log::append(Severity::Ok, "Uninstalled Codex Client.");
+    let _ = storage::delete_state_json(CODEX_CLIENT_MARKER_STATE_KEY);
+    let _ = activity_log::append(Severity::Ok, "Uninstalled Codex.");
 
     Ok(CodexClientOperationResult {
         success: true,
         action: action.to_string(),
-        message: "Codex 客户端卸载完成。".to_string(),
+        message: "Codex uninstalled.".to_string(),
         installed: None,
         stage: None,
         notes,
@@ -692,42 +808,37 @@ pub fn uninstall(
 }
 
 pub fn launch() -> Result<(), String> {
+    let mut notes = Vec::new();
+    terminate_codex_process_for_restart(None, &mut notes)?;
     let settings = load_settings()?;
+    sync_history_if_enabled(&settings)?;
     let installed =
-        detect_installed(&settings).ok_or_else(|| "未检测到 Codex 客户端。".to_string())?;
-    if installed.source == "portable" {
-        let exe = Path::new(&installed.path).join("Codex.exe");
-        hidden_command(exe)
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| format!("启动 Codex 客户端失败：{err}"))?;
-    } else if cfg!(target_os = "windows") {
-        launch_msix()?;
-    } else if cfg!(target_os = "macos") {
-        package::launch_macos_app(Path::new(&installed.path))
-            .map_err(|err| format!("启动 Codex 客户端失败：{err}"))?;
-    } else {
-        return Err("当前平台暂不支持启动 Codex 客户端。".to_string());
+        detect_installed(&settings).ok_or_else(|| "Codex was not detected.".to_string())?;
+    let debug_port = select_debug_port()?;
+    let args = codex_patch_launch_args(debug_port);
+    launch_installed_codex(&installed, &args)?;
+    if settings.patch_force_plugin_unlock {
+        inject_plugin_unlock(debug_port)?;
     }
-    let _ = activity_log::append(Severity::Info, "Launched Codex Client.");
+    let _ = activity_log::append(Severity::Info, "Launched Codex.");
     Ok(())
 }
 
 pub fn restart() -> Result<String, String> {
     let settings = load_settings()?;
     let _installed =
-        detect_installed(&settings).ok_or_else(|| "未检测到 Codex 客户端。".to_string())?;
+        detect_installed(&settings).ok_or_else(|| "Codex was not detected.".to_string())?;
     let mut notes = Vec::new();
     terminate_codex_process_for_restart(None, &mut notes)?;
     launch()?;
     let message = if notes.is_empty() {
-        "已启动 Codex 客户端。".to_string()
+        "Launched Codex.".to_string()
     } else {
-        format!("{} 已重新启动 Codex 客户端。", notes.join(" "))
+        format!("{} Restarted Codex.", notes.join(" "))
     };
     let _ = activity_log::append(
         Severity::Info,
-        "Restarted Codex Client after profile apply.",
+        "Restarted Codex after profile apply.",
     );
     Ok(message)
 }
@@ -764,6 +875,12 @@ pub fn update_settings(
     if let Some(keep) = request.keep_user_data_on_uninstall {
         settings.keep_user_data_on_uninstall = keep;
     }
+    if let Some(sync) = request.sync_history_on_launch {
+        settings.sync_history_on_launch = sync;
+    }
+    if let Some(unlock) = request.patch_force_plugin_unlock {
+        settings.patch_force_plugin_unlock = unlock;
+    }
     settings.signed_only = true;
     save_settings(&settings)?;
     Ok(settings)
@@ -780,7 +897,7 @@ pub fn open_path(kind: String) -> Result<(), String> {
             .map_err(|err| err.to_string())?
             .home_dir
             .join(".codex"),
-        _ => return Err("未知路径类型。".to_string()),
+        _ => return Err("Unknown path type.".to_string()),
     };
     open_folder(&target)
 }
@@ -791,7 +908,7 @@ pub fn tool_status() -> ToolStatus {
     let config_path = app_paths().ok().map(|paths| paths.home_dir.join(".codex"));
     ToolStatus {
         id: "codex-app".to_string(),
-        name: "Codex 客户端".to_string(),
+        name: "Codex".to_string(),
         category: ToolCategory::AiTool,
         command: if cfg!(target_os = "windows") {
             "Codex.exe".to_string()
@@ -814,11 +931,13 @@ pub fn tool_status() -> ToolStatus {
             None => ConfigState::Unknown,
         },
         config_path: config_path.as_deref().map(display_path),
-        install_command: Some("在 Codex 客户端页面中安装或更新".to_string()),
+        install_path: None,
+        install_command: Some("Install or update from the Codex page".to_string()),
         details: installed
             .as_ref()
             .map(|item| format!("{} / {}", item.source, item.path))
-            .or_else(|| Some("未检测到官方 Codex 桌面客户端".to_string())),
+            .or_else(|| Some("Official Codex desktop client was not detected".to_string())),
+        running: process_control::is_process_running("Codex"),
     }
 }
 
@@ -842,16 +961,16 @@ fn build_plan(
     let mut warnings = Vec::new();
     if settings.source == "official" && cfg!(target_os = "windows") {
         warnings.push(
-            "Windows 官方源暂未提供与镜像一致的 manifest/checksum 合约，已使用镜像源计划。"
+            "The Windows official source does not currently provide the same manifest/checksum contract as the mirror; the mirror source plan is used."
                 .to_string(),
         );
     }
     if route == "unsupported" {
-        warnings.push("当前平台暂未提供 Codex 桌面客户端安装执行链路。".to_string());
+        warnings.push("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
     } else if route == "macos-dmg" {
         if settings.source == "official" {
             warnings.push(
-                "macOS 官方源使用官网稳定 DMG 下载地址；版本与 SHA-256 仍以镜像 manifest 为准。"
+                "The macOS official source uses the official stable DMG URL; version and SHA-256 still come from the mirror manifest."
                     .to_string(),
             );
         }
@@ -859,16 +978,16 @@ fn build_plan(
             .iter()
             .any(|capability| capability.status == Severity::Error)
         {
-            warnings.push("macOS DMG 安装依赖不可用，安装前需要恢复 hdiutil/ditto。".to_string());
+            warnings.push("macOS DMG install dependencies are unavailable; restore hdiutil/ditto before installing.".to_string());
         }
     } else if route == "portable-fallback" {
-        warnings.push("当前计划会安装便携版，并在开始菜单与卸载项中登记。".to_string());
+        warnings.push("The current plan will install the portable build and register Start menu and uninstall entries.".to_string());
         if portable_recommended {
             warnings.push(package::msix_runtime_unavailable_message(None));
         }
     } else if existing_source == Some("msix") && portable_recommended {
         warnings.push(
-            "已检测到现有 MSIX 安装，本次更新会优先覆盖原 MSIX；即使能力探测建议便携版，也不会在更新时自动改变安装类型。"
+            "An existing MSIX install was detected; this update will prefer replacing the original MSIX and will not automatically switch install type even if capability probing recommends portable mode."
                 .to_string(),
         );
     }
@@ -931,7 +1050,7 @@ where
         emit_step_progress(
             on_progress,
             "done",
-            "Codex 客户端已经是最新版本，无需下载。",
+            "codexClient.progressStageAlreadyUpToDate",
             Some(1),
             Some(1),
             Some(4),
@@ -945,7 +1064,7 @@ where
             sha256: release.sha256.clone(),
             hash_verified: true,
             route: plan.route.clone(),
-            notes: vec!["Codex 客户端已经是最新版本，无需下载。".to_string()],
+            notes: vec!["Codex is already up to date; no download is needed.".to_string()],
         });
     }
 
@@ -965,7 +1084,7 @@ where
         emit_step_progress(
             on_progress,
             "verifying",
-            "已找到暂存安装包，正在校验 SHA-256...",
+            "codexClient.progressFoundStaged",
             Some(size),
             Some(size),
             Some(3),
@@ -976,7 +1095,7 @@ where
     emit_step_progress(
         on_progress,
         "verifying",
-        "正在校验安装包 SHA-256...",
+        "codexClient.progressVerifying",
         None,
         None,
         Some(3),
@@ -986,19 +1105,19 @@ where
     if !actual.eq_ignore_ascii_case(&release.sha256) {
         let _ = fs::remove_file(&path);
         return Err(format!(
-            "SHA-256 校验失败：期望 {}，实际 {}。",
+            "SHA-256 verification failed: expected {}, got {}.",
             release.sha256, actual
         ));
     }
     let size = fs::metadata(&path).map_err(|err| err.to_string())?.len();
     let _ = activity_log::append(
         Severity::Ok,
-        format!("Staged Codex Client package {}.", release.package_moniker),
+        format!("Staged Codex package {}.", release.package_moniker),
     );
     emit_step_progress(
         on_progress,
         "done",
-        "安装包已下载并通过 SHA-256 校验。",
+        "codexClient.progressStageDone",
         Some(size),
         Some(size),
         Some(4),
@@ -1013,7 +1132,7 @@ where
         sha256: release.sha256.clone(),
         hash_verified: true,
         route: plan.route.clone(),
-        notes: vec!["安装包已下载并通过 SHA-256 校验。".to_string()],
+        notes: vec!["Installer downloaded and passed SHA-256 verification.".to_string()],
     })
 }
 
@@ -1029,11 +1148,11 @@ fn cleanup_staged_package(stage: &mut CodexClientStageReport, notes: &mut Vec<St
     match fs::remove_file(&path) {
         Ok(()) => {
             stage.staged_path = None;
-            notes.push("已清理本次使用的暂存安装包。".to_string());
+            notes.push("Cleaned the staged installer used by this operation.".to_string());
         }
         Err(err) => {
             notes.push(format!(
-                "暂存安装包清理失败：{}，可稍后手动删除 {}。",
+                "Failed to clean staged installer: {}. You can delete {} later.",
                 err,
                 display_path(&path)
             ));
@@ -1048,10 +1167,10 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
     let manifest_text = fetch_text(&manifest_url)?;
     let checksums_text = fetch_text(&checksums_url)?;
     let manifest: MirrorManifest = serde_json::from_str(&manifest_text)
-        .map_err(|err| format!("解析 Codex 镜像 manifest 失败：{err}"))?;
+        .map_err(|err| format!("Failed to parse Codex mirror manifest: {err}"))?;
     if manifest.schema_version < 2 {
         return Err(format!(
-            "不支持的 Codex 镜像 manifest schemaVersion：{}",
+            "Unsupported Codex mirror manifest schemaVersion: {}",
             manifest.schema_version
         ));
     }
@@ -1070,16 +1189,14 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
         .and_then(|source| source.bundle_short_version.clone());
 
     if cfg!(target_os = "macos") {
-        let macos = manifest
-            .sources
-            .macos
-            .as_ref()
-            .ok_or_else(|| "Codex 镜像 manifest 没有 macOS 安装包信息。".to_string())?;
+        let macos = manifest.sources.macos.as_ref().ok_or_else(|| {
+            "Codex mirror manifest has no macOS installer information.".to_string()
+        })?;
         let (source, arch) = current_macos_source(macos)?;
         let source_url = source
             .url
             .clone()
-            .ok_or_else(|| format!("Codex 镜像 manifest 没有 macOS {arch} 下载地址。"))?;
+            .ok_or_else(|| format!("Codex mirror manifest has no macOS {arch} download URL."))?;
         let package_url = if settings.source == "official" {
             official_macos_url(arch).to_string()
         } else {
@@ -1093,12 +1210,12 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
             .clone()
             .or_else(|| checksum_for_name(&checksums_text, &checksum_name))
             .or_else(|| checksum_for_name(&checksums_text, &package_moniker))
-            .ok_or_else(|| format!("checksums 中没有找到 macOS {arch} DMG 的 SHA-256。"))?;
+            .ok_or_else(|| format!("SHA-256 for macOS {arch} DMG was not found in checksums."))?;
         let version = source
             .bundle_short_version
             .clone()
             .or_else(|| source.bundle_version.clone())
-            .ok_or_else(|| format!("Codex 镜像 manifest 没有 macOS {arch} 版本号。"))?;
+            .ok_or_else(|| format!("Codex mirror manifest has no macOS {arch} version."))?;
 
         return Ok(CodexClientRelease {
             version,
@@ -1126,7 +1243,7 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
     let sha256 =
         checksum_for_windows(&checksums_text, &windows.package_moniker).ok_or_else(|| {
             format!(
-                "checksums 中没有找到 {} 的 SHA-256。",
+                "SHA-256 for {} was not found in checksums.",
                 windows.package_moniker
             )
         })?;
@@ -1240,7 +1357,7 @@ where
     emit_step_progress(
         on_progress,
         "installing",
-        "正在准备便携版安装目录...",
+        "codexClient.progressPreparingPortableDir",
         None,
         None,
         Some(4),
@@ -1249,62 +1366,66 @@ where
     validate_install_root(install_root)?;
     let mut notes = Vec::new();
     let termination = process_control::close_processes_for_update(
-        "Codex 客户端",
+        "Codex",
         &["Codex"],
         Some(install_root),
     )?;
-    if let Some(note) = termination.note("Codex 客户端") {
+    if let Some(note) = termination.note("Codex") {
         notes.push(note);
     }
     let parent = install_root
         .parent()
-        .ok_or_else(|| "安装目录无父级目录。".to_string())?;
-    fs::create_dir_all(parent).map_err(|err| format!("创建安装父目录失败：{err}"))?;
+        .ok_or_else(|| "Install directory has no parent directory.".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("Failed to create install parent directory: {err}"))?;
     let work = parent
         .join(".codestudio-codex-client-staging")
         .join(format!("portable-{}", std::process::id()));
     let extracted = work.join("extracted");
     let payload = work.join("payload");
     if work.exists() {
-        fs::remove_dir_all(&work).map_err(|err| format!("清理旧暂存目录失败：{err}"))?;
+        fs::remove_dir_all(&work)
+            .map_err(|err| format!("Failed to clean old staging directory: {err}"))?;
     }
-    fs::create_dir_all(&extracted).map_err(|err| format!("创建暂存目录失败：{err}"))?;
+    fs::create_dir_all(&extracted)
+        .map_err(|err| format!("Failed to create staging directory: {err}"))?;
 
     let manifest_xml = extract_msix(msix_path, &extracted, on_progress)?;
     let identity = parse_msix_identity(&manifest_xml)?;
     if identity.name != PACKAGE_IDENTITY {
         notes.push(format!(
-            "MSIX Identity 是 {}，不是预期的 {}。",
+            "MSIX Identity is {}, expected {}.",
             identity.name, PACKAGE_IDENTITY
         ));
     }
     if !identity.publisher.to_ascii_lowercase().contains("openai") {
         notes.push(format!(
-            "MSIX Publisher 未显示为 OpenAI：{}。",
+            "MSIX Publisher does not appear to be OpenAI: {}.",
             identity.publisher
         ));
     }
     let exe = find_codex_exe(&extracted)?;
     let exe_dir = exe
         .parent()
-        .ok_or_else(|| "Codex.exe 无父级目录。".to_string())?;
+        .ok_or_else(|| "Codex.exe has no parent directory.".to_string())?;
     emit_step_progress(
         on_progress,
         "copying",
-        "正在复制便携版文件...",
+        "codexClient.progressCopyingPortable",
         None,
         None,
         Some(5),
         Some(7),
     );
-    copy_dir_all(exe_dir, &payload).map_err(|err| format!("复制便携版文件失败：{err}"))?;
+    copy_dir_all(exe_dir, &payload)
+        .map_err(|err| format!("Failed to copy portable files: {err}"))?;
     fs::write(payload.join("AppxManifest.xml"), manifest_xml)
-        .map_err(|err| format!("写入 AppxManifest.xml 失败：{err}"))?;
+        .map_err(|err| format!("Failed to write AppxManifest.xml: {err}"))?;
 
     emit_step_progress(
         on_progress,
         "writing",
-        "正在写入安装目录...",
+        "codexClient.progressWritingInstall",
         None,
         None,
         Some(6),
@@ -1312,23 +1433,27 @@ where
     );
     let rollback = parent.join("Codex.rollback");
     if rollback.exists() {
-        fs::remove_dir_all(&rollback).map_err(|err| format!("清理旧回滚目录失败：{err}"))?;
+        fs::remove_dir_all(&rollback)
+            .map_err(|err| format!("Failed to clean old rollback directory: {err}"))?;
     }
     let had_previous = install_root.exists();
     if had_previous {
-        fs::rename(install_root, &rollback).map_err(|err| format!("创建回滚备份失败：{err}"))?;
+        fs::rename(install_root, &rollback)
+            .map_err(|err| format!("Failed to create rollback backup: {err}"))?;
     }
     if let Err(err) = fs::rename(&payload, install_root) {
         if had_previous && rollback.exists() {
             let _ = fs::rename(&rollback, install_root);
         }
-        return Err(format!("写入便携版安装目录失败，已尝试回滚：{err}"));
+        return Err(format!(
+            "Failed to write portable install directory; rollback was attempted: {err}"
+        ));
     }
 
     emit_step_progress(
         on_progress,
         "finalizing",
-        "正在创建快捷方式与卸载项...",
+        "codexClient.progressFinalizingInstall",
         None,
         None,
         Some(6),
@@ -1336,21 +1461,21 @@ where
     );
     let registration = portable_registration(install_root, &identity.version);
     if let Err(err) = package::create_portable_start_menu_shortcut(&registration) {
-        notes.push(format!("开始菜单快捷方式创建失败：{err}"));
+        notes.push(format!("Failed to create Start menu shortcut: {err}"));
     }
     if let Err(err) = package::create_portable_uninstall_entry(&registration) {
-        notes.push(format!("卸载项登记失败：{err}"));
+        notes.push(format!("Failed to register uninstall entry: {err}"));
     }
     if had_previous && rollback.exists() {
         if let Err(err) = fs::remove_dir_all(&rollback) {
-            notes.push(format!("回滚备份清理失败：{err}"));
+            notes.push(format!("Failed to clean rollback backup: {err}"));
         }
     }
     let _ = fs::remove_dir_all(&work);
     emit_step_progress(
         on_progress,
         "finalizing",
-        "便携版安装已写入。",
+        "codexClient.progressPortableWritten",
         Some(1),
         Some(1),
         Some(6),
@@ -1374,15 +1499,16 @@ fn extract_msix<F>(msix_path: &Path, dest: &Path, on_progress: &F) -> Result<Str
 where
     F: Fn(CodexClientProgress),
 {
-    let file = File::open(msix_path).map_err(|err| format!("打开 MSIX 失败：{err}"))?;
-    let mut zip = ZipArchive::new(file).map_err(|err| format!("读取 MSIX ZIP 结构失败：{err}"))?;
+    let file = File::open(msix_path).map_err(|err| format!("Failed to open MSIX: {err}"))?;
+    let mut zip =
+        ZipArchive::new(file).map_err(|err| format!("Failed to read MSIX ZIP structure: {err}"))?;
     let mut manifest_xml = None;
     let total_entries = zip.len();
     let total = total_entries as u64;
     emit_step_progress(
         on_progress,
         "extracting",
-        "正在解包 MSIX 安装包...",
+        "codexClient.progressExtractingMsix",
         Some(0),
         Some(total),
         Some(4),
@@ -1392,20 +1518,24 @@ where
     for index in 0..total_entries {
         let mut entry = zip
             .by_index(index)
-            .map_err(|err| format!("读取 MSIX 条目失败：{err}"))?;
+            .map_err(|err| format!("Failed to read MSIX entry: {err}"))?;
         let Some(enclosed_name) = entry.enclosed_name().map(|path| path.to_path_buf()) else {
             continue;
         };
         let out_path = dest.join(&enclosed_name);
         if entry.is_dir() {
-            fs::create_dir_all(&out_path).map_err(|err| format!("创建解包目录失败：{err}"))?;
+            fs::create_dir_all(&out_path)
+                .map_err(|err| format!("Failed to create extraction directory: {err}"))?;
             continue;
         }
         if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| format!("创建解包父目录失败：{err}"))?;
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("Failed to create extraction parent directory: {err}"))?;
         }
-        let mut out = File::create(&out_path).map_err(|err| format!("创建解包文件失败：{err}"))?;
-        io::copy(&mut entry, &mut out).map_err(|err| format!("写入解包文件失败：{err}"))?;
+        let mut out = File::create(&out_path)
+            .map_err(|err| format!("Failed to create extracted file: {err}"))?;
+        io::copy(&mut entry, &mut out)
+            .map_err(|err| format!("Failed to write extracted file: {err}"))?;
 
         if enclosed_name
             .file_name()
@@ -1416,14 +1546,14 @@ where
             let mut xml = String::new();
             File::open(&out_path)
                 .and_then(|mut file| file.read_to_string(&mut xml))
-                .map_err(|err| format!("读取 AppxManifest.xml 失败：{err}"))?;
+                .map_err(|err| format!("Failed to read AppxManifest.xml: {err}"))?;
             manifest_xml = Some(xml);
         }
         if index == 0 || index + 1 == total_entries || index % 25 == 0 {
             emit_step_progress(
                 on_progress,
                 "extracting",
-                "正在解包 MSIX 安装包...",
+                "codexClient.progressExtractingMsix",
                 Some((index + 1) as u64),
                 Some(total),
                 Some(4),
@@ -1432,19 +1562,21 @@ where
         }
     }
 
-    manifest_xml.ok_or_else(|| "MSIX 缺少 AppxManifest.xml。".to_string())
+    manifest_xml.ok_or_else(|| "MSIX is missing AppxManifest.xml.".to_string())
 }
 
 fn find_codex_exe(root: &Path) -> Result<PathBuf, String> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir).map_err(|err| format!("扫描解包目录失败：{err}"))?
+        for entry in fs::read_dir(&dir)
+            .map_err(|err| format!("Failed to scan extraction directory: {err}"))?
         {
-            let entry = entry.map_err(|err| format!("读取解包目录项失败：{err}"))?;
+            let entry =
+                entry.map_err(|err| format!("Failed to read extraction directory entry: {err}"))?;
             let path = entry.path();
             let file_type = entry
                 .file_type()
-                .map_err(|err| format!("读取文件类型失败：{err}"))?;
+                .map_err(|err| format!("Failed to read file type: {err}"))?;
             if file_type.is_dir() {
                 stack.push(path);
             } else if path
@@ -1456,7 +1588,7 @@ fn find_codex_exe(root: &Path) -> Result<PathBuf, String> {
             }
         }
     }
-    Err("MSIX 中没有找到 Codex.exe。".to_string())
+    Err("Codex.exe was not found in the MSIX.".to_string())
 }
 
 fn copy_dir_all(from: &Path, to: &Path) -> io::Result<()> {
@@ -1479,17 +1611,17 @@ fn parse_msix_identity(xml: &str) -> Result<MsixIdentity, String> {
     let identity_tag = xml
         .split('<')
         .find(|part| part.trim_start().starts_with("Identity "))
-        .ok_or_else(|| "AppxManifest.xml 缺少 Identity。".to_string())?;
+        .ok_or_else(|| "AppxManifest.xml is missing Identity.".to_string())?;
     let get = |name: &str| -> Result<String, String> {
         let needle = format!("{name}=\"");
         let start = identity_tag
             .find(&needle)
-            .ok_or_else(|| format!("Identity 缺少 {name}。"))?
+            .ok_or_else(|| format!("Identity is missing {name}."))?
             + needle.len();
         let rest = &identity_tag[start..];
         let end = rest
             .find('"')
-            .ok_or_else(|| format!("Identity {name} 格式无效。"))?;
+            .ok_or_else(|| format!("Identity {name} has invalid format."))?;
         Ok(rest[..end].to_string())
     };
     Ok(MsixIdentity {
@@ -1535,13 +1667,17 @@ fn current_macos_source(macos: &MacosSources) -> Result<(&MacosSource, &'static 
             .arm64
             .as_ref()
             .map(|source| (source, "arm64"))
-            .ok_or_else(|| "Codex 镜像 manifest 没有 macOS arm64 安装包信息。".to_string())
+            .ok_or_else(|| {
+                "Codex mirror manifest has no macOS arm64 installer information.".to_string()
+            })
     } else {
         macos
             .x64
             .as_ref()
             .map(|source| (source, "x64"))
-            .ok_or_else(|| "Codex 镜像 manifest 没有 macOS x64 安装包信息。".to_string())
+            .ok_or_else(|| {
+                "Codex mirror manifest has no macOS x64 installer information.".to_string()
+            })
     }
 }
 
@@ -1591,15 +1727,15 @@ fn fetch_text(url: &str) -> Result<String, String> {
     let output = hidden_command("curl")
         .args(["-fsSL", "--connect-timeout", "20", "--retry", "2", url])
         .output()
-        .map_err(|err| format!("启动 curl 失败：{err}"))?;
+        .map_err(|err| format!("Failed to start curl: {err}"))?;
     if !output.status.success() {
         return Err(format!(
-            "读取 {} 失败：{}",
+            "Failed to read {}: {}",
             url_host(url),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    String::from_utf8(output.stdout).map_err(|err| format!("响应不是 UTF-8：{err}"))
+    String::from_utf8(output.stdout).map_err(|err| format!("Response is not UTF-8: {err}"))
 }
 
 fn download_to_file<F>(
@@ -1612,7 +1748,8 @@ where
     F: Fn(CodexClientProgress),
 {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("创建下载目录失败：{err}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create download directory: {err}"))?;
     }
     let temp = path.with_extension("download");
     if temp.exists() {
@@ -1621,7 +1758,7 @@ where
     emit_step_progress(
         on_progress,
         "downloading",
-        "正在下载安装包...",
+        "codexClient.progressDownloading",
         Some(0),
         expected_total,
         Some(2),
@@ -1639,12 +1776,12 @@ where
             url,
         ])
         .spawn()
-        .map_err(|err| format!("启动下载失败：{err}"))?;
+        .map_err(|err| format!("Failed to start download: {err}"))?;
     let mut last_emit = Instant::now() - Duration::from_secs(2);
     loop {
         match child
             .try_wait()
-            .map_err(|err| format!("等待下载进程失败：{err}"))?
+            .map_err(|err| format!("Failed while waiting for download process: {err}"))?
         {
             Some(_) => break,
             None => {
@@ -1653,7 +1790,7 @@ where
                     emit_step_progress(
                         on_progress,
                         "downloading",
-                        "正在下载安装包...",
+                        "codexClient.progressDownloading",
                         downloaded,
                         expected_total,
                         Some(2),
@@ -1667,11 +1804,11 @@ where
     }
     let output = child
         .wait_with_output()
-        .map_err(|err| format!("读取下载结果失败：{err}"))?;
+        .map_err(|err| format!("Failed to read download result: {err}"))?;
     if !output.status.success() {
         let _ = fs::remove_file(&temp);
         return Err(format!(
-            "下载 {} 失败：{}",
+            "Failed to download {}: {}",
             url_host(url),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
@@ -1680,13 +1817,13 @@ where
     emit_step_progress(
         on_progress,
         "downloading",
-        "安装包下载完成。",
+        "codexClient.progressDownloadComplete",
         downloaded,
         expected_total,
         Some(2),
         Some(4),
     );
-    fs::rename(&temp, path).map_err(|err| format!("保存下载文件失败：{err}"))
+    fs::rename(&temp, path).map_err(|err| format!("Failed to save downloaded file: {err}"))
 }
 
 fn emit_step_progress<F>(
@@ -1718,13 +1855,14 @@ fn emit_step_progress<F>(
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|err| format!("打开文件计算 SHA-256 失败：{err}"))?;
+    let mut file = File::open(path)
+        .map_err(|err| format!("Failed to open file for SHA-256 calculation: {err}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 1024 * 128];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|err| format!("读取文件计算 SHA-256 失败：{err}"))?;
+            .map_err(|err| format!("Failed to read file for SHA-256 calculation: {err}"))?;
         if read == 0 {
             break;
         }
@@ -1749,36 +1887,19 @@ fn staged_package_path(release: &CodexClientRelease) -> Result<PathBuf, String> 
 fn staging_dir() -> Result<PathBuf, String> {
     let paths = app_paths().map_err(|err| err.to_string())?;
     ensure_dirs(&paths).map_err(|err| err.to_string())?;
-    let dir = paths.config_dir.join("downloads").join("codex-client");
+    let dir = paths.downloads_dir.join("codex-client");
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     Ok(dir)
 }
 
-fn settings_file() -> Result<PathBuf, String> {
-    Ok(app_paths()
-        .map_err(|err| err.to_string())?
-        .config_dir
-        .join("codex-client-settings.json"))
-}
-
-fn marker_file() -> Result<PathBuf, String> {
-    Ok(app_paths()
-        .map_err(|err| err.to_string())?
-        .config_dir
-        .join("codex-client-managed.json"))
-}
-
 fn load_settings() -> Result<CodexClientSettings, String> {
-    let path = settings_file()?;
-    if !path.exists() {
+    let Some(json) = storage::load_state_json(CODEX_CLIENT_SETTINGS_STATE_KEY)? else {
         let settings = CodexClientSettings::default();
         save_settings(&settings)?;
         return Ok(settings);
-    }
-    let mut settings: CodexClientSettings = serde_json::from_str(
-        &fs::read_to_string(&path).map_err(|err| format!("读取 Codex 客户端设置失败：{err}"))?,
-    )
-    .map_err(|err| format!("解析 Codex 客户端设置失败：{err}"))?;
+    };
+    let mut settings: CodexClientSettings = serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse Codex settings: {err}"))?;
     settings.source = normalize_source(&settings.source);
     settings.custom_url = String::new();
     settings.signed_only = true;
@@ -1789,23 +1910,21 @@ fn load_settings() -> Result<CodexClientSettings, String> {
 }
 
 fn save_settings(settings: &CodexClientSettings) -> Result<(), String> {
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    ensure_dirs(&paths).map_err(|err| err.to_string())?;
-    let path = settings_file()?;
     let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
-    fs::write(path, json).map_err(|err| format!("保存 Codex 客户端设置失败：{err}"))
+    storage::save_state_json(CODEX_CLIENT_SETTINGS_STATE_KEY, &json)
+        .map_err(|err| format!("Failed to save Codex settings: {err}"))
 }
 
 fn save_marker(marker: &ManagedInstallMarker) -> Result<(), String> {
-    let paths = app_paths().map_err(|err| err.to_string())?;
-    ensure_dirs(&paths).map_err(|err| err.to_string())?;
     let json = serde_json::to_string_pretty(marker).map_err(|err| err.to_string())?;
-    fs::write(marker_file()?, json).map_err(|err| format!("保存 Codex 客户端托管标记失败：{err}"))
+    storage::save_state_json(CODEX_CLIENT_MARKER_STATE_KEY, &json)
+        .map_err(|err| format!("Failed to save Codex managed marker: {err}"))
 }
 
 fn load_marker() -> Option<ManagedInstallMarker> {
-    fs::read_to_string(marker_file().ok()?)
+    storage::load_state_json(CODEX_CLIENT_MARKER_STATE_KEY)
         .ok()
+        .flatten()
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
@@ -1845,7 +1964,7 @@ fn validate_install_path_for_platform(path: &Path) -> Result<(), String> {
 
 fn validate_macos_install_target(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
-        return Err("安装位置必须是绝对路径。".to_string());
+        return Err("Install location must be an absolute path.".to_string());
     }
     if path
         .extension()
@@ -1853,39 +1972,46 @@ fn validate_macos_install_target(path: &Path) -> Result<(), String> {
         .map(|extension| extension.eq_ignore_ascii_case("app"))
         != Some(true)
     {
-        return Err("macOS 安装位置必须指向 .app 应用包。".to_string());
+        return Err("macOS install location must point to an .app bundle.".to_string());
     }
     let parent = path
         .parent()
-        .ok_or_else(|| "macOS 安装位置缺少父目录。".to_string())?;
+        .ok_or_else(|| "macOS install location has no parent directory.".to_string())?;
     if !parent.exists() {
-        return Err("macOS 安装位置的父目录不存在。".to_string());
+        return Err("macOS install location parent directory does not exist.".to_string());
     }
     if path.exists() && !path.is_dir() {
-        return Err("macOS 安装位置已存在，但不是应用目录。".to_string());
+        return Err(
+            "macOS install location already exists but is not an app directory.".to_string(),
+        );
     }
     Ok(())
 }
 
 fn validate_install_root(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
-        return Err("安装位置必须是绝对路径。".to_string());
+        return Err("Install location must be an absolute path.".to_string());
     }
     if path.parent().is_none() {
-        return Err("安装位置不能是磁盘根目录。".to_string());
+        return Err("Install location cannot be the disk root.".to_string());
     }
     if path.exists() && !path.is_dir() {
-        return Err("安装位置必须是文件夹。".to_string());
+        return Err("Install location must be a folder.".to_string());
     }
     if path.exists() && !is_empty_dir(path)? && !is_existing_portable_root(path) {
-        return Err("安装位置必须是空文件夹，或已有的 Codex 便携版目录。".to_string());
+        return Err(
+            "Install location must be an empty folder or an existing Codex portable directory."
+                .to_string(),
+        );
     }
     let protected = protected_roots();
     if protected
         .iter()
         .any(|root| path_is_equal_or_child(path, root))
     {
-        return Err("安装位置不能放在系统目录或管理员目录。".to_string());
+        return Err(
+            "Install location cannot be inside a system or administrator directory.".to_string(),
+        );
     }
     Ok(())
 }
@@ -1919,7 +2045,7 @@ fn path_is_equal_or_child(path: &Path, root: &Path) -> bool {
 
 fn is_empty_dir(path: &Path) -> Result<bool, String> {
     Ok(fs::read_dir(path)
-        .map_err(|err| format!("读取安装目录失败：{err}"))?
+        .map_err(|err| format!("Failed to read install directory: {err}"))?
         .next()
         .is_none())
 }
@@ -1937,8 +2063,8 @@ fn expand_env_path(raw: &str) -> Result<PathBuf, String> {
             ("%USERPROFILE%", "USERPROFILE"),
         ] {
             if value.to_ascii_uppercase().starts_with(key) {
-                let replacement =
-                    std::env::var(env_key).map_err(|_| format!("环境变量 {env_key} 不可用。"))?;
+                let replacement = std::env::var(env_key)
+                    .map_err(|_| format!("Environment variable {env_key} is unavailable."))?;
                 value = format!("{replacement}{}", &value[key.len()..]);
             }
         }
@@ -2013,7 +2139,6 @@ fn path_mtime(path: &Path) -> Option<String> {
         .map(|time| time.to_rfc3339())
 }
 
-#[cfg(windows)]
 fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -2095,8 +2220,8 @@ foreach ($id in $targetIds) {{
 "#
     );
     let json = run_powershell(&script)?;
-    let value: serde_json::Value =
-        serde_json::from_str(&json).map_err(|err| format!("解析 Codex 进程结束结果失败：{err}"))?;
+    let value: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse Codex process termination result: {err}"))?;
     let total = value
         .get("total")
         .and_then(|item| item.as_u64())
@@ -2110,15 +2235,17 @@ foreach ($id in $targetIds) {{
         .and_then(|item| item.as_u64())
         .unwrap_or(0);
     if remaining > 0 {
-        return Err("仍有 Codex 桌面端进程无法结束，未继续卸载。".to_string());
+        return Err(
+            "A Codex desktop process is still running; uninstall was not continued.".to_string(),
+        );
     }
     if total > 0 {
         if forced > 0 {
             notes.push(format!(
-                "检测到正在运行的 Codex 桌面端，已强制结束 {forced} 个进程后卸载。"
+                "Codex desktop was running; force-closed {forced} process(es) before uninstalling."
             ));
         } else {
-            notes.push("检测到正在运行的 Codex 桌面端，已自动关闭后卸载。".to_string());
+            notes.push("Codex desktop was running and was closed before uninstalling.".to_string());
         }
     }
     Ok(())
@@ -2201,8 +2328,8 @@ foreach ($id in $targetIds) {{
 "#
     );
     let json = run_powershell(&script)?;
-    let value: serde_json::Value =
-        serde_json::from_str(&json).map_err(|err| format!("解析 Codex 进程重启结果失败：{err}"))?;
+    let value: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse Codex process restart result: {err}"))?;
     let total = value
         .get("total")
         .and_then(|item| item.as_u64())
@@ -2216,22 +2343,381 @@ foreach ($id in $targetIds) {{
         .and_then(|item| item.as_u64())
         .unwrap_or(0);
     if remaining > 0 {
-        return Err("仍有 Codex 桌面端进程无法结束，未继续重启。".to_string());
+        return Err(
+            "A Codex desktop process is still running; restart was not continued.".to_string(),
+        );
     }
     if total > 0 {
         if forced > 0 {
             notes.push(format!(
-                "已强制结束 {forced} 个正在运行的 Codex 桌面端进程。"
+                "Force-closed {forced} running Codex desktop process(es)."
             ));
         } else {
-            notes.push("已自动关闭正在运行的 Codex 桌面端。".to_string());
+            notes.push("Closed the running Codex desktop process.".to_string());
         }
     }
     Ok(())
 }
 
-fn launch_msix() -> Result<(), String> {
-    package::launch_msix_package(PACKAGE_IDENTITY)
+fn launch_installed_codex(installed: &InstalledCodexClient, args: &[String]) -> Result<(), String> {
+    if installed.source == "portable" {
+        let exe = Path::new(&installed.path).join(CODEX_EXE_NAME);
+        hidden_command(exe)
+            .args(args)
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("Failed to launch Codex: {err}"))?;
+    } else if cfg!(target_os = "windows") {
+        package::launch_msix_package_with_args(PACKAGE_IDENTITY, args)
+            .map(|_| ())
+            .map_err(|err| format!("Failed to launch Codex with patch arguments: {err}"))?;
+    } else if cfg!(target_os = "macos") {
+        let path = Path::new(&installed.path);
+        hidden_command("open")
+            .arg(path)
+            .arg("--args")
+            .args(args)
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("Failed to launch Codex with patch arguments: {err}"))?;
+    } else {
+        return Err(
+            "Launching Codex is not supported on the current platform.".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn sync_history_if_enabled(settings: &CodexClientSettings) -> Result<(), String> {
+    if !settings.sync_history_on_launch {
+        return Ok(());
+    }
+    let report = codex_provider_sync::run_default_provider_sync()?;
+    let _ = activity_log::append(
+        Severity::Info,
+        format!(
+            "Synchronized Codex history provider to {} ({} session files, {} sqlite rows).",
+            report.target_provider, report.changed_session_files, report.sqlite_rows_updated
+        ),
+    );
+    Ok(())
+}
+
+fn codex_patch_launch_args(debug_port: u16) -> Vec<String> {
+    vec![
+        format!("--remote-debugging-port={debug_port}"),
+        format!("--remote-allow-origins=http://127.0.0.1:{debug_port}"),
+    ]
+}
+
+fn select_debug_port() -> Result<u16, String> {
+    TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|err| format!("Failed to reserve a patch launch debug port: {err}"))
+        .and_then(|listener| {
+            listener
+                .local_addr()
+                .map(|addr| addr.port())
+                .map_err(|err| format!("Failed to read patch launch debug port: {err}"))
+        })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CdpTarget {
+    #[serde(rename = "type")]
+    target_type: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default, rename = "webSocketDebuggerUrl")]
+    web_socket_debugger_url: Option<String>,
+}
+
+fn inject_plugin_unlock(debug_port: u16) -> Result<(), String> {
+    let mut last_error = None;
+    for _ in 0..CODEX_PATCH_INJECTION_RETRY_COUNT {
+        match try_inject_plugin_unlock(debug_port) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                thread::sleep(Duration::from_millis(CODEX_PATCH_INJECTION_RETRY_MS));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Codex patch injection failed.".to_string()))
+}
+
+fn try_inject_plugin_unlock(debug_port: u16) -> Result<(), String> {
+    let target = pick_cdp_target(debug_port)?;
+    let ws_url = target
+        .web_socket_debugger_url
+        .ok_or_else(|| "Selected Codex CDP target has no WebSocket debugger URL.".to_string())?;
+    evaluate_cdp_script(&ws_url, plugin_unlock_script())
+}
+
+fn pick_cdp_target(debug_port: u16) -> Result<CdpTarget, String> {
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|err| format!("Failed to build CDP client: {err}"))?;
+    let mut errors = Vec::new();
+    for url in [
+        format!("http://127.0.0.1:{debug_port}/json"),
+        format!("http://[::1]:{debug_port}/json"),
+    ] {
+        match client.get(&url).send() {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => {
+                    let targets = response
+                        .json::<Vec<CdpTarget>>()
+                        .map_err(|err| format!("Failed to parse CDP targets: {err}"))?;
+                    if let Some(target) = targets.iter().find(|target| {
+                        target.target_type == "page"
+                            && target
+                                .web_socket_debugger_url
+                                .as_deref()
+                                .is_some_and(|item| !item.is_empty())
+                            && format!("{} {}", target.title, target.url)
+                                .to_ascii_lowercase()
+                                .contains("codex")
+                    }) {
+                        return Ok(target.clone());
+                    }
+                    if let Some(target) = targets.iter().find(|target| {
+                        target.target_type == "page"
+                            && target
+                                .web_socket_debugger_url
+                                .as_deref()
+                                .is_some_and(|item| !item.is_empty())
+                    }) {
+                        return Ok(target.clone());
+                    }
+                    errors.push(format!("{url}: no page target"));
+                }
+                Err(err) => errors.push(format!("{url}: {err}")),
+            },
+            Err(err) => errors.push(format!("{url}: {err}")),
+        }
+    }
+    Err(format!(
+        "Failed to find Codex CDP target: {}",
+        errors.join("; ")
+    ))
+}
+
+fn evaluate_cdp_script(websocket_url: &str, script: &str) -> Result<(), String> {
+    let request = serde_json::to_string(&json!({
+        "id": 1,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": script,
+            "awaitPromise": true,
+            "returnByValue": true
+        }
+    }))
+    .map_err(|err| format!("Failed to encode CDP request: {err}"))?;
+    let (mut socket, _) = tungstenite::connect(websocket_url)
+        .map_err(|err| format!("Failed to connect Codex CDP WebSocket: {err}"))?;
+    socket
+        .send(tungstenite::Message::Text(request.into()))
+        .map_err(|err| format!("Failed to send Codex patch script: {err}"))?;
+    for _ in 0..20 {
+        let message = socket
+            .read()
+            .map_err(|err| format!("Failed to read Codex patch result: {err}"))?;
+        if let tungstenite::Message::Text(text) = message {
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|err| format!("Failed to parse Codex patch result: {err}"))?;
+            if value.get("id").and_then(|item| item.as_i64()) != Some(1) {
+                continue;
+            }
+            if let Some(error) = value.get("error") {
+                return Err(format!("Codex patch script failed: {error}"));
+            }
+            return Ok(());
+        }
+    }
+    Err("Codex patch script result was not received.".to_string())
+}
+
+fn plugin_unlock_script() -> &'static str {
+    r#"
+(() => {
+  if (window.__codestudioLitePluginUnlock === "1") {
+    window.__codestudioLitePluginUnlockRefresh?.();
+    return true;
+  }
+  window.__codestudioLitePluginUnlock = "1";
+  const styleId = "codestudio-lite-plugin-unlock-style";
+  const installSelector = 'button:disabled, button[aria-disabled="true"], [role="button"][aria-disabled="true"], button[data-disabled], [role="button"][data-disabled], button.cursor-not-allowed, [role="button"].cursor-not-allowed, button.pointer-events-none, [role="button"].pointer-events-none';
+  const pluginNavSelector = 'nav[role="navigation"] button.h-token-nav-row.w-full';
+  const pluginSvgSelector = 'svg path[d^="M7.94562 14.0277"]';
+
+  function ensureStyle() {
+    if (document.getElementById(styleId)) return;
+    const style = document.createElement("style");
+    style.id = styleId;
+    style.textContent = `.codestudio-lite-force-install-unlocked{opacity:1!important;pointer-events:auto!important;cursor:pointer!important}`;
+    document.head.appendChild(style);
+  }
+
+  function reactFiberFrom(element) {
+    const key = Object.keys(element || {}).find((item) => item.startsWith("__reactFiber"));
+    return key ? element[key] : null;
+  }
+
+  function authContextValueFrom(element) {
+    for (let fiber = reactFiberFrom(element); fiber; fiber = fiber.return) {
+      for (const value of [fiber.memoizedProps?.value, fiber.pendingProps?.value]) {
+        if (value && typeof value === "object" && typeof value.setAuthMethod === "function" && "authMethod" in value) {
+          return value;
+        }
+      }
+    }
+    return null;
+  }
+
+  function spoofChatGPTAuthMethod(element) {
+    const auth = authContextValueFrom(element);
+    if (!auth || auth.authMethod === "chatgpt") return false;
+    try {
+      auth.setAuthMethod("chatgpt");
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function pluginEntryButton() {
+    const byIcon = document.querySelector(`${pluginNavSelector} ${pluginSvgSelector}`)?.closest("button");
+    if (byIcon) return byIcon;
+    return Array.from(document.querySelectorAll(pluginNavSelector))
+      .find((button) => /^(插件|Plugins)(\\s+-\\s+.*)?$/i.test((button.textContent || "").trim())) || null;
+  }
+
+  function enablePluginEntry() {
+    const button = pluginEntryButton();
+    if (!button) return;
+    spoofChatGPTAuthMethod(button);
+    button.disabled = false;
+    button.removeAttribute("disabled");
+    button.removeAttribute("aria-disabled");
+    button.removeAttribute("data-disabled");
+    button.style.display = "";
+    button.querySelectorAll("*").forEach((node) => {
+      node.style.display = "";
+      node.removeAttribute?.("aria-disabled");
+      node.removeAttribute?.("data-disabled");
+    });
+    const propsKey = Object.keys(button).find((key) => key.startsWith("__reactProps"));
+    if (propsKey && button[propsKey]) {
+      button[propsKey].disabled = false;
+      button[propsKey]["aria-disabled"] = false;
+    }
+    if (button.dataset.codestudioLitePluginEntry !== "true") {
+      button.dataset.codestudioLitePluginEntry = "true";
+      button.addEventListener("click", () => spoofChatGPTAuthMethod(button), true);
+    }
+  }
+
+  function installButtonLabel(element) {
+    return (element.textContent || "").trim();
+  }
+
+  function isInstallButtonLabel(text) {
+    return /^安装\\s*/.test(text) || /^Install\\s*/i.test(text) || text === "强制安装";
+  }
+
+  function patchReactDisabledProps(element) {
+    Object.keys(element || {})
+      .filter((key) => key.startsWith("__reactProps"))
+      .forEach((key) => {
+        const props = element[key];
+        if (!props || typeof props !== "object") return;
+        props.disabled = false;
+        props["aria-disabled"] = false;
+        props["data-disabled"] = undefined;
+      });
+  }
+
+  function clearDisabledState(element) {
+    if (!(element instanceof HTMLElement)) return;
+    if ("disabled" in element) element.disabled = false;
+    element.removeAttribute("disabled");
+    element.removeAttribute("aria-disabled");
+    element.removeAttribute("data-disabled");
+    element.removeAttribute("inert");
+    element.classList.remove("disabled", "opacity-50", "cursor-not-allowed", "pointer-events-none");
+    element.classList.add("codestudio-lite-force-install-unlocked");
+    element.style.pointerEvents = "auto";
+    element.style.opacity = "";
+    element.style.cursor = "pointer";
+    element.tabIndex = 0;
+    patchReactDisabledProps(element);
+  }
+
+  function unlockNodes(button) {
+    const nodes = [button];
+    button.querySelectorAll?.("button, [role='button'], [disabled], [aria-disabled], [data-disabled], .cursor-not-allowed, .pointer-events-none")
+      .forEach((node) => nodes.push(node));
+    let parent = button.parentElement;
+    for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
+      if (parent.matches?.("button, [role='button'], [disabled], [aria-disabled], [data-disabled], .cursor-not-allowed, .pointer-events-none")) {
+        nodes.push(parent);
+      }
+    }
+    return Array.from(new Set(nodes));
+  }
+
+  function labelForcedInstallButton(button) {
+    const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (isInstallButtonLabel((node.nodeValue || "").trim())) {
+        node.nodeValue = "强制安装";
+        return;
+      }
+    }
+  }
+
+  function unlockInstallButtons() {
+    const nodes = Array.from(document.querySelectorAll(installSelector));
+    const buttons = Array.from(new Set(nodes.map((node) => node.closest?.("button, [role='button']") || node)));
+    buttons.forEach((button) => {
+      if (!isInstallButtonLabel(installButtonLabel(button))) return;
+      unlockNodes(button).forEach(clearDisabledState);
+      labelForcedInstallButton(button);
+      if (button.dataset.codestudioLiteForceInstall !== "true") {
+        button.dataset.codestudioLiteForceInstall = "true";
+        const keepUnlocked = () => unlockNodes(button).forEach(clearDisabledState);
+        ["pointerdown", "mousedown", "mouseup", "click", "focus"].forEach((eventName) => {
+          button.addEventListener(eventName, keepUnlocked, true);
+        });
+      }
+    });
+  }
+
+  function refresh() {
+    ensureStyle();
+    enablePluginEntry();
+    unlockInstallButtons();
+  }
+
+  window.__codestudioLitePluginUnlockRefresh = refresh;
+  refresh();
+  if (!window.__codestudioLitePluginUnlockTimer) {
+    window.__codestudioLitePluginUnlockTimer = setInterval(refresh, 1000);
+  }
+  if (!window.__codestudioLitePluginUnlockObserver) {
+    const observer = new MutationObserver(() => refresh());
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled", "aria-disabled", "data-disabled", "class", "style"] });
+    window.__codestudioLitePluginUnlockObserver = observer;
+  }
+  return true;
+})()
+"#
 }
 
 fn portable_registration<'a>(
@@ -2250,12 +2736,13 @@ fn portable_registration<'a>(
 }
 
 fn purge_user_data() -> Result<bool, String> {
-    let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录。".to_string())?;
+    let home =
+        dirs::home_dir().ok_or_else(|| "Could not locate the user home directory.".to_string())?;
     let path = home.join(".codex");
     if !path.exists() {
         return Ok(false);
     }
-    fs::remove_dir_all(path).map_err(|err| format!("删除 ~/.codex 失败：{err}"))?;
+    fs::remove_dir_all(path).map_err(|err| format!("Failed to delete ~/.codex: {err}"))?;
     Ok(true)
 }
 
@@ -2265,19 +2752,19 @@ fn open_folder(path: &Path) -> Result<(), String> {
             .arg(path)
             .spawn()
             .map(|_| ())
-            .map_err(|err| format!("打开路径失败：{err}"))
+            .map_err(|err| format!("Failed to open path: {err}"))
     } else if cfg!(target_os = "macos") {
         hidden_command("open")
             .arg(path)
             .spawn()
             .map(|_| ())
-            .map_err(|err| format!("打开路径失败：{err}"))
+            .map_err(|err| format!("Failed to open path: {err}"))
     } else {
         hidden_command("xdg-open")
             .arg(path)
             .spawn()
             .map(|_| ())
-            .map_err(|err| format!("打开路径失败：{err}"))
+            .map_err(|err| format!("Failed to open path: {err}"))
     }
 }
 

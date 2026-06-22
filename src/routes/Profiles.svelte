@@ -1,30 +1,60 @@
 <script lang="ts">
+  import { flip } from "svelte/animate";
+  import { onDestroy } from "svelte";
+  import {
+    dragHandle,
+    dragHandleZone,
+    SHADOW_ITEM_MARKER_PROPERTY_NAME,
+    SHADOW_PLACEHOLDER_ITEM_ID,
+    TRIGGERS,
+    type DndEvent
+  } from "svelte-dnd-action";
   import {
     applyProfile,
     clearClaudeEnvironmentVariables,
+    deleteProfileDraft,
+    deleteUsageScript,
     duplicateProfileDraft,
-    exportProfiles,
-    importProfiles,
     loadAppSettings,
+    loadUsageScriptState,
     previewProfileApply,
+    queryProfileUsage,
+    reorderProfileDrafts,
+    saveUsageScript,
+    testUsageScript,
     updateProfileDraft
   } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
   import AppIcon from "../components/AppIcon.svelte";
+  import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
+  import {
+    nextSortableProfileIds,
+    profileDragDisabled as resolveProfileDragDisabled,
+    profileIdsFromItems
+  } from "../lib/profileSortable";
   import type {
     ApplyProfileResult,
     DetectionSnapshot,
     PreviewProfileApplyResult,
     ProfileDraft,
     ProfileSummary,
-    ProviderApplyMode
+    ProviderApplyMode,
+    UsageData,
+    UsageQueryResult,
+    WizardPrefill,
+    UsageScriptSaveRequest,
+    UsageScriptState,
+    UsageScriptTemplateType
   } from "../types";
 
   export let summary: ProfileSummary | null = null;
   export let snapshot: DetectionSnapshot | null = null;
+  export let modeFilter: ProviderApplyMode = "config";
+  export let embedded = false;
   export let onProfileSwitched: () => void | Promise<void> = () => {};
+  export let onCreateProfile: (prefill?: WizardPrefill) => void = () => {};
 
   type ProfileGroup = {
     id: string;
@@ -36,20 +66,39 @@
 
   type ProfileModeSection = {
     mode: ProviderApplyMode;
-    titleKey: TranslationKey;
-    descriptionKey: TranslationKey;
     groups: ProfileGroup[];
   };
 
   type EditProfileForm = {
     name: string;
+    icon: string;
+    remark: string;
     mode: ProviderApplyMode;
     provider: string;
     protocol: string;
     model: string;
     baseUrl: string;
     apiKey: string;
+  };
+
+  type UsageForm = {
+    enabled: boolean;
+    templateType: UsageScriptTemplateType;
+    code: string;
+    apiKey: string;
+    baseUrl: string;
+    accessToken: string;
+    userId: string;
     timeoutSeconds: number;
+    autoQueryIntervalMinutes: number;
+  };
+
+  type ProfileUsageEntry = {
+    result: UsageQueryResult | null;
+    state: "idle" | "loading" | "querying";
+    configured: boolean;
+    error: string | null;
+    updatedAt: string | null;
   };
 
   let pendingEdit: ProfileDraft | null = null;
@@ -57,13 +106,13 @@
   let editingId: string | null = null;
   let applyingId: string | null = null;
   let duplicatingId: string | null = null;
+  let deletingId: string | null = null;
+  let pendingDelete: ProfileDraft | null = null;
   let pendingApply: ProfileDraft | null = null;
   let applyPreview: PreviewProfileApplyResult | null = null;
   let applyResult: ApplyProfileResult | null = null;
   let selectedApplyMode: ProviderApplyMode = "gateway";
   let pendingApplyMode: ProviderApplyMode = "gateway";
-  let importFileInput: HTMLInputElement | null = null;
-  let profileIoBusy: "import" | "export" | null = null;
   let editError: string | null = null;
   let applyError: string | null = null;
   let clearingEnvConflict = false;
@@ -72,6 +121,25 @@
   let syncClaudeVsCodePlugin = false;
   let preserveCodexOfficialAuth = true;
   let codexAuthConflictConfirmed = false;
+  let pendingUsageProfile: ProfileDraft | null = null;
+  let usageState: UsageScriptState | null = null;
+  let usageForm: UsageForm = emptyUsageForm();
+  let usageError: string | null = null;
+  let usageMessage: string | null = null;
+  let usageBusy: "load" | "save" | "test" | "query" | "delete" | null = null;
+  let usageResult: UsageQueryResult | null = null;
+  let usageAutoQueryTimer: ReturnType<typeof window.setInterval> | null = null;
+  let usageAutoQueryKey = "";
+  let profileUsageEntries: Record<string, ProfileUsageEntry> = {};
+  let selectedToolId: string | null = null;
+  let profileIconInput: HTMLInputElement | null = null;
+  let sortableProfiles: ProfileDraft[] = [];
+  let sortableSourceProfiles: ProfileDraft[] = [];
+  let sortableListKey = "";
+  let sortableActiveId: string | null = null;
+  let sortableSaving = false;
+  const profileFlipDurationMs = 220;
+  const profileDropTargetStyle = { outline: "none" };
 
   const toolOrder = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes"];
   const toolLabels: Record<string, string> = {
@@ -84,6 +152,16 @@
     openclaw: "OpenClaw",
     hermes: "Hermes"
   };
+  const officialProfileNameKeys: Record<string, TranslationKey> = {
+    codex: "profiles.officialProfile.codex",
+    "claude-desktop": "profiles.officialProfile.claudeDesktop",
+    claude: "profiles.officialProfile.claude",
+    gemini: "profiles.officialProfile.gemini",
+    "gemini-code-assist": "profiles.officialProfile.geminiCodeAssist",
+    opencode: "profiles.officialProfile.opencode",
+    openclaw: "profiles.officialProfile.openclaw",
+    hermes: "profiles.officialProfile.hermes"
+  };
 
   const protocolOptions = [
     { id: "openai-chat-completions", labelKey: "wizard.protocol.openaiChatCompletions" },
@@ -92,10 +170,16 @@
     { id: "google-gemini", labelKey: "wizard.protocol.googleGemini" }
   ] as const;
   type ProtocolOption = (typeof protocolOptions)[number];
-
+  const usageTemplateOptions: Array<{ id: UsageScriptTemplateType; labelKey: TranslationKey }> = [
+    { id: "general", labelKey: "profiles.usage.template.general" },
+    { id: "newapi", labelKey: "profiles.usage.template.newapi" },
+    { id: "balance", labelKey: "profiles.usage.template.balance" },
+    { id: "token_plan", labelKey: "profiles.usage.template.tokenPlan" },
+    { id: "custom", labelKey: "profiles.usage.template.custom" }
+  ];
   const configModeProtocolIdsByTool: Record<string, readonly string[]> = {
     codex: ["openai-chat-completions", "openai-responses"],
-    "claude-desktop": [],
+    "claude-desktop": ["anthropic-messages"],
     claude: ["anthropic-messages"],
     gemini: ["google-gemini"],
     "gemini-code-assist": ["google-gemini"],
@@ -105,12 +189,21 @@
   };
 
   $: installedProfileToolIds = buildInstalledProfileToolIds(snapshot);
-  $: profileModeSections = buildProfileModeSections(summary, installedProfileToolIds);
-  $: customProfileCount = summary?.drafts.filter((profile) => !profile.isBuiltin).length ?? 0;
-  $: visibleProfileCount = profileModeSections.reduce((count, section) => count + section.groups.reduce((groupCount, group) => groupCount + group.profiles.length, 0), 0);
+  $: normalizedModeFilter = (modeFilter === "gateway" ? "gateway" : "config") as ProviderApplyMode;
+  $: profileModeSections = buildProfileModeSections(summary, installedProfileToolIds, normalizedModeFilter);
+  $: profileToolGroups = profileModeSections.flatMap((section) => section.groups);
+  $: syncSelectedProfileTool(profileToolGroups);
+  $: selectedProfileGroup = profileToolGroups.find((group) => group.id === selectedToolId) ?? null;
+  $: syncSortableProfiles(selectedProfileGroup, normalizedModeFilter);
+  $: displayedProfiles = sortableProfiles;
+  $: routeTitleKey = (normalizedModeFilter === "gateway" ? "gateway.profileTitle" : "profiles.title") as TranslationKey;
+  $: visibleProfileCount = selectedProfileGroup?.profiles.length ?? 0;
   $: selectedModePreview =
     applyPreview?.modePreviews.find((mode) => mode.mode === selectedApplyMode) ?? null;
   $: selectedNativeDiff = selectedModePreview?.nativeDiff ?? null;
+  $: selectedNativeDiffVisible = Boolean(
+    selectedNativeDiff?.writeEnabled && selectedNativeDiff.changes.length > 0
+  );
   $: selectedModeSupported = selectedModePreview?.supported ?? false;
   $: applyEnvConflicts = applyResult?.envConflicts ?? applyPreview?.envConflicts ?? [];
   $: pendingApplyDisplacesCodexOAuth = Boolean(
@@ -129,25 +222,44 @@
   $: if (!canSyncClaudeVsCodePlugin && syncClaudeVsCodePlugin) {
     syncClaudeVsCodePlugin = false;
   }
-  $: editTimeoutSeconds = Number(editForm.timeoutSeconds);
+  $: editIconTooLong = profileIconTextTooLong(editForm.icon);
   $: editBaseUrlErrorKey = providerNeedsBaseUrl(editForm.provider)
     ? baseUrlValidationErrorKey(editForm.baseUrl)
     : null;
   $: availableEditProtocolOptions = pendingEdit
     ? protocolOptionsFor(pendingEdit.app, editForm.mode)
     : protocolOptions;
+  $: pendingUsageIsCodexOfficialOAuth = pendingUsageProfile
+    ? profileUsesCodexOfficialOAuth(pendingUsageProfile)
+    : false;
   $: canSaveEdit =
     Boolean(pendingEdit) &&
     editForm.name.trim().length > 0 &&
+    !editIconTooLong &&
     editForm.provider.trim().length > 0 &&
-    !providerIsOfficial(editForm.provider) &&
+    (!providerIsOfficial(editForm.provider) || editableOfficialProfileAllowed(pendingEdit, editForm.mode)) &&
     isProtocolAllowedForToolMode(pendingEdit?.app ?? "", editForm.mode, editForm.protocol) &&
     (!providerNeedsBaseUrl(editForm.provider) || editBaseUrlErrorKey === null) &&
     (!providerRequiresApiKey(editForm.provider) || Boolean(pendingEdit?.authRef) || editForm.apiKey.trim().length > 0) &&
     !pendingEdit?.isBuiltin &&
-    editTimeoutSeconds >= 5 &&
-    editTimeoutSeconds <= 600 &&
     editingId === null;
+  $: canSaveUsage =
+    Boolean(pendingUsageProfile) &&
+    (!usageForm.enabled || pendingUsageIsCodexOfficialOAuth || usageForm.code.trim().length > 0) &&
+    usageForm.timeoutSeconds >= 2 &&
+    usageForm.timeoutSeconds <= 60 &&
+    usageForm.autoQueryIntervalMinutes >= 0 &&
+    usageForm.autoQueryIntervalMinutes <= 1440 &&
+    usageBusy !== "load" &&
+    usageBusy !== "save";
+  $: configureUsageAutoQuery(
+    pendingUsageProfile?.id ?? "",
+    usageState?.config?.enabled ? usageState.config.autoQueryIntervalMinutes : 0
+  );
+
+  onDestroy(() => {
+    clearUsageAutoQueryTimer();
+  });
 
   async function openApply(profile: ProfileDraft) {
     if (isProfileActive(profile)) {
@@ -177,14 +289,387 @@
   function emptyEditForm(): EditProfileForm {
     return {
       name: "",
-      mode: "gateway",
+      icon: "",
+      remark: "",
+      mode: "config",
       provider: "",
       protocol: "openai-chat-completions",
       model: "",
       baseUrl: "",
-      apiKey: "",
-      timeoutSeconds: 120
+      apiKey: ""
     };
+  }
+
+  function emptyUsageForm(): UsageForm {
+    return {
+      enabled: false,
+      templateType: "general",
+      code: "",
+      apiKey: "",
+      baseUrl: "",
+      accessToken: "",
+      userId: "",
+      timeoutSeconds: 10,
+      autoQueryIntervalMinutes: 0
+    };
+  }
+
+  function emptyProfileUsageEntry(profile?: ProfileDraft): ProfileUsageEntry {
+    return {
+      result: null,
+      state: profile?.usageEnabled ? "loading" : "idle",
+      configured: Boolean(profile?.usageEnabled),
+      error: null,
+      updatedAt: null
+    };
+  }
+
+  function setProfileUsageEntry(profileId: string, entry: ProfileUsageEntry) {
+    profileUsageEntries = {
+      ...profileUsageEntries,
+      [profileId]: entry
+    };
+  }
+
+  function setProfileUsageResult(profileId: string, result: UsageQueryResult | null) {
+    const current = profileUsageEntries[profileId] ?? emptyProfileUsageEntry();
+    setProfileUsageEntry(profileId, {
+      ...current,
+      result,
+      state: "idle",
+      configured: true,
+      error: null,
+      updatedAt: result?.queriedAt ?? current.updatedAt
+    });
+  }
+
+  async function openUsage(profile: ProfileDraft) {
+    if (!profileCanOpenUsage(profile) || usageBusy !== null) {
+      return;
+    }
+    pendingUsageProfile = profile;
+    usageState = null;
+    usageResult = null;
+    usageError = null;
+    usageMessage = null;
+    usageBusy = "load";
+
+    try {
+      const state = await loadUsageScriptState(profile.id);
+      usageState = state;
+      usageResult = state.lastResult;
+      setProfileUsageEntry(profile.id, {
+        result: state.lastResult,
+        state: "idle",
+        configured: Boolean(state.config?.enabled),
+        error: null,
+        updatedAt: state.lastResult?.queriedAt ?? profileUsageEntries[profile.id]?.updatedAt ?? null
+      });
+      usageForm = usageFormFromState(profile, state);
+    } catch (err) {
+      usageError = errorLabel(err instanceof Error ? err.message : String(err));
+      usageForm = usageFormFromState(profile, null);
+    } finally {
+      usageBusy = null;
+    }
+  }
+
+  function closeUsage() {
+    if (usageBusy !== null) {
+      return;
+    }
+    pendingUsageProfile = null;
+    usageState = null;
+    usageResult = null;
+    usageError = null;
+    usageMessage = null;
+    usageForm = emptyUsageForm();
+  }
+
+  function usageFormFromState(profile: ProfileDraft, state: UsageScriptState | null): UsageForm {
+    const config = state?.config;
+    const templateType = config?.templateType ?? "general";
+    return {
+      enabled: config?.enabled ?? false,
+      templateType,
+      code: config?.code || state?.defaultCode || "",
+      apiKey: "",
+      baseUrl: config?.baseUrl ?? profile.baseUrl,
+      accessToken: "",
+      userId: config?.userId ?? "",
+      timeoutSeconds: config?.timeoutSeconds ?? 10,
+      autoQueryIntervalMinutes: config?.autoQueryIntervalMinutes ?? 0
+    };
+  }
+
+  function selectUsageTemplate(templateType: UsageScriptTemplateType) {
+    if (usageBusy !== null) {
+      return;
+    }
+    usageForm = {
+      ...usageForm,
+      templateType,
+      code: usageDefaultCode(templateType)
+    };
+  }
+
+  function usageDefaultCode(templateType: UsageScriptTemplateType) {
+    if (usageState?.config?.templateType === templateType && usageState.config.code.trim()) {
+      return usageState.config.code;
+    }
+    if (!usageState?.config && usageState?.defaultCode && templateType === "general") {
+      return usageState.defaultCode;
+    }
+    if (templateType === "newapi") {
+      return `({
+  request: {
+    url: "{{baseUrl}}/api/user/self",
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer {{accessToken}}",
+      "User-Agent": "codestudio-lite/1.0",
+      "New-Api-User": "{{userId}}"
+    }
+  },
+  extractor: function(response) {
+    if (response.success && response.data) {
+      return {
+        planName: response.data.group || "Default",
+        remaining: response.data.quota / 500000,
+        used: response.data.used_quota / 500000,
+        total: (response.data.quota + response.data.used_quota) / 500000,
+        unit: "USD"
+      };
+    }
+    return { isValid: false, invalidMessage: response.message || "Query failed" };
+  }
+})`;
+    }
+    if (templateType === "balance") {
+      return `({
+  request: {
+    url: "{{baseUrl}}/dashboard/billing/credit_grants",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    var total = response.total_granted || response.total_available || response.balance || 0;
+    var used = response.total_used || 0;
+    return {
+      remaining: response.total_available !== undefined ? response.total_available : Math.max(total - used, 0),
+      used: used,
+      total: total,
+      unit: "USD"
+    };
+  }
+})`;
+    }
+    if (templateType === "token_plan") {
+      return `({
+  request: {
+    url: "{{baseUrl}}/api/user/self",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    var data = response.data || response;
+    var total = data.total || data.quota || data.entitlement || 0;
+    var used = data.used || data.used_quota || 0;
+    return {
+      planName: data.plan || data.plan_name || data.group || "Token plan",
+      remaining: data.remaining !== undefined ? data.remaining : Math.max(total - used, 0),
+      used: used,
+      total: total,
+      unit: data.unit || "tokens"
+    };
+  }
+})`;
+    }
+    return `({
+  request: {
+    url: "{{baseUrl}}/user/balance",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    return {
+      isValid: response.is_active !== false,
+      remaining: response.balance,
+      unit: "USD"
+    };
+  }
+})`;
+  }
+
+  function buildUsageRequest(): UsageScriptSaveRequest | null {
+    if (!pendingUsageProfile) {
+      return null;
+    }
+    return {
+      profileId: pendingUsageProfile.id,
+      enabled: usageForm.enabled,
+      templateType: usageForm.templateType,
+      code: usageForm.code,
+      apiKey: usageForm.apiKey.trim() ? usageForm.apiKey : null,
+      baseUrl: usageForm.baseUrl.trim() ? normalizeBaseUrl(usageForm.baseUrl) : null,
+      accessToken: usageForm.accessToken.trim() ? usageForm.accessToken : null,
+      userId: usageForm.userId.trim() ? usageForm.userId : null,
+      timeoutSeconds: Number(usageForm.timeoutSeconds),
+      autoQueryIntervalMinutes: Number(usageForm.autoQueryIntervalMinutes)
+    };
+  }
+
+  async function handleUsageSave() {
+    const request = buildUsageRequest();
+    if (!request || !canSaveUsage) {
+      usageError = $t("profiles.usage.saveRequired");
+      return;
+    }
+    usageBusy = "save";
+    usageError = null;
+    usageMessage = null;
+    try {
+      const state = await saveUsageScript(request);
+      usageState = state;
+      usageResult = state.config?.enabled ? state.lastResult : null;
+      usageForm = usageFormFromState(pendingUsageProfile!, state);
+      const usageEnabled = Boolean(state.config?.enabled);
+      setProfileUsageEntry(pendingUsageProfile!.id, {
+        result: usageEnabled ? state.lastResult : null,
+        state: "idle",
+        configured: usageEnabled,
+        error: null,
+        updatedAt: usageEnabled
+          ? state.lastResult?.queriedAt ?? profileUsageEntries[pendingUsageProfile!.id]?.updatedAt ?? null
+          : null
+      });
+      usageMessage = $t("profiles.usage.saveSuccess");
+    } catch (err) {
+      usageError = errorLabel(err instanceof Error ? err.message : String(err));
+    } finally {
+      usageBusy = null;
+    }
+  }
+
+  async function handleUsageTest() {
+    if (pendingUsageIsCodexOfficialOAuth) {
+      return;
+    }
+    const request = buildUsageRequest();
+    if (!request || !canSaveUsage) {
+      usageError = $t("profiles.usage.saveRequired");
+      return;
+    }
+    usageBusy = "test";
+    usageError = null;
+    usageMessage = null;
+    try {
+      usageResult = await testUsageScript(request);
+      setProfileUsageResult(pendingUsageProfile!.id, usageResult);
+      usageMessage = $t("profiles.usage.testSuccess");
+    } catch (err) {
+      usageError = errorLabel(err instanceof Error ? err.message : String(err));
+    } finally {
+      usageBusy = null;
+    }
+  }
+
+  async function handleUsageQuery() {
+    if (!pendingUsageProfile) {
+      return;
+    }
+    if (!usageState?.config?.enabled) {
+      return;
+    }
+    usageBusy = "query";
+    usageError = null;
+    usageMessage = null;
+    const queryEntry = profileUsageEntries[pendingUsageProfile.id] ?? emptyProfileUsageEntry(pendingUsageProfile);
+    setProfileUsageEntry(pendingUsageProfile.id, {
+      ...queryEntry,
+      state: "querying",
+      configured: true,
+      error: null
+    });
+    try {
+      usageResult = await queryProfileUsage(pendingUsageProfile.id);
+      setProfileUsageResult(pendingUsageProfile.id, usageResult);
+      usageMessage = $t("profiles.usage.querySuccess");
+    } catch (err) {
+      usageError = errorLabel(err instanceof Error ? err.message : String(err));
+      const current = profileUsageEntries[pendingUsageProfile.id] ?? emptyProfileUsageEntry();
+      setProfileUsageEntry(pendingUsageProfile.id, {
+        ...current,
+        state: "idle",
+        error: usageError
+      });
+    } finally {
+      usageBusy = null;
+    }
+  }
+
+  function configureUsageAutoQuery(profileId: string, intervalMinutes: number) {
+    const normalizedInterval = Number(intervalMinutes) || 0;
+    const nextKey = profileId && normalizedInterval > 0 ? `${profileId}:${normalizedInterval}` : "";
+    if (usageAutoQueryKey === nextKey) {
+      return;
+    }
+    clearUsageAutoQueryTimer();
+    usageAutoQueryKey = nextKey;
+    if (!profileId || normalizedInterval <= 0) {
+      return;
+    }
+    usageAutoQueryTimer = window.setInterval(() => {
+      if (!pendingUsageProfile || pendingUsageProfile.id !== profileId || usageBusy !== null) {
+        return;
+      }
+      void handleUsageQuery();
+    }, Math.max(normalizedInterval, 1) * 60 * 1000);
+  }
+
+  function clearUsageAutoQueryTimer() {
+    if (usageAutoQueryTimer !== null) {
+      window.clearInterval(usageAutoQueryTimer);
+      usageAutoQueryTimer = null;
+    }
+    usageAutoQueryKey = "";
+  }
+
+  async function handleUsageDelete() {
+    if (!pendingUsageProfile) {
+      return;
+    }
+    usageBusy = "delete";
+    usageError = null;
+    usageMessage = null;
+    try {
+      const state = await deleteUsageScript(pendingUsageProfile.id);
+      usageState = state;
+      usageResult = null;
+      usageForm = usageFormFromState(pendingUsageProfile, state);
+      setProfileUsageEntry(pendingUsageProfile.id, {
+        result: null,
+        state: "idle",
+        configured: false,
+        error: null,
+        updatedAt: null
+      });
+      usageMessage = $t("profiles.usage.deleteSuccess");
+    } catch (err) {
+      usageError = errorLabel(err instanceof Error ? err.message : String(err));
+    } finally {
+      usageBusy = null;
+    }
   }
 
   function openEdit(profile: ProfileDraft) {
@@ -195,13 +680,14 @@
     editError = null;
     const nextForm = {
       name: profile.name,
+      icon: profile.icon ?? "",
+      remark: profile.remark ?? "",
       mode: profile.mode,
       provider: profile.provider,
       protocol: profile.protocol,
       model: profile.model,
       baseUrl: profile.baseUrl,
-      apiKey: "",
-      timeoutSeconds: profile.timeoutSeconds
+      apiKey: ""
     };
     editForm = {
       ...nextForm,
@@ -218,27 +704,11 @@
     editForm = emptyEditForm();
   }
 
-  function selectEditMode(mode: ProviderApplyMode) {
-    if (editingId !== null) {
-      return;
-    }
-
-    editError = null;
-    const nextForm = {
-      ...editForm,
-      mode
-    };
-    editForm = {
-      ...nextForm,
-      protocol: pendingEdit
-        ? coerceProtocolForToolMode(pendingEdit.app, mode, nextForm.protocol)
-        : nextForm.protocol
-    };
-  }
-
   async function handleEditSave() {
     if (!pendingEdit || !canSaveEdit) {
-      editError = editBaseUrlErrorKey ? $t(editBaseUrlErrorKey) : $t("profiles.editRequired");
+      editError = editIconTooLong
+        ? $t("profiles.iconTooLong")
+        : editBaseUrlErrorKey ? $t(editBaseUrlErrorKey) : $t("profiles.editRequired");
       return;
     }
 
@@ -249,13 +719,14 @@
       await updateProfileDraft({
         profileId: pendingEdit.id,
         name: editForm.name,
-        mode: editForm.mode,
+        icon: normalizedProfileIcon(editForm.icon),
+        remark: editForm.remark,
+        mode: pendingEdit.mode,
         provider: editForm.provider,
         protocol: editForm.protocol,
         model: editForm.model,
-        baseUrl: editForm.baseUrl,
-        apiKey: editForm.apiKey.trim().length > 0 ? editForm.apiKey : null,
-        timeoutSeconds: editTimeoutSeconds
+        baseUrl: normalizeBaseUrl(editForm.baseUrl),
+        apiKey: editForm.apiKey.trim().length > 0 ? editForm.apiKey : null
       });
       await onProfileSwitched();
       pendingEdit = null;
@@ -316,7 +787,7 @@
   }
 
   async function handleDuplicate(profile: ProfileDraft) {
-    if (profile.isBuiltin || duplicatingId !== null || applyingId !== null || editingId !== null) {
+    if (profile.isBuiltin || duplicatingId !== null || deletingId !== null || applyingId !== null || editingId !== null) {
       return;
     }
 
@@ -335,75 +806,46 @@
     }
   }
 
-  function openImportDialog() {
-    if (profileIoBusy !== null) {
+  function openDelete(profile: ProfileDraft) {
+    if (profile.isBuiltin || deletingId !== null || applyingId !== null || editingId !== null) {
       return;
     }
+    pendingDelete = profile;
     profileIoError = null;
     profileIoMessage = null;
-    importFileInput?.click();
   }
 
-  async function handleImportFile(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) {
+  function closeDelete() {
+    if (deletingId !== null) {
+      return;
+    }
+    pendingDelete = null;
+  }
+
+  async function handleDeleteConfirm() {
+    if (!pendingDelete || pendingDelete.isBuiltin || deletingId !== null) {
       return;
     }
 
-    profileIoBusy = "import";
+    deletingId = pendingDelete.id;
     profileIoError = null;
     profileIoMessage = null;
 
     try {
-      const content = await file.text();
-      const result = await importProfiles({ content });
+      const deletedName = pendingDelete.name;
+      await deleteProfileDraft({ profileId: pendingDelete.id });
       await onProfileSwitched();
-      profileIoMessage = `${$t("profiles.importSuccess", { count: result.imported.length })}${
-        result.skipped.length > 0 ? ` ${$t("profiles.importSkipped", { count: result.skipped.length })}` : ""
-      }`;
-      if (result.imported.length === 0 && result.skipped.length > 0) {
-        profileIoError = result.skipped.join("\n");
-      }
+      pendingDelete = null;
+      pendingApply = null;
+      pendingEdit = null;
+      applyPreview = null;
+      applyResult = null;
+      profileIoMessage = $t("profiles.deleteSuccess", { name: deletedName });
     } catch (err) {
-      profileIoError = err instanceof Error ? err.message : String(err);
+      profileIoError = errorLabel(err instanceof Error ? err.message : String(err));
     } finally {
-      profileIoBusy = null;
-      input.value = "";
+      deletingId = null;
     }
-  }
-
-  async function handleExportProfiles() {
-    if (!summary || customProfileCount === 0 || profileIoBusy !== null) {
-      profileIoError = $t("profiles.exportEmpty");
-      return;
-    }
-
-    profileIoBusy = "export";
-    profileIoError = null;
-    profileIoMessage = null;
-
-    try {
-      const result = await exportProfiles();
-      downloadJson(result.fileName, result.bundle);
-      profileIoMessage = $t("profiles.exportSuccess", { file: result.fileName });
-    } catch (err) {
-      profileIoError = err instanceof Error ? err.message : String(err);
-    } finally {
-      profileIoBusy = null;
-    }
-  }
-
-  function downloadJson(fileName: string, value: unknown) {
-    const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function closeApply() {
@@ -418,6 +860,30 @@
     pendingApplyMode = "gateway";
     syncClaudeVsCodePlugin = false;
     codexAuthConflictConfirmed = false;
+  }
+
+  function syncSelectedProfileTool(groups: ProfileGroup[]) {
+    if (groups.length === 0) {
+      if (selectedToolId !== null) {
+        selectedToolId = null;
+      }
+      return;
+    }
+    if (!selectedToolId || !groups.some((group) => group.id === selectedToolId)) {
+      selectedToolId = groups[0].id;
+    }
+  }
+
+  function selectProfileTool(toolId: string) {
+    selectedToolId = toolId;
+  }
+
+  function createProfileForCurrentTool() {
+    onCreateProfile({
+      mode: normalizedModeFilter,
+      toolId: selectedProfileGroup?.id ?? undefined,
+      toolName: selectedProfileGroup?.label ?? undefined
+    });
   }
 
   function actionKey(profileId: string, mode: ProviderApplyMode, restartAfterApply = false, syncClaudeVsCode = false) {
@@ -440,39 +906,12 @@
     return providerId.trim() === "official";
   }
 
-  function profileProviderLabel(profile: ProfileDraft) {
-    return providerIsOfficial(profile.provider) ? $t("profiles.builtinOfficial") : profile.provider;
+  function editableOfficialProfileAllowed(profile: ProfileDraft | null, mode: ProviderApplyMode) {
+    return Boolean(profile && canonicalProfileToolId(profile.app) === "codex" && mode === "config");
   }
 
-  function profileCredentialLabel(profile: ProfileDraft) {
-    if (providerIsOfficial(profile.provider)) {
-      if (canonicalProfileToolId(profile.app) === "codex" && summary?.codexAuth) {
-        return summary.codexAuth.available
-          ? $t("profiles.credentialCodexOAuthDetected")
-          : $t("profiles.credentialCodexOAuthMissing");
-      }
-      return $t("profiles.credentialOfficial");
-    }
-    return profile.authRef ? $t("profiles.credentialLinked") : $t("profiles.credentialMissing");
-  }
-
-  function codexOfficialAuthDetail(profile: ProfileDraft) {
-    if (!providerIsOfficial(profile.provider) || canonicalProfileToolId(profile.app) !== "codex") {
-      return null;
-    }
-    const status = summary?.codexAuth;
-    if (!status) {
-      return $t("profiles.codexOAuthUnknown");
-    }
-    if (status.storage === "keyring" || status.storage === "auto") {
-      return $t("profiles.codexOAuthKeyring");
-    }
-    if (status.available) {
-      return status.path
-        ? $t("profiles.codexOAuthDetectedAt", { path: status.path })
-        : $t("profiles.codexOAuthDetected");
-    }
-    return $t("profiles.codexOAuthMissing");
+  function loginTypeLabel(profile: ProfileDraft) {
+    return providerIsOfficial(profile.provider) ? $t("profiles.login.official") : $t("profiles.login.api");
   }
 
   function profileEndpointLabel(profile: ProfileDraft) {
@@ -482,10 +921,223 @@
     return profile.baseUrl;
   }
 
-  function protocolLabel(value: string) {
-    const normalized = normalizeProtocol(value);
-    const option = protocolOptions.find((item) => item.id === normalized);
-    return option ? $t(option.labelKey) : value;
+  function profileUrlLabel(profile: ProfileDraft) {
+    return profileEndpointLabel(profile) || $t("common.none");
+  }
+
+  function profileRemarkLabel(profile: ProfileDraft) {
+    return profile.remark?.trim() ?? "";
+  }
+
+  function profileDisplayName(profile: ProfileDraft) {
+    const canonicalApp = canonicalProfileToolId(profile.app);
+    if (profileUsesToolIcon(profile)) {
+      const nameKey = officialProfileNameKeys[canonicalApp];
+      if (nameKey) {
+        return $t(nameKey);
+      }
+    }
+    const toolName = toolLabels[canonicalApp];
+    if (!toolName) {
+      return profile.name;
+    }
+    return profile.name
+      .replace(new RegExp(`^${escapeRegExp(toolName)}\\s*[-:/]?\\s*`, "i"), "")
+      .trim() || profile.name;
+  }
+
+  function profileIconValue(profile: ProfileDraft) {
+    const icon = profile.icon?.trim();
+    if (icon) {
+      return icon;
+    }
+    return profileDisplayName(profile).trim().charAt(0).toUpperCase() || "?";
+  }
+
+  function profileUsesToolIcon(profile: ProfileDraft) {
+    return profile.isBuiltin && providerIsOfficial(profile.provider);
+  }
+
+  function profileIconIsImage(value: string) {
+    return value.startsWith("data:image/");
+  }
+
+  function normalizedProfileIcon(value: string) {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  function profileIconTextTooLong(value: string) {
+    const trimmed = value.trim();
+    return trimmed.length > 0 && !profileIconIsImage(trimmed) && [...trimmed].length > 4;
+  }
+
+  function triggerProfileIconImport() {
+    profileIconInput?.click();
+  }
+
+  async function handleProfileIconImport(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0] ?? null;
+    input.value = "";
+    if (!file) {
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      editError = $t("profiles.iconImageOnly");
+      return;
+    }
+    if (file.size > 512 * 1024) {
+      editError = $t("profiles.iconImageTooLarge");
+      return;
+    }
+    try {
+      editForm = {
+        ...editForm,
+        icon: await readFileAsDataUrl(file)
+      };
+      editError = null;
+    } catch (err) {
+      editError = errorLabel(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(new Error($t("profiles.iconImportFailed")));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function escapeRegExp(value: string) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function profileCanSort() {
+    return !profileDragDisabled();
+  }
+
+  function profileDragDisabled() {
+    return resolveProfileDragDisabled({
+      deletingId,
+      applyingId,
+      editingId,
+      sortableSaving
+    });
+  }
+
+  function profileIsDndShadow(profile: ProfileDraft) {
+    return Boolean((profile as ProfileDraft & Record<string, unknown>)[SHADOW_ITEM_MARKER_PROPERTY_NAME]);
+  }
+
+  function profileSortableKey(profile: ProfileDraft) {
+    return `${profile.id}:${profileIsDndShadow(profile) ? "shadow" : "item"}`;
+  }
+
+  function syncSortableProfiles(group: ProfileGroup | null, mode: ProviderApplyMode) {
+    const nextProfiles = group?.profiles ?? [];
+    const nextKey = `${mode}:${group?.id ?? ""}:${profileIdsFromItems(nextProfiles).join("|")}`;
+    if (nextKey === sortableListKey) {
+      return;
+    }
+    sortableListKey = nextKey;
+    sortableProfiles = nextProfiles;
+    sortableSourceProfiles = nextProfiles;
+    sortableActiveId = null;
+  }
+
+  function handleProfileDndConsider(event: CustomEvent<DndEvent<ProfileDraft>>) {
+    const currentProfiles = sortableProfiles;
+    const nextProfiles = event.detail.items;
+    if (event.detail.info.trigger === TRIGGERS.DRAG_STARTED) {
+      sortableSourceProfiles = currentProfiles.filter((profile) => profile.id !== SHADOW_PLACEHOLDER_ITEM_ID);
+      sortableActiveId = String(event.detail.info.id);
+    } else if (event.detail.info.trigger === TRIGGERS.DRAGGED_ENTERED || event.detail.info.trigger === TRIGGERS.DRAGGED_OVER_INDEX) {
+      sortableActiveId = String(event.detail.info.id);
+    }
+    sortableProfiles = nextProfiles;
+  }
+
+  async function handleProfileDndFinalize(event: CustomEvent<DndEvent<ProfileDraft>>) {
+    const nextProfiles = event.detail.items.filter((profile) => profile.id !== SHADOW_PLACEHOLDER_ITEM_ID);
+    sortableProfiles = nextProfiles;
+    if (event.detail.info.trigger === TRIGGERS.DRAG_STOPPED) {
+      sortableActiveId = null;
+    }
+    const nextIds = nextSortableProfileIds(sortableSourceProfiles, nextProfiles);
+    if (!nextIds || !selectedProfileGroup) {
+      sortableSourceProfiles = nextProfiles;
+      sortableActiveId = null;
+      return;
+    }
+    sortableSaving = true;
+    try {
+      profileIoError = null;
+      profileIoMessage = null;
+      const nextSummary = await reorderProfileDrafts({
+        app: selectedProfileGroup.id,
+        mode: normalizedModeFilter,
+        profileIds: nextIds
+      });
+      summary = nextSummary;
+      void (async () => {
+        try {
+          await onProfileSwitched();
+        } catch (err) {
+          profileIoError = errorLabel(err instanceof Error ? err.message : String(err));
+        }
+      })();
+    } catch (err) {
+      sortableProfiles = sortableSourceProfiles;
+      profileIoError = errorLabel(err instanceof Error ? err.message : String(err));
+    } finally {
+      sortableSaving = false;
+      sortableActiveId = null;
+      sortableSourceProfiles = sortableProfiles;
+    }
+  }
+
+  function styleDraggedProfileElement(element?: HTMLElement) {
+    if (!element) {
+      return;
+    }
+    element.classList.add("sortable-active-row");
+    element
+      .querySelector(".compact-profile-card")
+      ?.classList.add("sortable-active-card");
+  }
+
+  function profileSupportsUsageQuery(profile: ProfileDraft) {
+    return profileUsesCodexOfficialOAuth(profile) || (!providerIsOfficial(profile.provider) && Boolean(profile.baseUrl.trim() || profile.authRef));
+  }
+
+  function profileCanOpenUsage(profile: ProfileDraft) {
+    return profileSupportsUsageQuery(profile);
+  }
+
+  function profileUsesCodexOfficialOAuth(profile: ProfileDraft) {
+    return canonicalProfileToolId(profile.app) === "codex" && providerIsOfficial(profile.provider);
+  }
+
+  function formatUsageValue(value: number | null | undefined, unit: string | null | undefined) {
+    if (typeof value !== "number" || Number.isNaN(value)) {
+      return $t("common.none");
+    }
+    const formatted = Math.abs(value) >= 1000 ? value.toLocaleString() : value.toFixed(2).replace(/\.00$/, "");
+    return unit ? `${formatted} ${unit}` : formatted;
+  }
+
+  function usageItemTitle(item: UsageData, index: number) {
+    return item.planName || $t("profiles.usage.resultPlanFallback", { index: index + 1 });
+  }
+
+  function usageQueriedAt(result: UsageQueryResult | null) {
+    if (!result?.queriedAt) {
+      return $t("profiles.usage.neverQueried");
+    }
+    return new Date(result.queriedAt).toLocaleString();
   }
 
   function normalizeProtocol(value: string) {
@@ -508,45 +1160,6 @@
     return action.replaceAll("_", " ");
   }
 
-  function applyPreviewLabel(item: PreviewProfileApplyResult["items"][number]) {
-    if (item.label === "Active tool profile pointer") {
-      return $t("profiles.preview.activeProfilePointer");
-    }
-    if (item.label === "Managed tool binding") {
-      return $t("profiles.preview.managedBinding");
-    }
-    if (item.label === "Credential") {
-      return $t("profiles.preview.credential");
-    }
-    const nativeConfigMatch = item.label.match(/^(.*) native config$/);
-    if (nativeConfigMatch) {
-      return $t("profiles.preview.nativeConfig", { name: nativeConfigMatch[1] });
-    }
-    return item.label;
-  }
-
-  function applyPreviewDetail(item: PreviewProfileApplyResult["items"][number]) {
-    if (item.label === "Active tool profile pointer") {
-      return $t("profiles.preview.activeProfilePointerDetail", {
-        app: applyPreview?.app ?? pendingApply?.app ?? "",
-        id: applyPreview?.profileId ?? pendingApply?.id ?? ""
-      });
-    }
-    if (item.label === "Managed tool binding") {
-      return $t("profiles.preview.managedBindingDetail", {
-        app: applyPreview?.app ?? pendingApply?.app ?? "",
-        provider: applyPreview?.provider ?? pendingApply?.provider ?? ""
-      });
-    }
-    if (item.label === "Credential") {
-      return $t("profiles.preview.credentialDetail");
-    }
-    if (item.label.endsWith(" native config")) {
-      return previewTextLabel(item.detail);
-    }
-    return previewTextLabel(item.detail);
-  }
-
   function nativeDiffActionLabel(action: string) {
     if (action === "add") {
       return $t("common.add");
@@ -566,25 +1179,35 @@
   function previewTextLabel(message: string) {
     const exact: Partial<Record<string, TranslationKey>> = {
       "Config file mode needs a stored Provider API key for this Provider.": "profiles.warning.configNeedsStoredKey",
+      "Config profiles need a stored Provider API key for this Provider.": "profiles.warning.configNeedsStoredKey",
       "Selected mode writes this client config; detailed file changes are shown below.": "profiles.preview.nativeWriteDetail",
+      "Selected profile type writes this client config; detailed file changes are shown below.": "profiles.preview.nativeWriteDetail",
       "This profile does not require a native client config write.": "profiles.preview.nativeReservedDetail",
       "Official provider uses the client login directly and does not run through the local gateway.": "profiles.warning.officialGatewayUnsupported",
       "Official provider uses the target client's own login.": "profiles.warning.officialClientLogin",
       "No Provider API key or model override is required.": "profiles.warning.noProviderKeyOrModel",
       "Changing Codex config usually requires restarting Codex or opening a new Codex session.": "profiles.warning.codexReloadRequired",
       "Direct config file mode writes Provider connection details into the client config.": "profiles.warning.directConfigWrites",
+      "Config profiles write Provider connection details into the client config.": "profiles.warning.directConfigWrites",
       "Frequent Provider switching may require the client to reload its own config.": "profiles.warning.frequentSwitchReload",
       "Real upstream Provider API keys stay in the system keychain and are used by the local gateway.": "profiles.warning.upstreamKeysInKeychain",
       "The client still needs to reload config after the first gateway bootstrap.": "profiles.warning.reloadAfterFirstGateway",
       "Applying a Gateway profile does not start the Gateway automatically; use the sidebar Gateway controls when you want it running.": "profiles.warning.gatewayManualStart",
       "Gateway mode writes Claude Code settings to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesClaude",
+      "Gateway profiles write Claude Code settings to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesClaude",
       "Gateway mode writes Gemini CLI environment values to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesGemini",
+      "Gateway profiles write Gemini CLI environment values to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesGemini",
       "Gateway mode writes OpenCode's provider entry to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesOpenCode",
+      "Gateway profiles write OpenCode's provider entry to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesOpenCode",
       "Gateway mode writes OpenClaw's provider entry to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesOpenClaw",
+      "Gateway profiles write OpenClaw's provider entry to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesOpenClaw",
       "Gateway mode writes Hermes custom provider settings to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesHermes",
+      "Gateway profiles write Hermes custom provider settings to the tool-scoped local gateway URL.": "profiles.warning.gatewayWritesHermes",
       "Config file mode writes Codex's provider entry directly to the selected upstream Provider.": "profiles.warning.configWritesCodexProvider",
+      "Config profiles write Codex's provider entry directly to the selected upstream Provider.": "profiles.warning.configWritesCodexProvider",
       "The preview masks the Provider API key. The actual key is loaded from the system keychain during apply.": "profiles.warning.previewMasksProviderKey",
       "Gateway mode is a one-time relay injection target, not a direct Provider switch.": "profiles.warning.gatewayRelayTarget",
+      "Gateway profiles are a one-time relay injection target, not a direct Provider switch.": "profiles.warning.gatewayRelayTarget",
       "Switching profiles later changes only the Gateway active profile for this tool.": "profiles.warning.gatewaySwitchOnly",
       "The preview masks the local CodeStudio token. Real Provider API keys are never written to Codex config.": "profiles.warning.gatewayMasksLocalToken",
       "Codex official login is still required for the desktop app; the Local Gateway only takes over model requests.": "profiles.warning.codexLoginStillRequired",
@@ -592,6 +1215,7 @@
       "Codex config does not exist yet; adapter would create it after confirmation.": "profiles.warning.codexConfigMissing",
       "Hermes config does not exist yet; adapter would create it after confirmation.": "profiles.warning.hermesConfigMissing",
       "Config file mode writes Claude Code user settings under the env section.": "profiles.warning.claudeSettingsEnv",
+      "Config profiles write Claude Code user settings under the env section.": "profiles.warning.claudeSettingsEnv",
       "The selected endpoint must be Anthropic/Claude-compatible; generic OpenAI-only endpoints need a translator.": "profiles.warning.claudeAnthropicEndpoint",
       "Restart Claude Code or open a new session after applying so settings reload.": "profiles.warning.claudeReload",
       "Gemini Code Assist stores its API key in VS Code user settings.": "profiles.warning.geminiCodeAssistApiKeySetting",
@@ -606,6 +1230,7 @@
       "Existing JSON5 comments are not preserved when CodeStudio Lite writes the file.": "profiles.warning.json5CommentsLost",
       "Existing YAML comments are not preserved when CodeStudio Lite writes the file.": "profiles.warning.yamlCommentsLost",
       "Hermes config file mode currently targets OpenAI Chat Completions endpoints.": "profiles.warning.hermesChatOnly",
+      "Hermes config profiles currently target OpenAI Chat Completions endpoints.": "profiles.warning.hermesChatOnly",
       "Selects Codex's official OpenAI provider.": "profiles.diff.selectOfficialProvider",
       "Keeps a readable label for the official provider.": "profiles.diff.officialProviderLabel",
       "Uses Codex's supported official provider wire API.": "profiles.diff.officialWireApi",
@@ -681,7 +1306,7 @@
       return $t(exactKey);
     }
 
-    const adapterMatch = message.match(/Config file mode adapter is not implemented for '([^']+)'\./);
+    const adapterMatch = message.match(/(?:Config file mode|Config profile) adapter is not implemented for '([^']+)'\./);
     if (adapterMatch) {
       return $t("profiles.warning.configAdapterMissing", { app: adapterMatch[1] });
     }
@@ -735,20 +1360,21 @@
     if (message === "Unsupported Provider API protocol.") {
       return $t("wizard.error.protocolUnsupported");
     }
-    const configProtocolMatch = message.match(/Config file mode does not support (.+) for '([^']+)'\./);
+    const configProtocolMatch = message.match(/Config (?:file mode does|profiles do) not support (.+) for '([^']+)'\./);
     if (configProtocolMatch) {
       return $t("wizard.error.configProtocolUnsupported", {
         protocol: configProtocolMatch[1],
         tool: toolLabels[canonicalProfileToolId(configProtocolMatch[2])] ?? configProtocolMatch[2]
       });
     }
-    if (message === "Timeout must be between 5 and 600 seconds.") {
-      return $t("wizard.error.timeoutRange");
-    }
     if (message === "Provider API key is required for non-official providers.") {
       return $t("wizard.check.credentialMissing");
     }
-    if (message === "Official provider uses the client login directly and cannot use Gateway mode.") {
+    if (
+      message === "Official provider uses the client login directly and cannot use Gateway mode." ||
+      message === "Official provider uses the client login directly and cannot use Gateway profile." ||
+      message === "Official provider uses the client login directly and cannot use Gateway profiles."
+    ) {
       return $t("profiles.officialGatewayBlocked");
     }
     if (message === "Built-in official profiles cannot be modified.") {
@@ -757,19 +1383,19 @@
     if (message === "Built-in official profiles cannot be duplicated.") {
       return $t("profiles.builtinDuplicateBlocked");
     }
-    if (message === "Built-in official profiles cannot be imported.") {
-      return $t("profiles.officialCustomImportBlocked");
+    if (message === "Built-in official profiles cannot be deleted.") {
+      return $t("profiles.builtinDeleteBlocked");
     }
     if (message === "Official profiles are built in and cannot be saved as custom profiles.") {
       return $t("profiles.officialCustomSaveBlocked");
     }
-    if (message === "Official profiles are built in and cannot be imported.") {
-      return $t("profiles.officialCustomImportBlocked");
-    }
     if (message === "Official provider uses the client login directly and does not run through the local gateway.") {
       return $t("profiles.warning.officialGatewayUnsupported");
     }
-    if (message === "Profile is already active for this tool and mode.") {
+    if (
+      message === "Profile is already active for this tool and mode." ||
+      message === "Profile is already active for this tool and profile category."
+    ) {
       return $t("profiles.alreadyActiveBlocked");
     }
     const toolNotInstalledMatch = message.match(/Tool '([^']+)' is not installed, so a profile cannot be created for it\./);
@@ -778,7 +1404,10 @@
         tool: toolLabels[canonicalProfileToolId(toolNotInstalledMatch[1])] ?? toolNotInstalledMatch[1]
       });
     }
-    if (message === "Apply and restart is only available for Config file mode.") {
+    if (
+      message === "Apply and restart is only available for Config file mode." ||
+      message === "Apply and restart is only available for Config profiles."
+    ) {
       return $t("profiles.restartConfigOnly");
     }
     if (message === "Apply and restart requires a native client config write for this profile.") {
@@ -788,7 +1417,7 @@
     if (applyToolMatch) {
       return $t("profiles.warning.toolCannotApply", { app: applyToolMatch[1] });
     }
-    const unsupportedModeMatch = message.match(/(.+) mode is not supported for this profile\./);
+    const unsupportedModeMatch = message.match(/(.+)(?: mode)? is not supported for this profile\./);
     if (unsupportedModeMatch) {
       return $t("profiles.warning.modeUnsupported", { mode: unsupportedModeMatch[1] });
     }
@@ -797,28 +1426,17 @@
 
   function buildProfileModeSections(
     profileSummary: ProfileSummary | null,
-    installedToolIds: Set<string> | null
+    installedToolIds: Set<string> | null,
+    mode: ProviderApplyMode
   ): ProfileModeSection[] {
     const drafts = profileSummary?.drafts ?? [];
     const activeByMode = profileSummary?.activeProfilesByMode ?? { config: {}, gateway: {} };
     return [
       {
-        mode: "config",
-        titleKey: "profiles.mode.configSectionTitle",
-        descriptionKey: "profiles.mode.configSectionDescription",
+        mode,
         groups: buildProfileGroups(
-          drafts.filter((profile) => profile.mode === "config" && profileVisibleInProfiles(profile)),
-          activeByMode.config,
-          installedToolIds
-        )
-      },
-      {
-        mode: "gateway",
-        titleKey: "profiles.mode.gatewaySectionTitle",
-        descriptionKey: "profiles.mode.gatewaySectionDescription",
-        groups: buildProfileGroups(
-          drafts.filter((profile) => profile.mode === "gateway" && profileVisibleInProfiles(profile)),
-          activeByMode.gateway,
+          drafts.filter((profile) => profile.mode === mode && profileVisibleInProfiles(profile)),
+          activeByMode[mode],
           installedToolIds
         )
       }
@@ -859,6 +1477,10 @@
         const sortedProfiles = [...appProfiles].sort((left, right) => {
           if (left.isBuiltin !== right.isBuiltin) {
             return left.isBuiltin ? -1 : 1;
+          }
+          const orderCompare = left.sortOrder - right.sortOrder;
+          if (orderCompare !== 0) {
+            return orderCompare;
           }
           return left.name.localeCompare(right.name);
         });
@@ -916,7 +1538,7 @@
   }
 
   function profileVisibleInProfiles(profile: ProfileDraft) {
-    return !(canonicalProfileToolId(profile.app) === "codex" && providerIsOfficial(profile.provider));
+    return true;
   }
 
   async function loadCodexAuthPreservationSetting() {
@@ -984,15 +1606,68 @@
     return activeProfileIdForApp(activeProfiles, app) === profile.id;
   }
 
-  function baseUrlValidationErrorKey(value: string): TranslationKey | null {
+  function normalizeBaseUrl(value: string) {
     const trimmed = value.trim();
-    if (!trimmed) {
+    if (/^https?:/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    return `https://${trimmed}`;
+  }
+
+  function shouldAutoPrefixBaseUrlInput(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
+      return false;
+    }
+    if (/^[a-z][a-z\d+\-.]*:\/?$/i.test(trimmed)) {
+      return false;
+    }
+    return trimmed.includes(".") || trimmed.includes(":") || trimmed.toLowerCase() === "localhost";
+  }
+
+  function handleEditBaseUrlInput(event: Event) {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    editForm = {
+      ...editForm,
+      baseUrl: shouldAutoPrefixBaseUrlInput(value) ? normalizeBaseUrl(value) : value
+    };
+  }
+
+  function handleUsageBaseUrlInput(event: Event) {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    usageForm = {
+      ...usageForm,
+      baseUrl: shouldAutoPrefixBaseUrlInput(value) ? normalizeBaseUrl(value) : value
+    };
+  }
+
+  function normalizeEditBaseUrlInput() {
+    editForm = {
+      ...editForm,
+      baseUrl: normalizeBaseUrl(editForm.baseUrl)
+    };
+  }
+
+  function normalizeUsageBaseUrlInput() {
+    usageForm = {
+      ...usageForm,
+      baseUrl: normalizeBaseUrl(usageForm.baseUrl)
+    };
+  }
+
+  function baseUrlValidationErrorKey(value: string): TranslationKey | null {
+    const input = value.trim();
+    const trimmed = normalizeBaseUrl(input);
+    if (!input) {
       return "wizard.error.baseUrlRequired";
     }
-    if (/\s/.test(trimmed)) {
+    if (/\s/.test(input)) {
       return "wizard.error.baseUrlWhitespace";
     }
-    if (!/^https?:\/\//.test(trimmed)) {
+    if (!/^https?:\/\//i.test(trimmed)) {
       return "wizard.error.baseUrlScheme";
     }
     try {
@@ -1010,153 +1685,200 @@
   }
 </script>
 
-<div class="route-stack">
-  <section class="top-strip">
-    <div>
-      <span class="eyebrow">{$t("profiles.eyebrow")}</span>
-      <h1>{$t("profiles.title")}</h1>
-      <p>{summary ? $t("profiles.pathNote", { path: summary.profilesDir }) : $t("profiles.loading")}</p>
-    </div>
-    <div class="top-actions">
-      <input
-        bind:this={importFileInput}
-        type="file"
-        accept="application/json,.json"
-        hidden
-        on:change={handleImportFile}
-      />
-      <button
-        class="secondary-button"
-        title={$t("profiles.importProfile")}
-        disabled={profileIoBusy !== null}
-        on:click={openImportDialog}
-      >
-        {#if profileIoBusy === "import"}
-          <AppIcon name="loading" class="spin" size={16} />
-          {$t("profiles.importing")}
-        {:else}
-          <AppIcon name="upload" size={16} />
-          {$t("common.import")}
-        {/if}
-      </button>
-      <button
-        class="primary-button"
-        title={$t("profiles.exportProfile")}
-        disabled={profileIoBusy !== null || !summary || customProfileCount === 0}
-        on:click={handleExportProfiles}
-      >
-        {#if profileIoBusy === "export"}
-          <AppIcon name="loading" class="spin" size={16} />
-          {$t("profiles.exporting")}
-        {:else}
-          <AppIcon name="download" size={16} />
-          {$t("common.export")}
-        {/if}
-      </button>
-    </div>
-  </section>
+<div class={embedded ? "embedded-profile-stack" : "route-stack"}>
+  {#if !embedded}
+    <section class="top-strip compact-top-strip">
+      <div>
+        <span class="eyebrow">{$t("profiles.eyebrow")}</span>
+        <h1>{$t(routeTitleKey)}</h1>
+      </div>
+      <div class="top-actions">
+        <button
+          class="secondary-button"
+          title={$t("common.createConfig")}
+          on:click={createProfileForCurrentTool}
+        >
+          <AppIcon name="add" size={16} />
+          {$t("common.createConfig")}
+        </button>
+      </div>
+    </section>
+  {/if}
 
   {#if profileIoError}
-    <div class="error-banner">{profileIoError}</div>
+    <DismissibleNotice tone="error" message={profileIoError} on:dismiss={() => (profileIoError = null)} />
   {/if}
   {#if profileIoMessage}
-    <div class="inline-success">{profileIoMessage}</div>
+    <DismissibleNotice tone="success" message={profileIoMessage} on:dismiss={() => (profileIoMessage = null)} />
   {/if}
 
   {#if summary}
+    {#if embedded}
+      <div class="section-actions embedded-profile-actions">
+        <button class="secondary-button" title={$t("common.createConfig")} on:click={createProfileForCurrentTool}>
+          <AppIcon name="add" size={16} />
+          {$t("common.createConfig")}
+        </button>
+      </div>
+    {/if}
     <div class="profile-mode-layout">
-      {#each profileModeSections as section}
-        <section class="panel-band profile-mode-section">
-          <div class="section-heading">
-            <div>
-              <h2>{$t(section.titleKey)}</h2>
-              <p>{$t(section.descriptionKey)}</p>
-            </div>
+      {#if profileToolGroups.length > 0}
+        <section class="panel-band profile-tool-switcher" aria-label={$t("profiles.toolSwitcherLabel")}>
+          <div class="profile-tool-tabs" role="tablist">
+            {#each profileToolGroups as group}
+              {@const activeGroupProfile = group.profiles.find((profile) => profile.id === group.activeProfileId) ?? null}
+              <button
+                type="button"
+                class:selected={selectedToolId === group.id}
+                role="tab"
+                aria-selected={selectedToolId === group.id}
+                title={group.label}
+                on:click={() => selectProfileTool(group.id)}
+              >
+                <ToolIcon toolId={group.id} label={group.label} variant="choice" />
+                <span>
+                  <strong>{group.label}</strong>
+                  <small>{activeGroupProfile ? loginTypeLabel(activeGroupProfile) : $t("profiles.noActiveProfile")}</small>
+                </span>
+              </button>
+            {/each}
           </div>
+        </section>
 
-          {#each section.groups as group}
-            <div class="profile-tool-section">
-              <div class="section-heading compact">
-                <div class="tool-section-title">
-                  <ToolIcon toolId={group.id} label={group.label} variant="heading" />
-                  <div>
-                    <h2>{group.label}</h2>
-                    <p>{group.activeProfileName ?? $t("profiles.noActiveForToolInMode")}</p>
-                  </div>
-                </div>
-                <StatusPill
-                  status={group.activeProfileName ? "ok" : "info"}
-                  label={group.activeProfileName ? $t("profiles.oneActivePerTool") : $t("profiles.noActiveProfile")}
-                />
-              </div>
-
-              <div class="profile-grid">
-                {#each group.profiles as profile}
-                  {@const isActive = group.activeProfileId === profile.id}
-                  {@const cardActionKey = actionKey(profile.id, profile.mode)}
-                  <article class:active-profile={isActive} class:builtin-profile={profile.isBuiltin} class="profile-card">
-                    <div>
-                      <span class="eyebrow">{protocolLabel(profile.protocol)} / {profileProviderLabel(profile)}</span>
-                      <h2>{profile.name}</h2>
-                      <p>{profile.model || $t("common.none")}</p>
-                      <p>{profileEndpointLabel(profile)}</p>
-                      <p>
-                        {profileCredentialLabel(profile)} /
-                        {$t("profiles.timeoutSeconds", { seconds: profile.timeoutSeconds })}
-                      </p>
-                      {#if profile.isBuiltin}
-                        <p class="protected-profile-note">{$t("profiles.builtinProtected")}</p>
-                      {/if}
-                      {#if codexOfficialAuthDetail(profile)}
-                        <p class="protected-profile-note">{codexOfficialAuthDetail(profile)}</p>
+        {#if selectedProfileGroup}
+          <section class="panel-band profile-tool-section">
+            <div
+              class="profile-grid"
+              role="list"
+              use:dragHandleZone={{
+                items: displayedProfiles,
+                flipDurationMs: profileFlipDurationMs,
+                dragDisabled: profileDragDisabled(),
+                dropFromOthersDisabled: true,
+                dropTargetStyle: profileDropTargetStyle,
+                transformDraggedElement: styleDraggedProfileElement,
+                zoneTabIndex: -1,
+                zoneItemTabIndex: -1
+              }}
+              on:consider={handleProfileDndConsider}
+              on:finalize={handleProfileDndFinalize}
+            >
+              {#each displayedProfiles as profile (profileSortableKey(profile))}
+                {@const isActive = selectedProfileGroup.activeProfileId === profile.id}
+                {@const cardActionKey = actionKey(profile.id, profile.mode)}
+                {@const profileIcon = profileIconValue(profile)}
+                <div
+                  class:sortable-active-row={sortableActiveId === profile.id}
+                  class="profile-sortable-row"
+                  role="listitem"
+                  data-profile-sortable-id={profile.id}
+                  data-is-dnd-shadow-item-hint={profileIsDndShadow(profile)}
+                  animate:flip={{ duration: profileFlipDurationMs }}
+                >
+                <article
+                  class:active-profile={isActive}
+                  class:builtin-profile={profile.isBuiltin}
+                  class:sortable-active-card={sortableActiveId === profile.id}
+                  class="profile-card compact-profile-card"
+                >
+                  <div class="profile-card-main">
+                    <span
+                      class="profile-drag-handle"
+                      aria-label={$t("profiles.dragHandle")}
+                      aria-disabled={!profileCanSort()}
+                      data-profile-drag-handle={profile.id}
+                      use:dragHandle
+                    >
+                      <AppIcon name="drag" size={16} />
+                    </span>
+                    <div class="profile-avatar" aria-hidden="true">
+                      {#if profileUsesToolIcon(profile)}
+                        <ToolIcon toolId={profile.app} label={profileDisplayName(profile)} variant="choice" />
+                      {:else if profileIconIsImage(profileIcon)}
+                        <img src={profileIcon} alt="" />
+                      {:else}
+                        <span>{profileIcon}</span>
                       {/if}
                     </div>
-                    <div>
+                    <div class="profile-identity">
+                      <h2>{profileDisplayName(profile)}</h2>
+                      <p>{profileUrlLabel(profile)}</p>
+                      {#if profileRemarkLabel(profile)}
+                        <p class="profile-remark">{profileRemarkLabel(profile)}</p>
+                      {/if}
+                    </div>
+                  </div>
+                  {#if profile.isBuiltin}
+                    <div class="profile-card-status">
                       <StatusPill
-                        status={isActive ? "ok" : "info"}
-                        label={isActive ? $t("common.active") : profile.isBuiltin ? $t("profiles.builtinOfficial") : $t("common.ready")}
+                        status="info"
+                        label={$t("profiles.builtinOfficial")}
                       />
                     </div>
-                    <div class="card-actions">
+                  {/if}
+                  <div class="card-actions">
+                    <button
+                      class="primary-button"
+                      disabled={isActive || applyingId !== null}
+                      title={isActive ? $t("profiles.alreadyActiveProfile") : $t("profiles.previewModeApply", { name: profile.name, mode: applyModeLabel(profile.mode) })}
+                      on:click={() => openApply(profile)}
+                    >
+                      <AppIcon name="apply" size={16} />
+                      {#if isActive}
+                        {$t("common.active")}
+                      {:else}
+                        {applyingId === cardActionKey && pendingApply?.id === profile.id ? $t("common.loading") : $t("common.apply")}
+                      {/if}
+                    </button>
+                    {#if profileCanOpenUsage(profile)}
                       <button
-                        class="primary-button"
-                        disabled={isActive || applyingId !== null}
-                        title={isActive ? $t("profiles.alreadyActiveProfile") : $t("profiles.previewModeApply", { name: profile.name, mode: applyModeLabel(profile.mode) })}
-                        on:click={() => openApply(profile)}
+                        class="icon-button"
+                        title={$t("profiles.usage.open")}
+                        disabled={usageBusy !== null || applyingId !== null || editingId !== null}
+                        on:click={() => openUsage(profile)}
                       >
-                        <AppIcon name="apply" size={16} />
-                        {#if isActive}
-                          {$t("common.active")}
+                        <AppIcon name="stats" size={16} />
+                      </button>
+                    {/if}
+                    {#if !profile.isBuiltin}
+                      <button class="icon-button" title={$t("profiles.editProfile")} disabled={duplicatingId !== null || deletingId !== null} on:click={() => openEdit(profile)}><AppIcon name="edit" size={16} /></button>
+                      <button
+                        class="icon-button"
+                        title={$t("profiles.duplicateProfile")}
+                        disabled={duplicatingId !== null || deletingId !== null || applyingId !== null || editingId !== null}
+                        on:click={() => handleDuplicate(profile)}
+                      >
+                        {#if duplicatingId === profile.id}
+                          <AppIcon name="loading" class="spin" size={16} />
                         {:else}
-                          {applyingId === cardActionKey && pendingApply?.id === profile.id ? $t("common.loading") : $t("common.apply")}
+                          <AppIcon name="copy" size={16} />
                         {/if}
                       </button>
-                      {#if !profile.isBuiltin}
-                        <button class="icon-button" title={$t("profiles.editProfile")} disabled={duplicatingId !== null} on:click={() => openEdit(profile)}><AppIcon name="edit" size={16} /></button>
-                        <button
-                          class="icon-button"
-                          title={$t("profiles.duplicateProfile")}
-                          disabled={duplicatingId !== null || applyingId !== null || editingId !== null}
-                          on:click={() => handleDuplicate(profile)}
-                        >
-                          {#if duplicatingId === profile.id}
-                            <AppIcon name="loading" class="spin" size={16} />
-                          {:else}
-                            <AppIcon name="copy" size={16} />
-                          {/if}
-                        </button>
-                        <button class="icon-button danger" title={$t("profiles.deleteProfile")}><AppIcon name="delete" size={16} /></button>
-                      {/if}
-                    </div>
-                  </article>
-                {/each}
-              </div>
+                      <button
+                        class="icon-button danger"
+                        title={$t("profiles.deleteProfile")}
+                        disabled={duplicatingId !== null || deletingId !== null || applyingId !== null || editingId !== null}
+                        on:click={() => openDelete(profile)}
+                      >
+                        {#if deletingId === profile.id}
+                          <AppIcon name="loading" class="spin" size={16} />
+                        {:else}
+                          <AppIcon name="delete" size={16} />
+                        {/if}
+                      </button>
+                    {/if}
+                  </div>
+                </article>
+                </div>
+              {/each}
             </div>
-          {:else}
-            <div class="empty-row">{$t(emptyProfilesMessageKey(summary, visibleProfileCount, installedProfileToolIds))}</div>
-          {/each}
+          </section>
+        {/if}
+      {:else}
+        <section class="panel-band">
+          <div class="empty-row">{$t(emptyProfilesMessageKey(summary, visibleProfileCount, installedProfileToolIds))}</div>
         </section>
-      {/each}
+      {/if}
     </div>
   {:else}
     <section class="panel-band">
@@ -1164,10 +1886,202 @@
     </section>
   {/if}
 
+  {#if pendingUsageProfile}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal-panel usage-modal" role="dialog" aria-modal="true" aria-labelledby="usage-title">
+        <div class="modal-body">
+          <div>
+          <span class="eyebrow">{$t("profiles.usage.eyebrow")}</span>
+          <h2 id="usage-title">{$t("profiles.usage.title", { name: pendingUsageProfile.name })}</h2>
+        </div>
+
+        {#if usageError}
+          <div class="inline-error">{usageError}</div>
+        {/if}
+        {#if usageMessage}
+          <div class="inline-success">{usageMessage}</div>
+        {/if}
+
+        {#if usageBusy === "load"}
+          <div class="empty-row">
+            <AppIcon name="loading" class="spin" size={18} />
+            {$t("common.loading")}
+          </div>
+        {:else}
+          <label class="native-write-toggle usage-toggle">
+            <input type="checkbox" bind:checked={usageForm.enabled} disabled={usageBusy !== null} />
+            <span>
+              <strong>{$t("profiles.usage.enabled")}</strong>
+              <small>{$t("profiles.usage.enabledDescription")}</small>
+            </span>
+          </label>
+
+          {#if pendingUsageIsCodexOfficialOAuth}
+            <div class="usage-official-panel">
+              <AppIcon name="stats" size={18} />
+              <div>
+                <strong>{$t("profiles.usage.officialOAuth")}</strong>
+                <span>{$t("profiles.usage.officialOAuthHint")}</span>
+              </div>
+            </div>
+          {:else}
+            <div class="usage-template-row">
+              {#each usageTemplateOptions as option}
+                <button
+                  type="button"
+                  class:selected={usageForm.templateType === option.id}
+                  disabled={usageBusy !== null}
+                  on:click={() => selectUsageTemplate(option.id)}
+                >
+                  {$t(option.labelKey)}
+                </button>
+              {/each}
+            </div>
+
+            <div class="form-grid edit-profile-form usage-form">
+              <label>
+                {$t("wizard.providerBaseUrl")}
+                <input
+                  value={usageForm.baseUrl}
+                  disabled={usageBusy !== null}
+                  placeholder={pendingUsageProfile.baseUrl}
+                  on:input={handleUsageBaseUrlInput}
+                  on:blur={normalizeUsageBaseUrlInput}
+                />
+              </label>
+              <label>
+                {$t("wizard.providerApiKey")}
+                <input
+                  type="password"
+                  bind:value={usageForm.apiKey}
+                  disabled={usageBusy !== null}
+                  placeholder={$t(pendingUsageProfile.authRef ? "profiles.usage.keepProfileKey" : "profiles.usage.keyOptional")}
+                />
+              </label>
+              <label>
+                {$t("profiles.usage.accessToken")}
+                <input type="password" bind:value={usageForm.accessToken} disabled={usageBusy !== null} placeholder={$t("profiles.usage.accessTokenPlaceholder")} />
+              </label>
+              <label>
+                {$t("profiles.usage.userId")}
+                <input bind:value={usageForm.userId} disabled={usageBusy !== null} placeholder={$t("profiles.usage.userIdPlaceholder")} />
+              </label>
+              <label>
+                {$t("profiles.usage.timeout")}
+                <input type="number" min="2" max="60" bind:value={usageForm.timeoutSeconds} disabled={usageBusy !== null} />
+              </label>
+              <label>
+                {$t("profiles.usage.autoInterval")}
+                <input type="number" min="0" max="1440" bind:value={usageForm.autoQueryIntervalMinutes} disabled={usageBusy !== null} />
+                <small>{$t("profiles.usage.autoIntervalHint")}</small>
+              </label>
+            </div>
+
+            <label class="usage-code-field">
+              <span>{$t("profiles.usage.script")}</span>
+              <textarea bind:value={usageForm.code} disabled={usageBusy !== null} spellcheck="false"></textarea>
+            </label>
+          {/if}
+
+          <section class="native-diff usage-result-panel">
+            <div class="native-diff-heading">
+              <div>
+                <strong>{$t("profiles.usage.resultTitle")}</strong>
+                <span>{$t("profiles.usage.queriedAt", { time: usageQueriedAt(usageResult) })}</span>
+              </div>
+              <StatusPill status={usageResult?.success ? "ok" : "info"} label={usageResult?.success ? $t("common.ok") : $t("profiles.usage.noResult")} />
+            </div>
+            {#if usageResult?.data.length}
+              <div class="usage-result-grid">
+                {#each usageResult.data as item, index}
+                  <div class="usage-result-card" class:invalid-usage={item.isValid === false}>
+                    <strong>{usageItemTitle(item, index)}</strong>
+                    {#if item.isValid === false}
+                      <span>{item.invalidMessage ?? $t("profiles.usage.invalid")}</span>
+                    {/if}
+                    <dl>
+                      <div>
+                        <dt>{$t("profiles.usage.remaining")}</dt>
+                        <dd class="usage-balance-value">{formatUsageValue(item.remaining, item.unit)}</dd>
+                      </div>
+                      <div>
+                        <dt>{$t("profiles.usage.used")}</dt>
+                        <dd>{formatUsageValue(item.used, item.unit)}</dd>
+                      </div>
+                      <div>
+                        <dt>{$t("profiles.usage.total")}</dt>
+                        <dd>{formatUsageValue(item.total, item.unit)}</dd>
+                      </div>
+                    </dl>
+                    {#if item.extra}
+                      <small>{item.extra}</small>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <div class="empty-row">{$t("profiles.usage.emptyResult")}</div>
+            {/if}
+          </section>
+        {/if}
+
+        </div>
+
+        <div class="modal-actions">
+          <button class="secondary-button" disabled={usageBusy !== null} on:click={closeUsage}>
+            {$t("common.close")}
+          </button>
+          {#if usageState?.config && !pendingUsageIsCodexOfficialOAuth}
+            <button class="secondary-button danger-action" disabled={usageBusy !== null} on:click={handleUsageDelete}>
+              {#if usageBusy === "delete"}
+                <AppIcon name="loading" class="spin" size={16} />
+              {:else}
+                <AppIcon name="delete" size={16} />
+              {/if}
+              {$t("profiles.usage.delete")}
+            </button>
+          {/if}
+          {#if !pendingUsageIsCodexOfficialOAuth}
+            <button class="secondary-button" disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageTest}>
+              {#if usageBusy === "test"}
+                <AppIcon name="loading" class="spin" size={16} />
+              {:else}
+                <AppIcon name="play" size={16} />
+              {/if}
+              {$t("profiles.usage.test")}
+            </button>
+          {/if}
+          <button
+            class={pendingUsageIsCodexOfficialOAuth ? "primary-button" : "secondary-button"}
+            disabled={!usageState?.config?.enabled || usageBusy !== null}
+            on:click={handleUsageQuery}
+          >
+            {#if usageBusy === "query"}
+              <AppIcon name="loading" class="spin" size={16} />
+            {:else}
+              <AppIcon name="stats" size={16} />
+            {/if}
+            {$t("profiles.usage.query")}
+          </button>
+          <button class="primary-button" disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageSave}>
+            {#if usageBusy === "save"}
+              <AppIcon name="loading" class="spin" size={16} />
+              {$t("common.saving")}
+            {:else}
+              <AppIcon name="apply" size={16} />
+              {$t("common.save")}
+            {/if}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if pendingEdit}
     <div class="modal-backdrop" role="presentation">
       <div class="modal-panel wide-modal" role="dialog" aria-modal="true" aria-labelledby="edit-title">
-        <div>
+        <div class="modal-body">
+          <div>
           <span class="eyebrow">{$t("profiles.editEyebrow")}</span>
           <h2 id="edit-title">{$t("profiles.editTitle", { name: pendingEdit.name })}</h2>
           <p>{$t("profiles.editDescription")}</p>
@@ -1177,38 +2091,54 @@
           <div class="inline-error">{editError}</div>
         {/if}
 
+        <div class="profile-icon-editor">
+          <div class="profile-avatar large" aria-hidden="true">
+            {#if profileIconIsImage(editForm.icon.trim())}
+              <img src={editForm.icon.trim()} alt="" />
+            {:else}
+              <span>{editForm.icon.trim() || profileDisplayName(pendingEdit).trim().charAt(0).toUpperCase() || "?"}</span>
+            {/if}
+          </div>
+          <label>
+            {$t("profiles.iconLabel")}
+            <input
+              bind:value={editForm.icon}
+              disabled={editingId !== null}
+              placeholder={$t("profiles.iconPlaceholder")}
+            />
+            {#if editIconTooLong}
+              <small class="field-error">{$t("profiles.iconTooLong")}</small>
+            {/if}
+          </label>
+          <div class="profile-icon-actions">
+            <button class="secondary-button" type="button" disabled={editingId !== null} on:click={triggerProfileIconImport}>
+              <AppIcon name="upload" size={16} />
+              {$t("profiles.iconImport")}
+            </button>
+            <button class="secondary-button" type="button" disabled={editingId !== null || editForm.icon.trim().length === 0} on:click={() => (editForm = { ...editForm, icon: "" })}>
+              {$t("profiles.iconUseDefault")}
+            </button>
+            <input bind:this={profileIconInput} type="file" accept="image/*" on:change={handleProfileIconImport} />
+          </div>
+        </div>
+
         <div class="form-grid edit-profile-form">
           <label>
             {$t("wizard.profileName")}
             <input bind:value={editForm.name} disabled={editingId !== null} />
           </label>
           <label>
+            {$t("profiles.remarkLabel")}
+            <textarea bind:value={editForm.remark} rows="2" disabled={editingId !== null} placeholder={$t("profiles.remarkPlaceholder")}></textarea>
+          </label>
+          <label>
             {$t("profiles.tool")}
             <input value={toolLabels[pendingEdit.app] ?? pendingEdit.app} disabled />
           </label>
-          <div class="edit-mode-field">
+          <label>
             {$t("profiles.providerModeTitle")}
-            <div class="edit-mode-toggle" role="group" aria-label={$t("profiles.providerModeTitle")}>
-              <button
-                type="button"
-                class:selected={editForm.mode === "config"}
-                disabled={editingId !== null}
-                on:click={() => selectEditMode("config")}
-              >
-                <span>{$t("profiles.mode.config")}</span>
-                <small>{$t("profiles.mode.configShortDescription")}</small>
-              </button>
-              <button
-                type="button"
-                class:selected={editForm.mode === "gateway"}
-                disabled={editingId !== null}
-                on:click={() => selectEditMode("gateway")}
-              >
-                <span>{$t("profiles.mode.gateway")}</span>
-                <small>{$t("profiles.mode.gatewayShortDescription")}</small>
-              </button>
-            </div>
-          </div>
+            <input value={applyModeLabel(pendingEdit.mode)} disabled />
+          </label>
           <label>
             {$t("common.provider")}
             <input bind:value={editForm.provider} disabled={editingId !== null} />
@@ -1228,16 +2158,17 @@
           {#if providerNeedsBaseUrl(editForm.provider)}
             <label>
               {$t("wizard.providerBaseUrl")}
-              <input bind:value={editForm.baseUrl} disabled={editingId !== null} />
+              <input
+                value={editForm.baseUrl}
+                disabled={editingId !== null}
+                on:input={handleEditBaseUrlInput}
+                on:blur={normalizeEditBaseUrlInput}
+              />
               {#if editBaseUrlErrorKey}
                 <small class="field-error">{$t(editBaseUrlErrorKey)}</small>
               {/if}
             </label>
           {/if}
-          <label>
-            {$t("wizard.timeoutSeconds")}
-            <input type="number" min="5" max="600" bind:value={editForm.timeoutSeconds} disabled={editingId !== null} />
-          </label>
           {#if providerRequiresApiKey(editForm.provider)}
             <label>
               {$t("wizard.providerApiKey")}
@@ -1249,6 +2180,8 @@
               />
             </label>
           {/if}
+        </div>
+
         </div>
 
         <div class="modal-actions">
@@ -1269,13 +2202,43 @@
     </div>
   {/if}
 
+  {#if pendingDelete}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="delete-title">
+        <div class="modal-body">
+          <div>
+          <span class="eyebrow">{$t("profiles.deleteEyebrow")}</span>
+          <h2 id="delete-title">{$t("profiles.deleteTitle", { name: pendingDelete.name })}</h2>
+          <p>{$t("profiles.deleteDescription")}</p>
+        </div>
+
+        </div>
+
+        <div class="modal-actions">
+          <button class="secondary-button" disabled={deletingId !== null} on:click={closeDelete}>
+            {$t("common.cancel")}
+          </button>
+          <button class="primary-button danger-action" disabled={deletingId !== null} on:click={handleDeleteConfirm}>
+            {#if deletingId === pendingDelete.id}
+              <AppIcon name="loading" class="spin" size={16} />
+              {$t("profiles.deleting")}
+            {:else}
+              <AppIcon name="delete" size={16} />
+              {$t("profiles.deleteConfirm")}
+            {/if}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if pendingApply}
     <div class="modal-backdrop" role="presentation">
       <div class="modal-panel wide-modal" role="dialog" aria-modal="true" aria-labelledby="apply-title">
-        <div>
+        <div class="modal-body">
+          <div>
           <span class="eyebrow">{$t("profiles.applyEyebrow")}</span>
           <h2 id="apply-title">{$t("profiles.applyTitle", { name: pendingApply.name })}</h2>
-          <p>{$t("profiles.applyDescription")}</p>
         </div>
 
         {#if applyError}
@@ -1338,18 +2301,10 @@
             </section>
           {/if}
 
-          {#if selectedModePreview?.blockedReason || selectedModePreview?.warnings.length || canSyncClaudeVsCodePlugin}
+          {#if selectedModePreview?.blockedReason || canSyncClaudeVsCodePlugin}
           <section class="native-diff">
             {#if selectedModePreview?.blockedReason}
               <div class="inline-error">{previewTextLabel(selectedModePreview.blockedReason)}</div>
-            {/if}
-
-            {#if selectedModePreview?.warnings.length}
-              <div class="preview-warnings">
-                {#each selectedModePreview.warnings as warning}
-                  <span>{previewTextLabel(warning)}</span>
-                {/each}
-              </div>
             {/if}
 
             {#if canSyncClaudeVsCodePlugin}
@@ -1364,29 +2319,11 @@
           </section>
           {/if}
 
-          <div class="preview-list apply-preview-list">
-            {#each applyPreview.items as item}
-              <div class="apply-preview-row">
-                <div class="apply-preview-meta">
-                  <strong>{applyPreviewLabel(item)}</strong>
-                  <span>{applyActionLabel(item.action)}</span>
-                  {#if item.backupRequired}
-                    <span>{$t("profiles.backupBadge")}</span>
-                  {/if}
-                </div>
-                {#if item.path}
-                  <code>{item.path}</code>
-                {/if}
-                <span>{applyPreviewDetail(item)}</span>
-              </div>
-            {/each}
-          </div>
-
-          {#if selectedNativeDiff}
+          {#if selectedNativeDiffVisible && selectedNativeDiff}
             <section class="native-diff">
               <div class="native-diff-heading">
                 <div>
-                  <strong>{$t(selectedApplyMode === "config" ? "profiles.configModeDiff" : "profiles.gatewayModeDiff")}</strong>
+                  <strong>{$t("profiles.modificationPreview")}</strong>
                   <span>{selectedNativeDiff.path}</span>
                 </div>
                 <StatusPill status="info" label={selectedNativeDiff.writeEnabled ? $t("common.writeEnabled") : $t("common.readOnly")} />
@@ -1410,22 +2347,13 @@
                 {/each}
               </div>
 
-              {#if selectedNativeDiff.warnings.length > 0}
-                <div class="preview-warnings">
-                  {#each selectedNativeDiff.warnings as warning}
-                    <span>{previewTextLabel(warning)}</span>
-                  {/each}
+              {#if selectedNativeDiff.content}
+                <div class="write-content-preview">
+                  <strong>{$t("profiles.writeContentPreview")}</strong>
+                  <pre>{selectedNativeDiff.content}</pre>
                 </div>
               {/if}
             </section>
-          {/if}
-
-          {#if applyPreview.warnings.length > 0}
-            <div class="preview-warnings">
-              {#each applyPreview.warnings as warning}
-                <span>{previewTextLabel(warning)}</span>
-              {/each}
-            </div>
           {/if}
         {:else if applyingId === actionKey(pendingApply.id, pendingApplyMode)}
           <div class="empty-row">
@@ -1433,6 +2361,8 @@
             {$t("common.loading")}
           </div>
         {/if}
+
+        </div>
 
         <div class="modal-actions">
           <button class="secondary-button" disabled={applyingId !== null} on:click={closeApply}>

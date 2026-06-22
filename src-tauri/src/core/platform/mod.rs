@@ -64,7 +64,7 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
 
 pub fn run_powershell(script: &str) -> Result<String, String> {
     if !cfg!(target_os = "windows") {
-        return Err("PowerShell 仅在 Windows 上可用。".to_string());
+        return Err("PowerShell is only available on Windows.".to_string());
     }
 
     let script = format!(
@@ -85,10 +85,10 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
             &script,
         ])
         .output()
-        .map_err(|err| format!("启动 PowerShell 失败：{err}"))?;
+        .map_err(|err| format!("Failed to start PowerShell: {err}"))?;
     if !output.status.success() {
         return Err(format!(
-            "PowerShell 执行失败：{}",
+            "PowerShell execution failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -292,7 +292,7 @@ mod tests {
         if !cfg!(target_os = "windows") {
             assert_eq!(
                 run_powershell("$PSVersionTable.PSVersion").unwrap_err(),
-                "PowerShell 仅在 Windows 上可用。"
+                "PowerShell is only available on Windows."
             );
         }
     }

@@ -169,6 +169,109 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn find_curl_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .or_else(|| {
+            buffer
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|index| index + 2)
+        })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_curl_response_meta(headers: &[u8]) -> Result<(UpstreamResponseMeta, bool), String> {
+    let text = String::from_utf8_lossy(headers);
+    let mut lines = text.lines();
+    let status_line = lines
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| "Upstream response did not include a status line.".to_string())?;
+    let mut parts = status_line.split_whitespace();
+    let protocol = parts.next().unwrap_or_default();
+    if !protocol.starts_with("HTTP/") {
+        return Err("Upstream response status line was not HTTP.".to_string());
+    }
+    let status = parts
+        .next()
+        .ok_or_else(|| "Upstream response did not include a status code.".to_string())?
+        .parse::<u16>()
+        .map_err(|_| "Upstream response status code was invalid.".to_string())?;
+    let mut content_type = "application/json";
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-type")
+            && value
+                .trim()
+                .to_ascii_lowercase()
+                .contains("text/event-stream")
+        {
+            content_type = "text/event-stream";
+        }
+    }
+    let skip_block = status < 200
+        || status_line
+            .to_ascii_lowercase()
+            .contains("connection established");
+
+    Ok((
+        UpstreamResponseMeta {
+            status,
+            content_type,
+        },
+        skip_block,
+    ))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn curl_header_lines(headers: &str) -> Vec<String> {
+    headers
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn curl_config_quote(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\r' | '\n' => {}
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn curl_config_content(url: &str, headers: &str, timeout_seconds: u16) -> String {
+    let timeout = timeout_seconds.max(1).to_string();
+    let mut config = vec![
+        "request = \"POST\"".to_string(),
+        format!("url = {}", curl_config_quote(url)),
+        format!("connect-timeout = {timeout}"),
+        "speed-limit = 1".to_string(),
+        format!("speed-time = {timeout}"),
+        "data-binary = \"@-\"".to_string(),
+    ];
+    for header in curl_header_lines(headers) {
+        config.push(format!("header = {}", curl_config_quote(&header)));
+    }
+    config.join("\n")
+}
+
 #[cfg(windows)]
 mod platform {
     use super::{parse_url, UpstreamResponseMeta, UpstreamStreamEvent};
@@ -419,7 +522,193 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::{
+        curl_config_content, find_curl_header_end, parse_curl_response_meta, UpstreamResponseMeta,
+        UpstreamStreamEvent,
+    };
+    use serde_json::Value;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    pub fn post_json_stream<F>(
+        url: &str,
+        headers: &str,
+        json_body: &Value,
+        timeout_seconds: u16,
+        mut on_event: F,
+    ) -> Result<UpstreamResponseMeta, String>
+    where
+        F: FnMut(UpstreamStreamEvent<'_>) -> Result<(), String>,
+    {
+        let body = serde_json::to_vec(json_body)
+            .map_err(|err| format!("Could not serialize upstream request body: {err}"))?;
+        let config_path = write_curl_config(url, headers, timeout_seconds)?;
+        let mut child = Command::new("curl")
+            .args([
+                "--silent",
+                "--show-error",
+                "--include",
+                "--no-buffer",
+                "--config",
+            ])
+            .arg(&config_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("Could not start curl for upstream request: {err}"))?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Could not open curl stdin.".to_string())?;
+        stdin
+            .write_all(&body)
+            .and_then(|_| stdin.flush())
+            .map_err(|err| format!("Could not write upstream request body to curl: {err}"))?;
+        drop(stdin);
+
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Could not open curl stdout.".to_string())?;
+        let stderr_handle = child.stderr.take().map(|mut stderr| {
+            thread::spawn(move || {
+                let mut text = String::new();
+                let _ = stderr.read_to_string(&mut text);
+                text
+            })
+        });
+
+        let stream_result = stream_curl_stdout(&mut stdout, &mut on_event);
+        if stream_result.is_err() {
+            let _ = child.kill();
+        }
+        let status = child
+            .wait()
+            .map_err(|err| format!("Could not wait for curl upstream request: {err}"))?;
+        let _ = fs::remove_file(&config_path);
+        let stderr = stderr_handle
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+
+        let meta = stream_result?;
+        if !status.success() {
+            let detail = stderr.trim();
+            if detail.is_empty() {
+                return Err(format!(
+                    "curl upstream request failed with status {status}."
+                ));
+            }
+            return Err(format!("curl upstream request failed: {detail}"));
+        }
+
+        Ok(meta)
+    }
+
+    fn write_curl_config(
+        url: &str,
+        headers: &str,
+        timeout_seconds: u16,
+    ) -> Result<PathBuf, String> {
+        let path = temporary_curl_config_path();
+        let content = curl_config_content(url, headers, timeout_seconds);
+        fs::write(&path, content)
+            .map_err(|err| format!("Could not write temporary curl config: {err}"))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| format!("Could not secure temporary curl config: {err}"))?;
+        Ok(path)
+    }
+
+    fn temporary_curl_config_path() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "codestudio-lite-curl-{}-{nanos}.conf",
+            std::process::id()
+        ))
+    }
+
+    fn stream_curl_stdout<F>(
+        stdout: &mut impl Read,
+        on_event: &mut F,
+    ) -> Result<UpstreamResponseMeta, String>
+    where
+        F: FnMut(UpstreamStreamEvent<'_>) -> Result<(), String>,
+    {
+        let (meta, initial_body) = read_curl_response_headers(stdout, on_event)?;
+        if !initial_body.is_empty() {
+            on_event(UpstreamStreamEvent::Chunk(&initial_body))?;
+        }
+
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = stdout
+                .read(&mut buffer)
+                .map_err(|err| format!("Could not read curl upstream body: {err}"))?;
+            if read == 0 {
+                break;
+            }
+            on_event(UpstreamStreamEvent::Chunk(&buffer[..read]))?;
+        }
+
+        Ok(meta)
+    }
+
+    fn read_curl_response_headers<F>(
+        stdout: &mut impl Read,
+        on_event: &mut F,
+    ) -> Result<(UpstreamResponseMeta, Vec<u8>), String>
+    where
+        F: FnMut(UpstreamStreamEvent<'_>) -> Result<(), String>,
+    {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+
+        loop {
+            if let Some(header_end) = find_curl_header_end(&buffer) {
+                let (headers, rest) = buffer.split_at(header_end);
+                let (meta, skip_block) = parse_curl_response_meta(headers)?;
+                let rest = rest.to_vec();
+                if skip_block {
+                    buffer = rest;
+                    continue;
+                }
+                on_event(UpstreamStreamEvent::Headers(meta))?;
+                return Ok((meta, rest));
+            }
+
+            let read = stdout
+                .read(&mut chunk)
+                .map_err(|err| format!("Could not read curl upstream headers: {err}"))?;
+            if read == 0 {
+                return Err(
+                    "curl ended before upstream response headers were received.".to_string()
+                );
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if buffer.len() > 128 * 1024 {
+                return Err("Upstream response headers are too large.".to_string());
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn path_exists(path: &Path) -> bool {
+        path.exists()
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod platform {
     use super::{UpstreamResponseMeta, UpstreamStreamEvent};
     use serde_json::Value;
@@ -435,5 +724,58 @@ mod platform {
         F: FnMut(UpstreamStreamEvent<'_>) -> Result<(), String>,
     {
         Err("Upstream HTTP forwarding is not implemented on this platform yet.".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curl_config_escapes_headers_without_losing_secrets() {
+        let config = curl_config_content(
+            "https://api.example.test/v1/messages",
+            "Authorization: Bearer sk-test\r\nX-Title: Code\"Studio\r\n",
+            15,
+        );
+
+        assert!(config.contains("request = \"POST\""));
+        assert!(config.contains("url = \"https://api.example.test/v1/messages\""));
+        assert!(config.contains("connect-timeout = 15"));
+        assert!(config.contains("header = \"Authorization: Bearer sk-test\""));
+        assert!(config.contains("header = \"X-Title: Code\\\"Studio\""));
+        assert!(config.contains("data-binary = \"@-\""));
+    }
+
+    #[test]
+    fn curl_response_meta_parses_status_and_sse_content_type() {
+        let (meta, skip) = parse_curl_response_meta(
+            b"HTTP/2 200\r\ncontent-type: text/event-stream; charset=utf-8\r\n\r\n",
+        )
+        .expect("headers should parse");
+
+        assert_eq!(meta.status, 200);
+        assert_eq!(meta.content_type, "text/event-stream");
+        assert!(!skip);
+    }
+
+    #[test]
+    fn curl_response_meta_skips_interim_header_blocks() {
+        let (_, skip) = parse_curl_response_meta(b"HTTP/1.1 100 Continue\r\n\r\n")
+            .expect("interim headers should parse");
+        assert!(skip);
+
+        let (_, skip) = parse_curl_response_meta(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .expect("proxy headers should parse");
+        assert!(skip);
+    }
+
+    #[test]
+    fn curl_header_end_accepts_crlf_and_lf() {
+        assert_eq!(
+            find_curl_header_end(b"HTTP/2 200\r\nx: y\r\n\r\nbody"),
+            Some(20)
+        );
+        assert_eq!(find_curl_header_end(b"HTTP/2 200\nx: y\n\nbody"), Some(17));
     }
 }

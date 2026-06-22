@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { previewProfileWrite, saveProfileDraft } from "../lib/api";
+  import { cubicOut } from "svelte/easing";
+  import { fade, fly } from "svelte/transition";
+  import { detectEnvironment, openExternalUrl, previewProfileWrite, saveProfileDraft, startCodexOAuthLogin } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
   import AppIcon from "../components/AppIcon.svelte";
   import SecretInput from "../components/SecretInput.svelte";
@@ -10,10 +12,15 @@
     PreviewProfileWriteResult,
     ProfileWritePreviewItem,
     ProviderApplyMode,
+    SaveProfileDraftRequest,
     WizardPrefill
   } from "../types";
 
-  export let onProfileSaved: () => void | Promise<void> = () => {};
+  const CODEX_AUTH_URL = "https://developers.openai.com/codex/auth";
+  const wizardStepEnter = { y: 14, duration: 240, opacity: 0, easing: cubicOut };
+  const wizardStepExit = { duration: 110 };
+
+  export let onProfileSaved: (mode: ProviderApplyMode) => void | Promise<void> = () => {};
   export let prefill: WizardPrefill | null = null;
   export let snapshot: DetectionSnapshot | null = null;
 
@@ -36,7 +43,7 @@
 
   const configModeProtocolIdsByTool: Record<string, readonly string[]> = {
     codex: ["openai-chat-completions", "openai-responses"],
-    "claude-desktop": [],
+    "claude-desktop": ["anthropic-messages"],
     claude: ["anthropic-messages"],
     gemini: ["google-gemini"],
     "gemini-code-assist": ["google-gemini"],
@@ -124,10 +131,10 @@
   let profileMode: ProviderApplyMode = "config";
   let protocol = "openai-responses";
   let profileName = $t("wizard.defaultProfile.codex");
+  let profileRemark = "";
   let apiKey = "";
   let baseUrl = "";
   let model = "";
-  let timeoutSeconds = 120;
   let saving = false;
   let saveError: string | null = null;
   let savedProfileName: string | null = null;
@@ -136,14 +143,38 @@
   let previewError: string | null = null;
   let writePreview: PreviewProfileWriteResult | null = null;
   let writePreviewKey: string | null = null;
+  let codexOAuthConfig = false;
+  let codexAuthChecking = false;
+  let codexAuthError: string | null = null;
+  let codexAuthMessage: string | null = null;
+  let localCodexAuth = snapshot?.codexAuth ?? null;
 
-  $: if (prefill && appliedPrefillKey !== `${prefill.toolId}:${prefill.toolName}`) {
-    applyToolDefaults(prefill.toolId, prefill.toolName);
-    appliedPrefillKey = `${prefill.toolId}:${prefill.toolName}`;
+  $: if (prefill && appliedPrefillKey !== prefillKey(prefill)) {
+    if (prefill.toolId) {
+      applyToolDefaults(prefill.toolId, prefill.toolName, prefill.mode ?? "config");
+    } else {
+      setProfileMode(prefill.mode ?? "config");
+      resetDraftState();
+    }
+    appliedPrefillKey = prefillKey(prefill);
   }
 
+  $: if (snapshot?.codexAuth) {
+    localCodexAuth = snapshot.codexAuth;
+  }
   $: selectedToolInstalled = toolCanCreateProfile(selectedTool);
   $: visibleToolDefaults = toolDefaults.filter((tool) => toolVisibleInSnapshot(tool.id));
+  $: canUseCodexOAuthConfig = canonicalProfileToolId(selectedTool) === "codex" && profileMode === "config";
+  $: if (!canUseCodexOAuthConfig && codexOAuthConfig) {
+    codexOAuthConfig = false;
+  }
+  $: activeProvider = codexOAuthConfig ? "official" : provider;
+  $: activeProtocol = codexOAuthConfig ? "openai-responses" : protocol;
+  $: activeModel = codexOAuthConfig ? "" : model;
+  $: activeBaseUrl = codexOAuthConfig ? "" : baseUrl;
+  $: activeApiKey = codexOAuthConfig ? "" : apiKey;
+  $: activeSecretProvided = !codexOAuthConfig && apiKey.trim().length > 0;
+  $: codexOAuthAuthorized = codexAuthIsOAuth(localCodexAuth);
   $: availableProtocolOptions = protocolOptionsFor(selectedTool, profileMode);
   $: if (
     availableProtocolOptions.length > 0 &&
@@ -153,16 +184,17 @@
   }
   $: previewRequestKey = [
     profileName.trim(),
+    profileRemark.trim(),
     selectedTool.trim(),
     profileMode,
-    provider.trim(),
-    protocol.trim(),
-    model.trim(),
-    baseUrl.trim(),
-    String(timeoutSeconds),
-    apiKey.trim().length > 0 ? "secret" : "no-secret"
+    activeProvider.trim(),
+    activeProtocol.trim(),
+    activeModel.trim(),
+    activeBaseUrl.trim(),
+    activeSecretProvided ? "secret" : "no-secret",
+    codexOAuthConfig ? "codex-oauth" : "api"
   ].join("|");
-  $: baseUrlErrorKey = providerNeedsBaseUrl(provider) ? baseUrlValidationErrorKey(baseUrl) : null;
+  $: baseUrlErrorKey = providerNeedsBaseUrl(activeProvider) ? baseUrlValidationErrorKey(activeBaseUrl) : null;
   $: visibleBaseUrlErrorKey =
     baseUrlErrorKey === "wizard.error.baseUrlRequired" ? null : baseUrlErrorKey;
   $: if (currentStep === steps.length - 1 && canApply && writePreviewKey !== previewRequestKey && !previewing) {
@@ -172,40 +204,39 @@
     profileName.trim().length > 0 &&
     selectedTool.trim().length > 0 &&
     selectedToolInstalled &&
-    provider.trim().length > 0 &&
-    isProtocolAllowedForToolMode(selectedTool, profileMode, protocol) &&
-    (!providerNeedsBaseUrl(provider) || baseUrlErrorKey === null) &&
-    (!providerRequiresApiKey(provider) || apiKey.trim().length > 0) &&
-    timeoutSeconds >= 5 &&
-    timeoutSeconds <= 600 &&
+    activeProvider.trim().length > 0 &&
+    isProtocolAllowedForToolMode(selectedTool, profileMode, activeProtocol) &&
+    (!providerNeedsBaseUrl(activeProvider) || baseUrlErrorKey === null) &&
+    (!providerRequiresApiKey(activeProvider) || activeSecretProvided) &&
+    (!codexOAuthConfig || codexOAuthAuthorized) &&
     !saving;
   $: canContinue =
     currentStep === 0
       ? selectedToolInstalled
       : currentStep === 1
         ? profileName.trim().length > 0 &&
-          provider.trim().length > 0 &&
-          isProtocolAllowedForToolMode(selectedTool, profileMode, protocol) &&
-          (!providerNeedsBaseUrl(provider) || baseUrlErrorKey === null) &&
-          (!providerRequiresApiKey(provider) || apiKey.trim().length > 0) &&
-          timeoutSeconds >= 5 &&
-          timeoutSeconds <= 600
+          activeProvider.trim().length > 0 &&
+          isProtocolAllowedForToolMode(selectedTool, profileMode, activeProtocol) &&
+          (!providerNeedsBaseUrl(activeProvider) || baseUrlErrorKey === null) &&
+          (!providerRequiresApiKey(activeProvider) || activeSecretProvided) &&
+          (!codexOAuthConfig || codexOAuthAuthorized)
         : true;
 
-  function applyToolDefaults(toolId: string, fallbackName?: string) {
-    const canonicalToolId = canonicalProfileToolId(toolId);
-    const defaults = toolDefaults.find((tool) => tool.id === canonicalToolId);
-    selectedTool = defaults?.id ?? canonicalToolId;
-    provider = "compatible";
-    profileMode = "config";
-    protocol = defaults?.protocol ?? "openai-chat-completions";
-    profileName = defaults?.profileNameKey
-      ? $t(defaults.profileNameKey)
-      : $t("wizard.defaultProfile.generic", { name: fallbackName ?? toolId });
-    apiKey = "";
-    baseUrl = defaults?.baseUrl ?? "";
-    model = defaults?.model ?? "";
-    timeoutSeconds = 120;
+  function prefillKey(value: WizardPrefill) {
+    return `${value.toolId ?? ""}:${value.toolName ?? ""}:${value.mode ?? "config"}`;
+  }
+
+  function setProfileMode(nextMode: ProviderApplyMode) {
+    profileMode = nextMode;
+    if (nextMode !== "config") {
+      codexOAuthConfig = false;
+    }
+    writePreview = null;
+    writePreviewKey = null;
+    previewError = null;
+  }
+
+  function resetDraftState() {
     currentStep = 0;
     saveError = null;
     savedProfileName = null;
@@ -214,16 +245,49 @@
     writePreviewKey = null;
   }
 
-  function selectProfileMode(nextMode: ProviderApplyMode) {
-    profileMode = nextMode;
+  function applyToolDefaults(toolId: string, fallbackName?: string, mode: ProviderApplyMode = "config") {
+    const canonicalToolId = canonicalProfileToolId(toolId);
+    const defaults = toolDefaults.find((tool) => tool.id === canonicalToolId);
+    selectedTool = defaults?.id ?? canonicalToolId;
+    provider = "compatible";
+    setProfileMode(mode);
+    protocol = defaults?.protocol ?? "openai-chat-completions";
+    profileName = defaults?.profileNameKey
+      ? $t(defaults.profileNameKey)
+      : $t("wizard.defaultProfile.generic", { name: fallbackName ?? toolId });
+    profileRemark = "";
+    apiKey = "";
+    baseUrl = defaults?.baseUrl ?? "";
+    model = defaults?.model ?? "";
+    codexOAuthConfig = false;
+    codexAuthError = null;
+    codexAuthMessage = null;
+    resetDraftState();
+  }
+
+  function selectCodexOAuthConfig(nextValue: boolean) {
+    codexOAuthConfig = nextValue;
+    if (nextValue) {
+      apiKey = "";
+      baseUrl = "";
+      model = "";
+      protocol = "openai-responses";
+    } else {
+      provider = "compatible";
+    }
     writePreview = null;
     writePreviewKey = null;
     previewError = null;
+    saveError = null;
   }
 
   function selectedToolLabel(toolId: string) {
     const canonicalToolId = canonicalProfileToolId(toolId);
     return toolDefaults.find((tool) => tool.id === canonicalToolId)?.label ?? canonicalToolId;
+  }
+
+  function codexAuthIsOAuth(auth: DetectionSnapshot["codexAuth"] | null | undefined) {
+    return Boolean(auth?.available) && (auth?.method === "chat_gpt" || auth?.method === "access_token");
   }
 
   function canonicalProfileToolId(toolId: string) {
@@ -263,12 +327,28 @@
     return protocolOptionAvailable(protocolOptionsFor(toolId, mode), value);
   }
 
-  function providerRequiresApiKey(_providerId: string) {
-    return true;
+  function providerRequiresApiKey(providerId: string) {
+    return providerId.trim() !== "official";
   }
 
-  function providerNeedsBaseUrl(_providerId: string) {
-    return true;
+  function providerNeedsBaseUrl(providerId: string) {
+    return providerId.trim() !== "official";
+  }
+
+  function buildProfileDraftRequest(): SaveProfileDraftRequest {
+    return {
+      name: profileName,
+      icon: null,
+      remark: profileRemark,
+      app: selectedTool,
+      mode: profileMode,
+      provider: activeProvider,
+      protocol: activeProtocol,
+      model: activeModel,
+      baseUrl: normalizeBaseUrl(activeBaseUrl),
+      secretProvided: activeSecretProvided,
+      apiKey: activeApiKey
+    };
   }
 
   async function handleApply() {
@@ -282,20 +362,9 @@
     savedProfileName = null;
 
     try {
-      const profile = await saveProfileDraft({
-        name: profileName,
-        app: selectedTool,
-        mode: profileMode,
-        provider,
-        protocol,
-        model,
-        baseUrl,
-        secretProvided: apiKey.trim().length > 0,
-        apiKey,
-        timeoutSeconds
-      });
+      const profile = await saveProfileDraft(buildProfileDraftRequest());
       savedProfileName = profile.name;
-      await onProfileSaved();
+      await onProfileSaved(profile.mode);
     } catch (err) {
       saveError = errorLabel(err instanceof Error ? err.message : String(err));
     } finally {
@@ -323,18 +392,7 @@
     writePreviewKey = expectedKey;
 
     try {
-      const nextPreview = await previewProfileWrite({
-        name: profileName,
-        app: selectedTool,
-        mode: profileMode,
-        provider,
-        protocol,
-        model,
-        baseUrl,
-        secretProvided: apiKey.trim().length > 0,
-        apiKey,
-        timeoutSeconds
-      });
+      const nextPreview = await previewProfileWrite(buildProfileDraftRequest());
       if (writePreviewKey === expectedKey) {
         writePreview = nextPreview;
       }
@@ -347,6 +405,43 @@
       if (writePreviewKey === expectedKey) {
         previewing = false;
       }
+    }
+  }
+
+  async function startCodexAuthorization() {
+    codexAuthChecking = true;
+    codexAuthError = null;
+    codexAuthMessage = null;
+    try {
+      const result = await startCodexOAuthLogin();
+      codexAuthMessage = result.message || $t("wizard.codexOAuth.loginStarted");
+    } catch (err) {
+      codexAuthError = errorLabel(err instanceof Error ? err.message : String(err));
+      try {
+        await openExternalUrl(CODEX_AUTH_URL);
+        codexAuthMessage = $t("wizard.codexOAuth.loginFallbackOpened");
+      } catch (openErr) {
+        codexAuthError = errorLabel(openErr instanceof Error ? openErr.message : String(openErr));
+      }
+    } finally {
+      codexAuthChecking = false;
+    }
+  }
+
+  async function refreshCodexAuthStatus() {
+    codexAuthChecking = true;
+    codexAuthError = null;
+    codexAuthMessage = null;
+    try {
+      const nextSnapshot = await detectEnvironment();
+      localCodexAuth = nextSnapshot.codexAuth;
+      codexAuthMessage = codexAuthIsOAuth(nextSnapshot.codexAuth)
+        ? $t("wizard.codexOAuth.authDetected")
+        : $t("wizard.codexOAuth.authStillMissing");
+    } catch (err) {
+      codexAuthError = errorLabel(err instanceof Error ? err.message : String(err));
+    } finally {
+      codexAuthChecking = false;
     }
   }
 
@@ -383,6 +478,10 @@
     return providerId === "official" ? $t("wizard.provider.official") : $t("wizard.provider.compatible");
   }
 
+  function applyModeLabel(mode: ProviderApplyMode) {
+    return mode === "config" ? $t("profiles.mode.config") : $t("profiles.mode.gateway");
+  }
+
   function protocolLabel(value: string) {
     const normalized = normalizeProtocol(value);
     const option = protocolOptions.find((item) => item.id === normalized);
@@ -394,6 +493,9 @@
   }
 
   function credentialDetailLabel(providerId: string, secretProvided: boolean) {
+    if (providerId.trim() === "official") {
+      return $t("wizard.check.officialLoginNoKey");
+    }
     if (secretProvided) {
       return $t("wizard.check.credentialReady");
     }
@@ -401,8 +503,8 @@
   }
 
   function writePreviewLabel(item: ProfileWritePreviewItem) {
-    if (item.label === "Profile draft") {
-      return $t("wizard.preview.profileDraft");
+    if (item.label === "Profile row") {
+      return $t("wizard.preview.profileRow");
     }
     if (item.label === "Active tool profile pointer") {
       return $t("wizard.preview.activeProfilePointer");
@@ -417,17 +519,17 @@
   }
 
   function writePreviewDetail(item: ProfileWritePreviewItem) {
-    if (item.label === "Profile draft") {
-      return $t("wizard.preview.profileDraftDetail", {
-        protocol: protocolLabel(protocol),
-        provider: providerLabel(provider)
+    if (item.label === "Profile row") {
+      return $t("wizard.preview.profileRowDetail", {
+        protocol: protocolLabel(activeProtocol),
+        provider: providerLabel(activeProvider)
       });
     }
     if (item.label === "Active tool profile pointer") {
       return $t("wizard.preview.activeProfilePointerDetail");
     }
     if (item.label === "Credential") {
-      return credentialDetailLabel(provider, apiKey.trim().length > 0);
+      return credentialDetailLabel(activeProvider, activeSecretProvided);
     }
     if (item.label.endsWith(" config")) {
       return $t("wizard.preview.toolConfigDetail");
@@ -466,15 +568,12 @@
     if (message === "Unsupported Provider API protocol.") {
       return $t("wizard.error.protocolUnsupported");
     }
-    const configProtocolMatch = message.match(/Config file mode does not support (.+) for '([^']+)'\./);
+    const configProtocolMatch = message.match(/Config (?:file mode does|profiles do) not support (.+) for '([^']+)'\./);
     if (configProtocolMatch) {
       return $t("wizard.error.configProtocolUnsupported", {
         protocol: configProtocolMatch[1],
         tool: selectedToolLabel(configProtocolMatch[2])
       });
-    }
-    if (message === "Timeout must be between 5 and 600 seconds.") {
-      return $t("wizard.error.timeoutRange");
     }
     if (message === "Provider API key is required for non-official providers.") {
       return $t("wizard.check.credentialMissing");
@@ -482,7 +581,11 @@
     if (message === "Official profiles are built in and cannot be saved as custom profiles.") {
       return $t("profiles.officialCustomSaveBlocked");
     }
-    if (message === "Official provider uses the client login directly and cannot use Gateway mode.") {
+    if (
+      message === "Official provider uses the client login directly and cannot use Gateway mode." ||
+      message === "Official provider uses the client login directly and cannot use Gateway profile." ||
+      message === "Official provider uses the client login directly and cannot use Gateway profiles."
+    ) {
       return $t("profiles.officialGatewayBlocked");
     }
     const toolNotInstalledMatch = message.match(/Tool '([^']+)' is not installed, so a profile cannot be created for it\./);
@@ -511,15 +614,47 @@
     return toolStatusForProfileTool(toolId)?.installState === "installed";
   }
 
-  function baseUrlValidationErrorKey(value: string): TranslationKey | null {
+  function normalizeBaseUrl(value: string) {
     const trimmed = value.trim();
-    if (!trimmed) {
+    if (/^https?:/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    return `https://${trimmed}`;
+  }
+
+  function shouldAutoPrefixBaseUrlInput(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
+      return false;
+    }
+    if (/^[a-z][a-z\d+\-.]*:\/?$/i.test(trimmed)) {
+      return false;
+    }
+    return trimmed.includes(".") || trimmed.includes(":") || trimmed.toLowerCase() === "localhost";
+  }
+
+  function handleBaseUrlInput(event: Event) {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    baseUrl = shouldAutoPrefixBaseUrlInput(value) ? normalizeBaseUrl(value) : value;
+  }
+
+  function normalizeBaseUrlInput() {
+    baseUrl = normalizeBaseUrl(baseUrl);
+  }
+
+  function baseUrlValidationErrorKey(value: string): TranslationKey | null {
+    const input = value.trim();
+    const trimmed = normalizeBaseUrl(input);
+    if (!input) {
       return "wizard.error.baseUrlRequired";
     }
-    if (/\s/.test(trimmed)) {
+    if (/\s/.test(input)) {
       return "wizard.error.baseUrlWhitespace";
     }
-    if (!/^https?:\/\//.test(trimmed)) {
+    if (!/^https?:\/\//i.test(trimmed)) {
       return "wizard.error.baseUrlScheme";
     }
     try {
@@ -544,6 +679,9 @@
     }
     if (baseUrlErrorKey) {
       return $t(baseUrlErrorKey);
+    }
+    if (codexOAuthConfig && !codexOAuthAuthorized) {
+      return $t("wizard.codexOAuth.authorizationRequired");
     }
     return $t("wizard.applyRequired");
   }
@@ -597,6 +735,8 @@
   </div>
 
   <section class="panel-band wizard-panel">
+    {#key currentStep}
+    <div class="wizard-step-content" in:fly={wizardStepEnter} out:fade={wizardStepExit}>
     {#if currentStep === 0}
       <div class="preview-heading">
         <div>
@@ -604,7 +744,7 @@
           <p>{$t("wizard.chooseClientDescription")}</p>
         </div>
       </div>
-      <div class="field-grid choices">
+      <div class="field-grid choices wizard-tool-choices">
         {#each visibleToolDefaults as tool}
           {@const toolStatus = toolStatusForProfileTool(tool.id)}
           {@const installed = toolCanCreateProfile(tool.id)}
@@ -612,7 +752,7 @@
             class:selected={selectedTool === tool.id}
             disabled={!installed}
             title={installed ? tool.label : $t("wizard.error.toolNotInstalled", { tool: tool.label })}
-            on:click={() => applyToolDefaults(tool.id)}
+            on:click={() => applyToolDefaults(tool.id, undefined, profileMode)}
           >
             <ToolIcon toolId={tool.id} label={tool.label} variant="choice" />
             <span>{tool.label}</span>
@@ -620,65 +760,139 @@
           </button>
         {/each}
       </div>
+      <div class="wizard-mode-choice">
+        <strong>{$t("profiles.providerModeTitle")}</strong>
+        <div class="field-grid choices compact-choices">
+          <button
+            class:selected={profileMode === "config"}
+            type="button"
+            on:click={() => setProfileMode("config")}
+          >
+            <AppIcon name="profiles" size={18} />
+            <span>{$t("profiles.mode.config")}</span>
+          </button>
+          <button
+            class:selected={profileMode === "gateway"}
+            type="button"
+            on:click={() => setProfileMode("gateway")}
+          >
+            <AppIcon name="gateway" size={18} />
+            <span>{$t("profiles.mode.gateway")}</span>
+          </button>
+        </div>
+      </div>
       {#if !selectedToolInstalled}
         <div class="inline-error">{applyBlockedMessage()}</div>
       {/if}
     {:else if currentStep === 1}
       <div class="preview-heading">
         <div>
-          <h2>{$t("profiles.providerModeTitle")}</h2>
+          <h2>{$t("wizard.connectionTitle")}</h2>
+          <p>{$t("wizard.connectionDescription", { mode: applyModeLabel(profileMode) })}</p>
         </div>
       </div>
-      <div class="field-grid choices">
-        <button class:selected={profileMode === "config"} on:click={() => selectProfileMode("config")}>
-          {$t("profiles.mode.config")}
-        </button>
-        <button
-          class:selected={profileMode === "gateway"}
-          title={$t("profiles.mode.gateway")}
-          on:click={() => selectProfileMode("gateway")}
-        >
-          {$t("profiles.mode.gateway")}
-        </button>
-      </div>
+
+      {#if canUseCodexOAuthConfig}
+        <div class="field-grid choices compact-choices">
+          <button
+            class:selected={!codexOAuthConfig}
+            type="button"
+            on:click={() => selectCodexOAuthConfig(false)}
+          >
+            <AppIcon name="key" size={18} />
+            <span>{$t("wizard.codexOAuth.typeApi")}</span>
+          </button>
+          <button
+            class:selected={codexOAuthConfig}
+            type="button"
+            on:click={() => selectCodexOAuthConfig(true)}
+          >
+            <AppIcon name="user" size={18} />
+            <span>{$t("wizard.codexOAuth.typeOAuth")}</span>
+          </button>
+        </div>
+      {/if}
 
       <div class="form-grid">
         <label>
           {$t("wizard.profileName")}
           <input bind:value={profileName} />
         </label>
-        <label>
-          {$t("wizard.protocol")}
-          <select bind:value={protocol}>
-            {#each availableProtocolOptions as option}
-              <option value={option.id}>{$t(option.labelKey)}</option>
-            {/each}
-          </select>
+        <label class="wide-field">
+          {$t("profiles.remarkLabel")}
+          <textarea bind:value={profileRemark} rows="2" placeholder={$t("profiles.remarkPlaceholder")}></textarea>
         </label>
-        <label>
-          {$t("wizard.providerApiKey")}
-          <SecretInput bind:value={apiKey} />
-        </label>
-        <label>
-          {$t("wizard.providerBaseUrl")}
-          <input bind:value={baseUrl} />
-          {#if visibleBaseUrlErrorKey}
-            <small class="field-error">{$t(visibleBaseUrlErrorKey)}</small>
-          {/if}
-        </label>
-        <label>
-          {$t("wizard.modelOptional")}
-          <input bind:value={model} />
-        </label>
-        <label>
-          {$t("wizard.timeoutSeconds")}
-          <input type="number" min="5" max="600" bind:value={timeoutSeconds} />
-        </label>
+        {#if !codexOAuthConfig}
+          <label>
+            {$t("wizard.protocol")}
+            <select bind:value={protocol}>
+              {#each availableProtocolOptions as option}
+                <option value={option.id}>{$t(option.labelKey)}</option>
+              {/each}
+            </select>
+          </label>
+          <label>
+            {$t("wizard.providerApiKey")}
+            <SecretInput bind:value={apiKey} />
+          </label>
+          <label>
+            {$t("wizard.providerBaseUrl")}
+            <input value={baseUrl} on:input={handleBaseUrlInput} on:blur={normalizeBaseUrlInput} />
+            {#if visibleBaseUrlErrorKey}
+              <small class="field-error">{$t(visibleBaseUrlErrorKey)}</small>
+            {/if}
+          </label>
+          <label>
+            {$t("wizard.modelOptional")}
+            <input bind:value={model} />
+          </label>
+        {/if}
       </div>
-      <div class="security-note">
-        <AppIcon name="key" size={18} />
-        {$t("wizard.securityNote")}
-      </div>
+      {#if codexOAuthConfig}
+        <div class="codex-auth-card">
+          <div>
+            <strong>{$t("wizard.codexOAuth.authTitle")}</strong>
+            <span>
+              {#if codexOAuthAuthorized}
+                {$t("wizard.codexOAuth.authReady")}
+              {:else if localCodexAuth?.available && localCodexAuth?.method === "api_key"}
+                {$t("wizard.codexOAuth.apiKeyNotOAuth")}
+              {:else}
+                {$t("wizard.codexOAuth.authRequired")}
+              {/if}
+            </span>
+            {#if localCodexAuth?.path}
+              <small>{localCodexAuth.path}</small>
+            {/if}
+          </div>
+          <div class="button-row">
+            <button class="secondary-button" type="button" disabled={codexAuthChecking} on:click={startCodexAuthorization}>
+              {#if codexAuthChecking}
+                <AppIcon name="loading" class="spin" size={16} />
+                {$t("common.loading")}
+              {:else}
+                <AppIcon name="externalLink" size={16} />
+                {$t("wizard.codexOAuth.openLogin")}
+              {/if}
+            </button>
+            <button class="secondary-button" type="button" disabled={codexAuthChecking} on:click={refreshCodexAuthStatus}>
+              <AppIcon name={codexAuthChecking ? "loading" : "refresh"} class={codexAuthChecking ? "spin" : ""} size={16} />
+              {$t("wizard.codexOAuth.recheck")}
+            </button>
+          </div>
+        </div>
+        {#if codexAuthError}
+          <div class="inline-error">{codexAuthError}</div>
+        {/if}
+        {#if codexAuthMessage}
+          <div class="inline-success">{codexAuthMessage}</div>
+        {/if}
+      {:else}
+        <div class="security-note">
+          <AppIcon name="key" size={18} />
+          {$t("wizard.securityNote")}
+        </div>
+      {/if}
     {:else if currentStep === 2}
       <div class="preview-box">
         <div class="preview-heading">
@@ -734,5 +948,7 @@
         {/if}
       </div>
     {/if}
+    </div>
+    {/key}
   </section>
 </div>

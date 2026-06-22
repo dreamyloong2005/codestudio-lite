@@ -6,6 +6,7 @@ import type {
   ApplyProfileRequest,
   ApplyProfileResult,
   BackupManifest,
+  ClaudeDesktopLaunchRequest,
   ClearEnvironmentVariablesRequest,
   ClearEnvironmentVariablesResult,
   CodexClientInstallRequest,
@@ -15,15 +16,16 @@ import type {
   CodexClientStageReport,
   CodexClientState,
   CodexClientUninstallRequest,
+  DeleteProfileDraftRequest,
   DetectionSnapshot,
   DoctorReport,
   DuplicateProfileDraftRequest,
-  ExportProfilesResult,
   GatewayControlResult,
   GatewayRequestLogEntry,
   GatewayStatus,
-  ImportProfilesRequest,
-  ImportProfilesResult,
+  InstallTerminalInputRequest,
+  InstallTerminalOutput,
+  InstallTerminalResizeRequest,
   PreviewProfileApplyRequest,
   PreviewProfileApplyResult,
   PreviewProfileWriteRequest,
@@ -32,23 +34,40 @@ import type {
   ProviderApplyMode,
   RepairToolPathRequest,
   RepairToolPathResult,
+  ReorderProfileDraftsRequest,
   ProfileSummary,
   RestoreBackupRequest,
   RestoreBackupResult,
   SaveProfileDraftRequest,
+  StartCodexOAuthLoginResult,
+  ExternalToolLaunchResult,
+  StartInstallTerminalRequest,
+  StartInstallTerminalResult,
+  StopInstallTerminalRequest,
   TestProfileConnectionRequest,
   TestProfileConnectionResult,
   ToolInstallPlan,
+  ToolInstallProgress,
   ToolInstallRequest,
   ToolInstallResult,
+  ToolUninstallRequest,
+  ToolLaunchPlan,
   UpdateCodexClientSettingsRequest,
   ToolStatus,
   UpdateAppSettingsRequest,
-  UpdateProfileDraftRequest
+  UpdateGatewaySettingsRequest,
+  UpdateProfileDraftRequest,
+  UsageQueryResult,
+  UsageScriptConfig,
+  UsageScriptSaveRequest,
+  UsageScriptState,
+  UsageScriptTemplateType
 } from "../types";
 
 const isTauri = () => Boolean(window.__TAURI_INTERNALS__);
 const codexClientProgressListeners = new Set<(progress: CodexClientProgress) => void>();
+const toolInstallProgressListeners = new Set<(progress: ToolInstallProgress) => void>();
+const installTerminalOutputListeners = new Set<(output: InstallTerminalOutput) => void>();
 const PROTOCOL_OPENAI_CHAT_COMPLETIONS = "openai-chat-completions";
 const PROTOCOL_OPENAI_RESPONSES = "openai-responses";
 const PROTOCOL_ANTHROPIC_MESSAGES = "anthropic-messages";
@@ -62,6 +81,7 @@ const CLAUDE_DESKTOP_DEFAULT_ROUTES = [
   "claude-fable-5"
 ];
 const MOCK_DETECTION_CACHE_KEY = "codestudio-lite:detection-cache";
+const MOCK_LANGUAGE_KEY = "codestudio-lite-language";
 const mockCodexAuthStatus = {
   available: true,
   method: "chat_gpt" as const,
@@ -93,11 +113,34 @@ export async function loadCachedDetection(): Promise<DetectionSnapshot | null> {
   return readMockDetectionCache();
 }
 
+export async function detectEnvironmentFresh(): Promise<DetectionSnapshot> {
+  if (isTauri()) {
+    return invoke("detect_environment_fresh");
+  }
+  const snapshot = mockDetection();
+  writeMockDetectionCache(snapshot);
+  return snapshot;
+}
+
 export async function planToolInstall(toolId: string): Promise<ToolInstallPlan> {
   if (isTauri()) {
     return invoke("plan_tool_install", { toolId });
   }
   return mockToolInstallPlan(toolId);
+}
+
+export async function planToolUpdate(toolId: string): Promise<ToolInstallPlan> {
+  if (isTauri()) {
+    return invoke("plan_tool_update", { toolId });
+  }
+  return mockToolUpdatePlan(toolId);
+}
+
+export async function planToolLaunch(toolId: string): Promise<ToolLaunchPlan> {
+  if (isTauri()) {
+    return invoke("plan_tool_launch", { toolId });
+  }
+  return mockToolLaunchPlan(toolId);
 }
 
 export async function installTool(request: ToolInstallRequest): Promise<ToolInstallResult> {
@@ -121,7 +164,7 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
       stderrTail: "",
       currentStatus: mockFindToolStatus(plan.toolId),
       stageResults: [],
-      notes: plan.warnings
+      notes: []
     };
   }
   if (plan.requiresPrerequisites && !request.installPrerequisites) {
@@ -130,23 +173,30 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
       toolId: plan.toolId,
       toolName: plan.toolName,
       action: "prerequisites-required",
-      message: "安装此工具前需要安装前置依赖，请勾选允许安装前置后再继续。",
+      message: "This tool requires prerequisites. Allow prerequisite installation before continuing.",
       command: plan.command,
       exitCode: null,
       stdoutTail: "",
       stderrTail: "",
       currentStatus: mockFindToolStatus(plan.toolId),
       stageResults: [],
-      notes: plan.warnings
+      notes: []
     };
   }
 
-  await new Promise((resolve) => window.setTimeout(resolve, 800));
+  await new Promise((resolve) => window.setTimeout(resolve, 240));
   const stageResults: ToolInstallResult["stageResults"] = [];
   for (const prerequisite of plan.prerequisites) {
     if (prerequisite.installed) {
       continue;
     }
+    await emitMockToolInstallProgress({
+      rootToolId: request.toolId,
+      toolId: prerequisite.toolId,
+      toolName: prerequisite.toolName,
+      stage: "prerequisite",
+      command: prerequisite.command
+    });
     markMockToolUpdated(prerequisite.toolId);
     if (prerequisite.toolId === "node") {
       markMockToolUpdated("npm");
@@ -160,9 +210,16 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
       exitCode: 0,
       stdoutTail: `browser-dev mock: ${prerequisite.command}`,
       stderrTail: "",
-      message: `${prerequisite.toolName} 前置依赖安装完成。`
+      message: `${prerequisite.toolName} prerequisite installed.`
     });
   }
+  await emitMockToolInstallProgress({
+    rootToolId: request.toolId,
+    toolId: plan.toolId,
+    toolName: plan.toolName,
+    stage: "target",
+    command: plan.commands.find((command) => command.stage === "target")?.command ?? plan.command
+  });
   markMockToolUpdated(request.toolId);
   const currentStatus = mockFindToolStatus(request.toolId);
   writeMockDetectionCache(mockDetection());
@@ -177,8 +234,8 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
     stdoutTail: `browser-dev mock: ${plan.commands.find((command) => command.stage === "target")?.command ?? plan.command}`,
     stderrTail: "",
     message: success
-      ? `${plan.toolName} 安装完成并通过复检。`
-      : `${plan.toolName} 安装命令已结束，但复检仍未确认可用。`
+      ? `${plan.toolName} installed and verified.`
+      : `${plan.toolName} install command finished, but verification still did not confirm it is available.`
   });
   mockActivity = [
     {
@@ -198,15 +255,15 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
     toolName: plan.toolName,
     action: plan.manager,
     message: success
-      ? `${plan.toolName} 安装完成并通过复检。`
-      : `${plan.toolName} 安装命令已结束，但复检仍未确认可用。`,
+      ? `${plan.toolName} installed and verified.`
+      : `${plan.toolName} install command finished, but verification still did not confirm it is available.`,
     command: plan.command,
     exitCode: 0,
     stdoutTail: stageResults.map((stage) => stage.stdoutTail).filter(Boolean).join("\n"),
     stderrTail: "",
     currentStatus,
     stageResults,
-    notes: plan.warnings
+    notes: []
   };
 }
 
@@ -224,7 +281,7 @@ export async function updateTool(request: ToolInstallRequest): Promise<ToolInsta
       toolId: request.toolId,
       toolName: status?.name ?? request.toolId,
       action: "blocked",
-      message: `${status?.name ?? request.toolId} 未安装，无法更新。`,
+      message: `${status?.name ?? request.toolId} is not installed and cannot be updated.`,
       command: status?.updateCommand ?? "",
       exitCode: null,
       stdoutTail: "",
@@ -240,7 +297,7 @@ export async function updateTool(request: ToolInstallRequest): Promise<ToolInsta
       toolId: status.id,
       toolName: status.name,
       action: "blocked",
-      message: `${status.name} 当前没有检测到可用更新。`,
+      message: `${status.name} has no detected update right now.`,
       command: status.updateCommand ?? "",
       exitCode: null,
       stdoutTail: "",
@@ -251,11 +308,17 @@ export async function updateTool(request: ToolInstallRequest): Promise<ToolInsta
     };
   }
 
-  await new Promise((resolve) => window.setTimeout(resolve, 800));
+  await emitMockToolInstallProgress({
+    rootToolId: request.toolId,
+    toolId: status.id,
+    toolName: status.name,
+    stage: "update",
+    command: status.updateCommand
+  });
   markMockToolUpdated(request.toolId);
   const currentStatus = mockFindToolStatus(request.toolId);
   writeMockDetectionCache(mockDetection());
-  const message = `${status.name} 更新命令已完成并通过复检。`;
+  const message = `${status.name} update command completed and verified.`;
   mockActivity = [
     {
       id: `mock-tool-update-${request.toolId}-${Date.now()}`,
@@ -294,6 +357,179 @@ export async function updateTool(request: ToolInstallRequest): Promise<ToolInsta
   };
 }
 
+export async function uninstallTool(request: ToolUninstallRequest): Promise<ToolInstallResult> {
+  if (isTauri()) {
+    return invoke("uninstall_tool", { request });
+  }
+  if (!request.confirm) {
+    throw new Error("explicit confirmation is required");
+  }
+  const status = mockFindToolStatus(request.toolId);
+  if (!status || status.installState !== "installed") {
+    return {
+      success: false,
+      toolId: request.toolId,
+      toolName: status?.name ?? request.toolId,
+      action: "blocked",
+      message: `${status?.name ?? request.toolId} is not installed and cannot be uninstalled.`,
+      command: "",
+      exitCode: null,
+      stdoutTail: "",
+      stderrTail: "",
+      currentStatus: status,
+      stageResults: [],
+      notes: []
+    };
+  }
+
+  const command = mockToolUninstallCommand(status.id);
+  await emitMockToolInstallProgress({
+    rootToolId: request.toolId,
+    toolId: status.id,
+    toolName: status.name,
+    stage: "uninstall",
+    command
+  });
+  mockInstalledToolIds.delete(request.toolId);
+  const currentStatus = mockFindToolStatus(request.toolId);
+  writeMockDetectionCache(mockDetection());
+  const message = `${status.name} uninstalled.`;
+  mockActivity = [
+    {
+      id: `mock-tool-uninstall-${request.toolId}-${Date.now()}`,
+      level: "ok",
+      message,
+      createdAt: new Date().toISOString()
+    },
+    ...mockActivity
+  ];
+
+  return {
+    success: currentStatus?.installState !== "installed",
+    toolId: status.id,
+    toolName: status.name,
+    action: "uninstall",
+    message,
+    command,
+    exitCode: 0,
+    stdoutTail: `browser-dev mock: ${command}`,
+    stderrTail: "",
+    currentStatus,
+    stageResults: [
+      {
+        toolId: status.id,
+        toolName: status.name,
+        stage: "uninstall",
+        command,
+        success: currentStatus?.installState !== "installed",
+        exitCode: 0,
+        stdoutTail: `browser-dev mock: ${command}`,
+        stderrTail: "",
+        message
+      }
+    ],
+    notes: []
+  };
+}
+
+export async function listenToolInstallProgress(
+  handler: (progress: ToolInstallProgress) => void
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<ToolInstallProgress>("tool-install://progress", (event) => handler(event.payload));
+  }
+  toolInstallProgressListeners.add(handler);
+  return () => toolInstallProgressListeners.delete(handler);
+}
+
+export async function startInstallTerminal(
+  request: StartInstallTerminalRequest
+): Promise<StartInstallTerminalResult> {
+  if (isTauri()) {
+    return invoke("start_install_terminal", { request });
+  }
+  const sessionId = `mock-install-terminal-${Date.now()}`;
+  const commandText = [
+    request.keepOpen ? "[keep-open]" : "[run-once]",
+    request.command,
+    request.workingDirectory ? `[cwd:${request.workingDirectory}]` : null,
+    request.profileId ? `[profile:${request.profileId}]` : null
+  ]
+    .filter(Boolean)
+    .join(" ");
+  void simulateInstallTerminalOutput(
+    sessionId,
+    commandText
+  );
+  return {
+    sessionId,
+    toolId: request.toolId,
+    command: request.command,
+    started: true
+  };
+}
+
+export async function launchToolExternal(
+  request: StartInstallTerminalRequest
+): Promise<ExternalToolLaunchResult> {
+  if (isTauri()) {
+    return invoke("launch_tool_external", { request });
+  }
+  return {
+    started: true,
+    toolId: request.toolId,
+    command: request.command
+  };
+}
+
+export async function writeInstallTerminal(request: InstallTerminalInputRequest): Promise<void> {
+  if (isTauri()) {
+    return invoke("write_install_terminal", { request });
+  }
+  installTerminalOutputListeners.forEach((listener) =>
+    listener({
+      sessionId: request.sessionId,
+      stream: "output",
+      data: request.data,
+      done: false,
+      exitCode: null
+    })
+  );
+}
+
+export async function resizeInstallTerminal(request: InstallTerminalResizeRequest): Promise<void> {
+  if (isTauri()) {
+    return invoke("resize_install_terminal", { request });
+  }
+}
+
+export async function stopInstallTerminal(request: StopInstallTerminalRequest): Promise<void> {
+  if (isTauri()) {
+    return invoke("stop_install_terminal", { request });
+  }
+  installTerminalOutputListeners.forEach((listener) =>
+    listener({
+      sessionId: request.sessionId,
+      stream: "status",
+      data: "",
+      done: true,
+      exitCode: null
+    })
+  );
+}
+
+export async function listenInstallTerminalOutput(
+  handler: (output: InstallTerminalOutput) => void
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<InstallTerminalOutput>("install-terminal://output", (event) => handler(event.payload));
+  }
+  installTerminalOutputListeners.add(handler);
+  return () => installTerminalOutputListeners.delete(handler);
+}
+
 export async function repairToolPath(request: RepairToolPathRequest): Promise<RepairToolPathResult> {
   if (isTauri()) {
     return invoke("repair_tool_path", { request });
@@ -308,7 +544,7 @@ export async function repairToolPath(request: RepairToolPathRequest): Promise<Re
       toolId: request.toolId,
       toolName: status?.name ?? request.toolId,
       addedPath: null,
-      message: "没有可修复的 PATH 候选。",
+      message: "No repairable PATH candidate is available.",
       currentStatus: status,
       notes: []
     };
@@ -321,7 +557,7 @@ export async function repairToolPath(request: RepairToolPathRequest): Promise<Re
     toolId: request.toolId,
     toolName: currentStatus?.name ?? status.name,
     addedPath: status.pathRepair.directory,
-    message: `已把 ${status.pathRepair.directory} 加入用户 PATH。`,
+    message: `Added ${status.pathRepair.directory} to the user PATH.`,
     currentStatus,
     notes: []
   };
@@ -344,7 +580,7 @@ export async function clearClaudeEnvironmentVariables(
     toolId: "claude",
     cleared,
     skipped: [],
-    message: "Claude 全局环境变量已清理。",
+    message: "Claude global environment variables were cleared.",
     conflicts: mockClaudeEnvConflicts
   };
 }
@@ -448,6 +684,16 @@ export async function restartGateway(): Promise<GatewayControlResult> {
   return { status: mockGatewayStatus() };
 }
 
+export async function updateGatewaySettings(
+  request: UpdateGatewaySettingsRequest
+): Promise<GatewayControlResult> {
+  if (isTauri()) {
+    return invoke("update_gateway_settings", { request });
+  }
+  mockGatewayPrivacyFilterMode = request.privacyFilterMode ?? mockGatewayPrivacyFilterMode;
+  return { status: mockGatewayStatus() };
+}
+
 export async function loadActivityLog(): Promise<ActivityEvent[]> {
   if (isTauri()) {
     return invoke("load_activity_log");
@@ -460,6 +706,15 @@ export async function loadGatewayRequestLog(): Promise<GatewayRequestLogEntry[]>
     return invoke("load_gateway_request_log");
   }
   return mockGatewayRequests;
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  if (isTauri()) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 export async function loadBackups(): Promise<BackupManifest[]> {
@@ -483,7 +738,7 @@ export async function restoreBackup(request: RestoreBackupRequest): Promise<Rest
     id: new Date().toISOString().replaceAll(":", "-"),
     reason: "restore-current",
     profile: mockDefaultActiveProfileId(),
-    changedFiles: ["~/.codestudio-lite/config.toml"],
+    changedFiles: ["~/.codestudio-lite/app_state.sqlite"],
     createdAt: new Date().toISOString()
   };
   mockBackupSnapshots[safetyBackup.id] = cloneMockActiveProfilesByMode();
@@ -512,6 +767,13 @@ export async function inspectCodexClient(): Promise<CodexClientState> {
   return mockCodexClientState(false);
 }
 
+export async function loadCachedCodexClientState(): Promise<CodexClientState | null> {
+  if (isTauri()) {
+    return invoke("load_cached_codex_client_state");
+  }
+  return null;
+}
+
 export async function planCodexClientUpdate(): Promise<CodexClientState> {
   if (isTauri()) {
     return invoke("plan_codex_client_update");
@@ -524,12 +786,12 @@ export async function stageCodexClientUpdate(): Promise<CodexClientStageReport> 
     return invoke("stage_codex_client_update");
   }
   await simulateCodexClientProgress([
-    { phase: "preparing", message: "正在读取镜像 manifest 与 checksums...", downloaded: null, total: null, percent: null, step: 1, stepTotal: 4 },
-    { phase: "downloading", message: "正在下载安装包...", downloaded: 46000000, total: 552187367, percent: 8.3, step: 2, stepTotal: 4 },
-    { phase: "downloading", message: "正在下载安装包...", downloaded: 178000000, total: 552187367, percent: 32.2, step: 2, stepTotal: 4 },
-    { phase: "downloading", message: "正在下载安装包...", downloaded: 394000000, total: 552187367, percent: 71.3, step: 2, stepTotal: 4 },
-    { phase: "verifying", message: "正在校验安装包 SHA-256...", downloaded: null, total: null, percent: null, step: 3, stepTotal: 4 },
-    { phase: "done", message: "安装包已下载并通过 SHA-256 校验。", downloaded: 552187367, total: 552187367, percent: 100, step: 4, stepTotal: 4 }
+    { phase: "preparing", message: "codexClient.progressStageReading", downloaded: null, total: null, percent: null, step: 1, stepTotal: 4 },
+    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 46000000, total: 552187367, percent: 8.3, step: 2, stepTotal: 4 },
+    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 178000000, total: 552187367, percent: 32.2, step: 2, stepTotal: 4 },
+    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 394000000, total: 552187367, percent: 71.3, step: 2, stepTotal: 4 },
+    { phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 4 },
+    { phase: "done", message: "codexClient.progressStageDone", downloaded: 552187367, total: 552187367, percent: 100, step: 4, stepTotal: 4 }
   ]);
   return mockCodexClientStageReport();
 }
@@ -544,15 +806,15 @@ export async function installCodexClient(
     throw new Error("explicit confirmation is required");
   }
   await simulateCodexClientProgress([
-    { phase: "preparing", message: "正在确认安装状态与更新计划...", downloaded: null, total: null, percent: null, step: 1, stepTotal: 7 },
-    { phase: "downloading", message: "正在下载安装包...", downloaded: 220000000, total: 552187367, percent: 39.8, step: 2, stepTotal: 7 },
-    { phase: "downloading", message: "正在下载安装包...", downloaded: 552187367, total: 552187367, percent: 100, step: 2, stepTotal: 7 },
-    { phase: "verifying", message: "正在校验安装包 SHA-256...", downloaded: null, total: null, percent: null, step: 3, stepTotal: 7 },
-    { phase: "extracting", message: "正在解包 MSIX 安装包...", downloaded: 38, total: 120, percent: 31.7, step: 4, stepTotal: 7 },
-    { phase: "copying", message: "正在复制便携版文件...", downloaded: null, total: null, percent: null, step: 5, stepTotal: 7 },
-    { phase: "writing", message: "正在写入安装目录...", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
-    { phase: "finalizing", message: "正在创建快捷方式与卸载项...", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
-    { phase: "done", message: "Codex 客户端安装流程已完成。", downloaded: 1, total: 1, percent: 100, step: 7, stepTotal: 7 }
+    { phase: "preparing", message: "codexClient.progressInstallConfirming", downloaded: null, total: null, percent: null, step: 1, stepTotal: 7 },
+    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 220000000, total: 552187367, percent: 39.8, step: 2, stepTotal: 7 },
+    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 552187367, total: 552187367, percent: 100, step: 2, stepTotal: 7 },
+    { phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 7 },
+    { phase: "extracting", message: "codexClient.progressExtractingMsix", downloaded: 38, total: 120, percent: 31.7, step: 4, stepTotal: 7 },
+    { phase: "copying", message: "codexClient.progressCopyingPortable", downloaded: null, total: null, percent: null, step: 5, stepTotal: 7 },
+    { phase: "writing", message: "codexClient.progressWritingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
+    { phase: "finalizing", message: "codexClient.progressFinalizingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
+    { phase: "done", message: "codexClient.progressInstallDone", downloaded: 1, total: 1, percent: 100, step: 7, stepTotal: 7 }
   ]);
   mockCodexClientInstalled = {
     path: mockCodexClientSettings.windowsInstallMode === "portable"
@@ -569,7 +831,7 @@ export async function installCodexClient(
   return {
     success: true,
     action: mockCodexClientInstalled.source === "portable" ? "portable-fallback" : "msix-sideload",
-    message: `Codex 客户端已就绪：${mockCodexClientInstalled.version}`,
+    message: `Codex is ready: ${mockCodexClientInstalled.version}`,
     installed: mockCodexClientInstalled,
     stage: mockCodexClientStageReport(),
     notes: ["browser-dev mock: install path is simulated."]
@@ -589,16 +851,22 @@ export async function uninstallCodexClient(
   return {
     success: true,
     action: "remove-portable",
-    message: "Codex 客户端卸载完成。",
+    message: "Codex uninstalled.",
     installed: null,
     stage: null,
-    notes: [request.purgeUserData ? "已删除 ~/.codex 用户数据。" : "已保留 ~/.codex 用户数据。"]
+    notes: [request.purgeUserData ? "Deleted ~/.codex user data." : "Kept ~/.codex user data."]
   };
 }
 
 export async function launchCodexClient(): Promise<void> {
   if (isTauri()) {
     return invoke("launch_codex_client");
+  }
+}
+
+export async function launchClaudeDesktop(request: ClaudeDesktopLaunchRequest = {}): Promise<void> {
+  if (isTauri()) {
+    return invoke("launch_claude_desktop", { localize: request.localize });
   }
 }
 
@@ -617,6 +885,8 @@ export async function updateCodexClientSettings(
     windowsInstallMode: request.windowsInstallMode ?? mockCodexClientSettings.windowsInstallMode,
     installRoot: request.installRoot ?? mockCodexClientSettings.installRoot,
     keepUserDataOnUninstall: request.keepUserDataOnUninstall ?? mockCodexClientSettings.keepUserDataOnUninstall,
+    syncHistoryOnLaunch: request.syncHistoryOnLaunch ?? mockCodexClientSettings.syncHistoryOnLaunch,
+    patchForcePluginUnlock: request.patchForcePluginUnlock ?? mockCodexClientSettings.patchForcePluginUnlock,
     signedOnly: true
   };
   return mockCodexClientSettings;
@@ -702,7 +972,7 @@ export async function testProfileConnection(
     id: "network",
     label: "Provider ping",
     status: "info",
-    detail: `Network provider checks are not sent yet. Timeout is set to ${request.timeoutSeconds ?? 120}s.`
+    detail: "Network provider checks are not sent yet."
   });
 
   const status = aggregateStatus(checks.map((check) => check.status));
@@ -728,16 +998,14 @@ export async function saveProfileDraft(request: SaveProfileDraftRequest): Promis
     return invoke("save_profile_draft", { request });
   }
 
-  if (providerIsOfficial(request.provider)) {
-    throw new Error("Official profiles are built in and cannot be saved as custom profiles.");
-  }
+  const app = canonicalProfileApp(request.app);
+  const mode = normalizeMockProfileMode(request.provider, request.mode);
+  ensureCustomOfficialProfileAllowed(app, request.provider, mode);
   if (providerRequiresApiKey(request.provider) && !request.secretProvided) {
     throw new Error("Provider API key is required for non-official providers.");
   }
-  validateBaseUrlOrThrow(request.baseUrl);
+  validateBaseUrlForProviderOrThrow(request.provider, request.baseUrl);
 
-  const app = canonicalProfileApp(request.app);
-  const mode = normalizeMockProfileMode(request.provider, request.mode);
   const protocol = normalizeMockProtocol(request.protocol);
   ensureMockProfileProtocolSupported(app, mode, request.provider, protocol);
   const profileId = uniqueMockProfileId(slugify(request.name));
@@ -745,6 +1013,8 @@ export async function saveProfileDraft(request: SaveProfileDraftRequest): Promis
   const profile: ProfileDraft = {
     id: profileId,
     name: request.name.trim(),
+    icon: normalizeMockProfileIcon(request.icon),
+    remark: normalizeMockProfileRemark(request.remark),
     app,
     isBuiltin: false,
     mode,
@@ -752,11 +1022,12 @@ export async function saveProfileDraft(request: SaveProfileDraftRequest): Promis
     protocol,
     model: request.model.trim(),
     baseUrl: request.baseUrl.trim(),
-    authRef: request.secretProvided ? `keychain:codestudio-lite/${profileId}/api_key` : null,
-    timeoutSeconds: request.timeoutSeconds ?? 120,
+    authRef: providerIsOfficial(request.provider) ? null : request.secretProvided ? `keychain:codestudio-lite/${profileId}/api_key` : null,
     createdAt: now,
     updatedAt: now,
-    lastTestStatus: "pending"
+    lastTestStatus: "pending",
+    usageEnabled: false,
+    sortOrder: nextMockProfileSortOrder(app, mode)
   };
   mockProfileDrafts = [...mockProfileDrafts, profile];
   mockActivity = [
@@ -770,6 +1041,18 @@ export async function saveProfileDraft(request: SaveProfileDraftRequest): Promis
   ];
 
   return profile;
+}
+
+export async function startCodexOAuthLogin(): Promise<StartCodexOAuthLoginResult> {
+  if (isTauri()) {
+    return invoke("start_codex_oauth_login");
+  }
+  await openExternalUrl("https://developers.openai.com/codex/auth");
+  return {
+    started: true,
+    command: null,
+    message: "Opened the official Codex authorization page."
+  };
 }
 
 export async function updateProfileDraft(request: UpdateProfileDraftRequest): Promise<ProfileDraft> {
@@ -787,15 +1070,13 @@ export async function updateProfileDraft(request: UpdateProfileDraftRequest): Pr
   if (!request.name.trim()) {
     throw new Error("Profile Name is required");
   }
-  if (providerIsOfficial(request.provider)) {
-    throw new Error("Official profiles are built in and cannot be saved as custom profiles.");
-  }
   const existing = mockProfileDrafts[index];
   const mode = normalizeMockProfileMode(request.provider, request.mode ?? existing.mode);
   const protocol = normalizeMockProtocol(request.protocol ?? existing.protocol);
   const app = canonicalProfileApp(existing.app);
+  ensureCustomOfficialProfileAllowed(app, request.provider, mode);
   ensureMockProfileProtocolSupported(app, mode, request.provider, protocol);
-  validateBaseUrlOrThrow(request.baseUrl);
+  validateBaseUrlForProviderOrThrow(request.provider, request.baseUrl);
   if (providerRequiresApiKey(request.provider) && !existing.authRef && !request.apiKey?.trim()) {
     throw new Error("Provider API key is required for non-official providers.");
   }
@@ -804,16 +1085,18 @@ export async function updateProfileDraft(request: UpdateProfileDraftRequest): Pr
   const updated: ProfileDraft = {
     ...existing,
     name: request.name.trim(),
+    icon: normalizeMockProfileIcon(request.icon),
+    remark: normalizeMockProfileRemark(request.remark),
     app,
     mode,
     provider: request.provider.trim(),
     protocol,
     model: request.model.trim(),
     baseUrl: request.baseUrl.trim(),
-    authRef: hasNewSecret ? existing.authRef ?? `keychain:codestudio-lite/${existing.id}/api_key` : existing.authRef,
-    timeoutSeconds: request.timeoutSeconds ?? 120,
+    authRef: providerIsOfficial(request.provider) ? null : hasNewSecret ? existing.authRef ?? `keychain:codestudio-lite/${existing.id}/api_key` : existing.authRef,
     updatedAt: new Date().toISOString(),
-    lastTestStatus: "pending"
+    lastTestStatus: "pending",
+    usageEnabled: mockUsageScripts.get(existing.id)?.enabled ?? existing.usageEnabled
   };
   mockProfileDrafts = [
     ...mockProfileDrafts.slice(0, index),
@@ -855,7 +1138,8 @@ export async function duplicateProfileDraft(request: DuplicateProfileDraftReques
     isBuiltin: false,
     authRef: existing.authRef ? `keychain:codestudio-lite/${profileId}/api_key` : null,
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    sortOrder: nextMockProfileSortOrder(canonicalProfileApp(existing.app), existing.mode)
   };
 
   mockProfileDrafts = [...mockProfileDrafts, duplicated];
@@ -872,96 +1156,124 @@ export async function duplicateProfileDraft(request: DuplicateProfileDraftReques
   return duplicated;
 }
 
-export async function exportProfiles(): Promise<ExportProfilesResult> {
+export async function deleteProfileDraft(request: DeleteProfileDraftRequest): Promise<ProfileSummary> {
   if (isTauri()) {
-    return invoke("export_profiles");
+    return invoke("delete_profile_draft", { request });
   }
 
-  const exportedAt = new Date().toISOString();
-  return {
-    fileName: `codestudio-lite-profiles-${exportedAt.replace(/[:.]/g, "-")}.json`,
-    bundle: {
-      schemaVersion: 2,
-      app: "CodeStudio Lite",
-      exportedAt,
-      activeProfilesByMode: cloneMockActiveProfilesByMode(),
-      profiles: mockProfileDrafts.map((profile) => ({ ...profile, authRef: null })),
-      warnings: [
-        "Provider API keys are not exported. Imported profiles need their API key saved again before direct config file mode can use them.",
-        "Importing profiles does not automatically enable them for any tool."
-      ]
-    }
-  };
-}
-
-export async function importProfiles(request: ImportProfilesRequest): Promise<ImportProfilesResult> {
-  if (isTauri()) {
-    return invoke("import_profiles", { request });
+  const existing = mockAllProfiles().find((draft) => draft.id === request.profileId);
+  if (!existing) {
+    throw new Error(`Profile '${request.profileId}' does not exist`);
+  }
+  if (existing.isBuiltin || isBuiltinOfficialProfileId(existing.id)) {
+    throw new Error("Built-in official profiles cannot be deleted.");
   }
 
-  const importedProfiles = parseMockImportProfiles(request.content);
-  const now = new Date().toISOString();
-  const imported: ProfileDraft[] = [];
-  const skipped: string[] = [];
-
-  importedProfiles.forEach((profile, index) => {
-    try {
-      const name = requireMockField("Profile Name", profile.name);
-      const app = canonicalProfileApp(requireMockToken("Client", profile.app));
-      const provider = requireMockToken("Provider", profile.provider);
-      if (profile.isBuiltin) {
-        throw new Error("Built-in official profiles cannot be imported.");
-      }
-      if (providerIsOfficial(provider)) {
-        throw new Error("Official profiles are built in and cannot be imported.");
-      }
-      const mode = normalizeMockProfileMode(provider, profile.mode);
-      const protocol = normalizeMockProtocol(profile.protocol);
-      ensureMockProfileProtocolSupported(app, mode, provider, protocol);
-      const baseUrl = requireMockField("Base URL", profile.baseUrl);
-      validateBaseUrlOrThrow(baseUrl);
-      const preferredId = slugify(profile.id || name);
-      if (isBuiltinOfficialProfileId(preferredId)) {
-        throw new Error("Built-in official profile IDs are reserved.");
-      }
-      const id = uniqueMockProfileId(preferredId);
-      imported.push({
-        id,
-        name,
-        app,
-        isBuiltin: false,
-        mode,
-        provider,
-        protocol,
-        model: typeof profile.model === "string" ? profile.model.trim() : "",
-        baseUrl,
-        authRef: null,
-        timeoutSeconds: normalizeMockTimeout(profile.timeoutSeconds),
-        createdAt: profile.createdAt || now,
-        updatedAt: now,
-        lastTestStatus: "pending"
-      });
-    } catch (err) {
-      skipped.push(`${profile.name?.trim() || `profile #${index + 1}`}: ${err instanceof Error ? err.message : String(err)}`);
+  mockProfileDrafts = mockProfileDrafts.filter((draft) => draft.id !== request.profileId);
+  for (const [app, profileId] of Object.entries(mockActiveProfilesByMode.config)) {
+    if (profileId === request.profileId) {
+      const canonicalApp = canonicalProfileApp(app);
+      delete mockActiveProfilesByMode.config[app];
+      mockActiveProfilesByMode.config[canonicalApp] = builtinOfficialProfileId(canonicalApp);
     }
-  });
-
-  mockProfileDrafts = [...mockProfileDrafts, ...imported];
+  }
+  for (const [app, profileId] of Object.entries(mockActiveProfilesByMode.gateway)) {
+    if (profileId === request.profileId) {
+      delete mockActiveProfilesByMode.gateway[app];
+    }
+  }
+  cleanMockActiveProfilesByMode();
   mockActivity = [
     {
-      id: `mock-import-${Date.now()}`,
-      level: imported.length > 0 ? "ok" : "warning",
-      message: `Imported ${imported.length} profile draft(s); skipped ${skipped.length}.`,
+      id: `mock-profile-delete-${Date.now()}`,
+      level: "ok",
+      message: `Deleted profile draft '${existing.name}' for ${existing.app}/${existing.provider}.`,
       createdAt: new Date().toISOString()
     },
     ...mockActivity
   ];
 
-  return {
-    imported,
-    skipped,
-    summary: mockProfiles()
-  };
+  return mockProfiles();
+}
+
+export async function reorderProfileDrafts(request: ReorderProfileDraftsRequest): Promise<ProfileSummary> {
+  if (isTauri()) {
+    return invoke("reorder_profile_drafts", { request });
+  }
+
+  const app = canonicalProfileApp(request.app);
+  const profiles = mockAllProfiles().filter(
+    (profile) => canonicalProfileApp(profile.app) === app && profile.mode === request.mode
+  );
+  const expectedIds = new Set(profiles.map((profile) => profile.id));
+  const requestedIds = new Set(request.profileIds);
+  if (expectedIds.size !== requestedIds.size || [...expectedIds].some((profileId) => !requestedIds.has(profileId))) {
+    throw new Error("Profile order must include every profile in this tool category.");
+  }
+
+  mockProfileOrder[mockProfileOrderKey(app, request.mode)] = [...request.profileIds];
+  const orderById = new Map(request.profileIds.map((profileId, index) => [profileId, index]));
+  mockProfileDrafts = mockProfileDrafts.map((profile) => {
+    const order = orderById.get(profile.id);
+    return order === undefined ? profile : { ...profile, sortOrder: order };
+  });
+  return mockProfiles();
+}
+
+export async function loadUsageScriptState(profileId: string): Promise<UsageScriptState> {
+  if (isTauri()) {
+    return invoke("load_usage_script_state", { profileId });
+  }
+  return mockUsageScriptState(profileId);
+}
+
+export async function saveUsageScript(request: UsageScriptSaveRequest): Promise<UsageScriptState> {
+  if (isTauri()) {
+    return invoke("save_usage_script", { request });
+  }
+  const profile = mockAllProfiles().find((draft) => draft.id === request.profileId);
+  if (!profile) {
+    throw new Error(`Profile '${request.profileId}' does not exist`);
+  }
+  const config = mockUsageConfigFromRequest(request, mockUsageScripts.get(request.profileId));
+  mockUsageScripts.set(request.profileId, config);
+  return mockUsageScriptState(request.profileId);
+}
+
+export async function testUsageScript(request: UsageScriptSaveRequest): Promise<UsageQueryResult> {
+  if (isTauri()) {
+    return invoke("test_usage_script", { request });
+  }
+  const profile = mockAllProfiles().find((draft) => draft.id === request.profileId);
+  if (profile && isCodexOfficialProfile(profile)) {
+    throw new Error("Codex official OAuth usage can be queried directly; no custom script test is needed.");
+  }
+  return mockUsageResult(request.profileId, "test");
+}
+
+export async function queryProfileUsage(profileId: string): Promise<UsageQueryResult> {
+  if (isTauri()) {
+    return invoke("query_profile_usage", { profileId });
+  }
+  const config = mockUsageScripts.get(profileId);
+  if (!config) {
+    throw new Error("Usage query is not configured for this profile.");
+  }
+  if (!config.enabled) {
+    throw new Error("Usage query is disabled for this profile.");
+  }
+  const result = mockUsageResult(profileId, "query");
+  mockUsageResults.set(profileId, result);
+  return result;
+}
+
+export async function deleteUsageScript(profileId: string): Promise<UsageScriptState> {
+  if (isTauri()) {
+    return invoke("delete_usage_script", { profileId });
+  }
+  mockUsageScripts.delete(profileId);
+  mockUsageResults.delete(profileId);
+  return mockUsageScriptState(profileId);
 }
 
 export async function previewProfileWrite(
@@ -973,7 +1285,7 @@ export async function previewProfileWrite(
 
   const app = canonicalProfileApp(request.app);
   const profileId = uniqueMockProfileId(slugify(request.name));
-  const profilePath = `~/.codestudio-lite/profiles/${profileId}.toml`;
+  const profilePath = "~/.codestudio-lite/app_state.sqlite";
   const tool = mockDetection().tools.find((item) => item.id === app);
   const targetToolPath = tool?.configPath ?? mockToolConfigPath(app);
   const warnings: string[] = [];
@@ -981,16 +1293,15 @@ export async function previewProfileWrite(
   if (!request.name.trim()) {
     throw new Error("Profile Name is required");
   }
-  if (providerIsOfficial(request.provider)) {
-    throw new Error("Official profiles are built in and cannot be saved as custom profiles.");
-  }
+  const mode = normalizeMockProfileMode(request.provider, request.mode);
+  ensureCustomOfficialProfileAllowed(app, request.provider, mode);
   if (providerRequiresApiKey(request.provider) && !request.secretProvided) {
     throw new Error("Provider API key is required for non-official providers.");
   }
-  validateBaseUrlOrThrow(request.baseUrl);
-  const mode = normalizeMockProfileMode(request.provider, request.mode);
+  validateBaseUrlForProviderOrThrow(request.provider, request.baseUrl);
   const protocol = normalizeMockProtocol(request.protocol);
   ensureMockProfileProtocolSupported(app, mode, request.provider, protocol);
+  const icon = normalizeMockProfileIcon(request.icon);
 
   if (profileId !== slugify(request.name)) {
     warnings.push(`Profile id '${slugify(request.name)}' already exists, so this draft will use '${profileId}'.`);
@@ -999,19 +1310,21 @@ export async function previewProfileWrite(
     warnings.push(`Tool '${app}' is not in the preview registry.`);
   }
   const generatedAt = new Date().toISOString();
-  const profileContent = mockProfileTomlContent({
+  const remark = normalizeMockProfileRemark(request.remark);
+  const profileContent = mockProfileSqlPreviewContent({
     id: profileId,
     name: request.name.trim(),
+    icon,
+    remark,
     app,
     mode,
     provider: request.provider.trim(),
     protocol,
     model: request.model.trim(),
     baseUrl: request.baseUrl.trim(),
-    authRef: request.secretProvided ? `keychain:codestudio-lite/${profileId}/api_key` : null,
-    timeoutSeconds: normalizeMockTimeout(request.timeoutSeconds),
+    authRef: providerIsOfficial(request.provider) ? null : request.secretProvided ? `keychain:codestudio-lite/${profileId}/api_key` : null,
     timestamp: generatedAt,
-    secretStatus: request.secretProvided ? "pending_keychain" : "missing"
+    secretStatus: providerIsOfficial(request.provider) ? "oauth" : request.secretProvided ? "pending_keychain" : "missing"
   });
   return {
     generatedAt,
@@ -1022,16 +1335,16 @@ export async function previewProfileWrite(
     warnings,
     items: [
       {
-        label: "Profile draft",
+        label: "Profile row",
         path: profilePath,
         action: "create",
         backupRequired: false,
-        detail: `Save Profile Draft writes normalized metadata for ${mockProtocolLabel(protocol)}/${request.provider} and excludes API keys.`,
+        detail: `Save Profile Draft stores normalized metadata in SQLite for ${mockProtocolLabel(protocol)}/${request.provider} and excludes API keys.`,
         content: profileContent
       },
       {
         label: "Active tool profile pointer",
-        path: "~/.codestudio-lite/config.toml",
+        path: profilePath,
         action: "not_modified",
         backupRequired: false,
         detail: "Saving a draft does not switch the active profile.",
@@ -1073,7 +1386,7 @@ export async function previewProfileApply(
   const tool = mockDetection().tools.find((item) => item.id === profile.app);
   const nativeConfigPath =
     mockNativeConfigPath(profile.app, profile.mode, profile.provider) ?? tool?.configPath ?? mockToolConfigPath(profile.app);
-  const appliedPath = `~/.codestudio-lite/applied/${profile.app}-active.toml`;
+  const appliedPath = "~/.codestudio-lite/app_state.sqlite";
   const canApply = Boolean(tool) || isCodexTool;
   const configNativeDiff = mockNativeConfigPreview(profile, nativeConfigPath, "config");
   const gatewayNativeDiff = mockNativeConfigPreview(profile, nativeConfigPath, "gateway");
@@ -1094,17 +1407,10 @@ export async function previewProfileApply(
     items: [
       {
         label: "Active tool profile pointer",
-        path: "~/.codestudio-lite/config.toml",
-        action: "update",
-        backupRequired: true,
-        detail: `Sets CodeStudio Lite active profile for '${profile.app}' to '${profile.id}' before refreshing detection.`
-      },
-      {
-        label: "Managed tool binding",
         path: appliedPath,
-        action: "create_or_update",
-        backupRequired: true,
-        detail: `Writes CodeStudio-managed adapter metadata for ${profile.app}/${profile.provider}. API keys are not written.`
+        action: "update",
+        backupRequired: false,
+        detail: `Sets the SQLite active profile pointer for '${profile.app}' to '${profile.id}' before refreshing detection.`
       },
       {
         label: `${tool?.name ?? "Target tool"} native config`,
@@ -1112,7 +1418,7 @@ export async function previewProfileApply(
         action: nativeDiff ? "create_or_update" : "not_modified",
         backupRequired: Boolean(nativeDiff),
         detail: nativeDiff
-          ? "Selected mode writes this client config; detailed file changes are shown below."
+          ? "Selected profile type writes this client config; detailed file changes are shown below."
           : "This profile does not require a native client config write."
       },
       {
@@ -1120,7 +1426,7 @@ export async function previewProfileApply(
         path: null,
         action: "not_written",
         backupRequired: false,
-        detail: "CodeStudio Lite profile metadata never stores plaintext API keys. Config file mode may write the selected Provider key into the target client's native config."
+        detail: "CodeStudio Lite profile metadata never stores plaintext API keys. Config profiles may write the selected Provider key into the target client's native config."
       }
     ]
   };
@@ -1136,7 +1442,7 @@ export async function applyProfile(request: ApplyProfileRequest): Promise<ApplyP
     throw new Error(`Profile '${request.profileId}' does not exist`);
   }
   if (mockProfileIsActive(profile)) {
-    throw new Error("Profile is already active for this tool and mode.");
+    throw new Error("Profile is already active for this tool and profile category.");
   }
   const preview = await previewProfileApply(request);
   if (!preview.canApply) {
@@ -1144,19 +1450,19 @@ export async function applyProfile(request: ApplyProfileRequest): Promise<ApplyP
   }
   const mode = profile.mode;
   if (request.restartAfterApply && mode !== "config") {
-    throw new Error("Apply and restart is only available for Config file mode.");
+    throw new Error("Apply and restart is only available for Config profiles.");
   }
   const syncClaudeVsCode =
     Boolean(request.syncClaudeVsCode) && mode === "config" && canonicalProfileApp(profile.app) === "claude";
   const selectedModePreview = preview.modePreviews.find((item) => item.mode === mode);
   if (!selectedModePreview?.supported) {
-    throw new Error(selectedModePreview?.blockedReason ?? `${mode} mode is not supported for this profile.`);
+    throw new Error(selectedModePreview?.blockedReason ?? `${mode} is not supported for this profile.`);
   }
   if (request.restartAfterApply && !selectedModePreview.writesNativeConfig) {
     throw new Error("Apply and restart requires a native client config write for this profile.");
   }
   const backupId = new Date().toISOString().replaceAll(":", "-");
-  const appliedPath = `~/.codestudio-lite/applied/${profile.app}-active.toml`;
+  const appliedPath = "~/.codestudio-lite/app_state.sqlite";
   const nativePath = selectedModePreview.writesNativeConfig ? selectedModePreview.nativeDiff?.path ?? null : null;
   const restartMessage = request.restartAfterApply ? mockRestartMessageForProfile(profile) : null;
   mockBackupSnapshots[backupId] = cloneMockActiveProfilesByMode();
@@ -1166,8 +1472,6 @@ export async function applyProfile(request: ApplyProfileRequest): Promise<ApplyP
     reason: "apply-profile",
     profile: profile.id,
     changedFiles: [
-      "~/.codestudio-lite/config.toml",
-      appliedPath,
       ...(nativePath ? [nativePath] : []),
       ...(syncClaudeVsCode ? ["~/.claude/config.json"] : [])
     ],
@@ -1179,8 +1483,8 @@ export async function applyProfile(request: ApplyProfileRequest): Promise<ApplyP
       id: `mock-apply-${Date.now()}`,
       level: "ok",
       message: mode === "gateway"
-        ? `Applied profile '${profile.name}' for ${profile.app}/${profile.provider} in Gateway mode.`
-        : `Applied profile '${profile.name}' for ${profile.app}/${profile.provider} through direct client config file mode.`,
+        ? `Applied profile '${profile.name}' for ${profile.app}/${profile.provider} in Gateway profile.`
+        : `Applied profile '${profile.name}' for ${profile.app}/${profile.provider} through direct client config profile.`,
       createdAt: new Date().toISOString()
     },
     ...mockActivity
@@ -1204,9 +1508,46 @@ export async function applyProfile(request: ApplyProfileRequest): Promise<ApplyP
 
 let mockActiveProfilesByMode: ActiveProfilesByMode = emptyActiveProfilesByMode();
 
+function normalizeMockLocale(value: string | null | undefined): AppSettings["language"] | null {
+  const normalized = value?.trim().replaceAll("_", "-").toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (
+    normalized.startsWith("zh-hant") ||
+    normalized.startsWith("zh-tw") ||
+    normalized.startsWith("zh-hk") ||
+    normalized.startsWith("zh-mo")
+  ) {
+    return "zh-TW";
+  }
+  if (normalized.startsWith("zh")) {
+    return "zh-CN";
+  }
+  if (normalized.startsWith("en")) {
+    return "en-US";
+  }
+  return null;
+}
+
+function initialMockLanguage(): AppSettings["language"] {
+  const stored = typeof localStorage === "undefined" ? null : normalizeMockLocale(localStorage.getItem(MOCK_LANGUAGE_KEY));
+  if (stored) {
+    return stored;
+  }
+  const detected = typeof navigator === "undefined"
+    ? null
+    : (navigator.languages ?? [navigator.language]).map(normalizeMockLocale).find(Boolean) ?? null;
+  const language = detected ?? "en-US";
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(MOCK_LANGUAGE_KEY, language);
+  }
+  return language;
+}
+
 let mockSettings: AppSettings = {
   theme: "system",
-  language: "zh-CN",
+  language: initialMockLanguage(),
   backupBeforeWrite: true,
   redactSecrets: true,
   confirmInstallCommands: true,
@@ -1218,6 +1559,8 @@ let mockGatewayRunning = false;
 
 let mockGatewayStartedAt: string | null = null;
 
+let mockGatewayPrivacyFilterMode: GatewayStatus["privacyFilterMode"] = "off";
+
 let mockCodexClientSettings: CodexClientSettings = {
   source: "mirror",
   customUrl: "",
@@ -1226,7 +1569,9 @@ let mockCodexClientSettings: CodexClientSettings = {
   signedOnly: true,
   windowsInstallMode: "msix",
   installRoot: "C:\\Users\\you\\AppData\\Local\\Programs\\Codex",
-  keepUserDataOnUninstall: true
+  keepUserDataOnUninstall: true,
+  syncHistoryOnLaunch: false,
+  patchForcePluginUnlock: false
 };
 
 let mockCodexClientInstalled: CodexClientState["installed"] = null;
@@ -1244,7 +1589,7 @@ let mockClaudeEnvConflicts = [
     expectedValuePreview: "https://api.anthropic.com",
     scope: "user",
     severity: "warning" as const,
-    message: "ANTHROPIC_BASE_URL 会影响 Claude API 连接，且与当前 CodeStudio 配置不一致。"
+    message: "ANTHROPIC_BASE_URL affects Claude API connections and does not match the current CodeStudio configuration."
   }
 ];
 const mockInitialToolVersions: Record<string, string> = {
@@ -1349,16 +1694,17 @@ let mockBackups: BackupManifest[] = [];
 let mockBackupSnapshots: Record<string, ActiveProfilesByMode> = {};
 
 let mockProfileDrafts: ProfileDraft[] = [];
+let mockProfileOrder: Record<string, string[]> = {};
 
 const builtinOfficialProfileDefinitions = [
-  ["codex", "Codex 官方", PROTOCOL_OPENAI_RESPONSES],
-  ["claude-desktop", "Claude Desktop 官方", PROTOCOL_ANTHROPIC_MESSAGES],
-  ["claude", "Claude Code 官方", PROTOCOL_ANTHROPIC_MESSAGES],
-  ["gemini", "Gemini CLI 官方", PROTOCOL_GOOGLE_GEMINI],
-  ["gemini-code-assist", "Gemini Code Assist 官方", PROTOCOL_GOOGLE_GEMINI],
-  ["opencode", "OpenCode 官方", PROTOCOL_OPENAI_CHAT_COMPLETIONS],
-  ["openclaw", "OpenClaw 官方", PROTOCOL_OPENAI_CHAT_COMPLETIONS],
-  ["hermes", "Hermes 官方", PROTOCOL_OPENAI_CHAT_COMPLETIONS]
+  ["codex", "Codex Official", PROTOCOL_OPENAI_RESPONSES],
+  ["claude-desktop", "Claude Desktop Official", PROTOCOL_ANTHROPIC_MESSAGES],
+  ["claude", "Claude Code Official", PROTOCOL_ANTHROPIC_MESSAGES],
+  ["gemini", "Gemini CLI Official", PROTOCOL_GOOGLE_GEMINI],
+  ["gemini-code-assist", "Gemini Code Assist Official", PROTOCOL_GOOGLE_GEMINI],
+  ["opencode", "OpenCode Official", PROTOCOL_OPENAI_CHAT_COMPLETIONS],
+  ["openclaw", "OpenClaw Official", PROTOCOL_OPENAI_CHAT_COMPLETIONS],
+  ["hermes", "Hermes Official", PROTOCOL_OPENAI_CHAT_COMPLETIONS]
 ] as const;
 
 function builtinOfficialProfileId(app: string): string {
@@ -1373,6 +1719,8 @@ function builtinOfficialProfiles(): ProfileDraft[] {
   return builtinOfficialProfileDefinitions.map(([app, name, protocol]) => ({
     id: builtinOfficialProfileId(app),
     name,
+    icon: null,
+    remark: null,
     app,
     isBuiltin: true,
     mode: "config",
@@ -1381,15 +1729,96 @@ function builtinOfficialProfiles(): ProfileDraft[] {
     model: "",
     baseUrl: "",
     authRef: null,
-    timeoutSeconds: 120,
     createdAt: null,
     updatedAt: null,
-    lastTestStatus: "builtin"
+    lastTestStatus: "builtin",
+    usageEnabled: false,
+    sortOrder: 0
   }));
 }
 
+function normalizeMockProfileIcon(value?: string | null): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.startsWith("data:image/")) {
+    if (trimmed.length > 512 * 1024) {
+      throw new Error("Profile icon image is too large.");
+    }
+    return trimmed;
+  }
+  if ([...trimmed].length > 4) {
+    throw new Error("Profile icon text cannot be longer than 4 characters.");
+  }
+  return trimmed;
+}
+
+function normalizeMockProfileRemark(value?: string | null): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function mockAllProfiles(): ProfileDraft[] {
-  return [...builtinOfficialProfiles(), ...mockProfileDrafts];
+  return applyMockProfileOrder(
+    [...builtinOfficialProfiles(), ...mockProfileDrafts].map((profile) => ({
+      ...profile,
+      usageEnabled: mockUsageScripts.get(profile.id)?.enabled ?? profile.usageEnabled
+    }))
+  ).sort(compareMockProfiles);
+}
+
+function nextMockProfileSortOrder(app: string, mode: ProviderApplyMode): number {
+  const matching = mockAllProfiles().filter(
+    (profile) => canonicalProfileApp(profile.app) === app && profile.mode === mode
+  );
+  return matching.reduce((max, profile) => Math.max(max, profile.sortOrder), -1) + 1;
+}
+
+function mockProfileOrderKey(app: string, mode: ProviderApplyMode): string {
+  return `${canonicalProfileApp(app)}:${mode}`;
+}
+
+function applyMockProfileOrder(profiles: ProfileDraft[]): ProfileDraft[] {
+  const nextProfiles = profiles.map((profile) => ({ ...profile }));
+  const groups = new Set(
+    nextProfiles.map((profile) => mockProfileOrderKey(profile.app, profile.mode))
+  );
+  for (const groupKey of groups) {
+    const storedOrder = mockProfileOrder[groupKey];
+    if (!storedOrder?.length) {
+      continue;
+    }
+    const orderById = new Map(storedOrder.map((profileId, index) => [profileId, index]));
+    let nextUnorderedIndex = storedOrder.length;
+    const groupProfiles = nextProfiles
+      .filter((profile) => mockProfileOrderKey(profile.app, profile.mode) === groupKey)
+      .sort(compareMockProfiles);
+    for (const profile of groupProfiles) {
+      const storedIndex = orderById.get(profile.id);
+      profile.sortOrder = storedIndex ?? nextUnorderedIndex;
+      if (storedIndex === undefined) {
+        nextUnorderedIndex += 1;
+      }
+    }
+  }
+  return nextProfiles;
+}
+
+function compareMockProfiles(left: ProfileDraft, right: ProfileDraft): number {
+  const appCompare = canonicalProfileApp(left.app).localeCompare(canonicalProfileApp(right.app));
+  if (appCompare !== 0) {
+    return appCompare;
+  }
+  const modeCompare = left.mode.localeCompare(right.mode);
+  if (modeCompare !== 0) {
+    return modeCompare;
+  }
+  const orderCompare = left.sortOrder - right.sortOrder;
+  if (orderCompare !== 0) {
+    return orderCompare;
+  }
+  return left.name.localeCompare(right.name);
 }
 
 let mockActivity: ActivityEvent[] = [
@@ -1418,9 +1847,212 @@ let mockGatewayRequests: GatewayRequestLogEntry[] = [
     model: null,
     status: 200,
     latencyMs: 12,
-    errorSummary: null
+    errorSummary: null,
+    privacyFilterMode: "redact",
+    privacyFilterHitCount: 2,
+    privacyFilterAction: "redacted"
   }
 ];
+
+const mockUsageScripts = new Map<string, UsageScriptConfig>();
+const mockUsageResults = new Map<string, UsageQueryResult>();
+
+function mockDefaultUsageScript(templateType: UsageScriptTemplateType) {
+  if (templateType === "newapi") {
+    return `({
+  request: {
+    url: "{{baseUrl}}/api/user/self",
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer {{accessToken}}",
+      "User-Agent": "codestudio-lite/1.0",
+      "New-Api-User": "{{userId}}"
+    }
+  },
+  extractor: function(response) {
+    if (response.success && response.data) {
+      return {
+        planName: response.data.group || "Default",
+        remaining: response.data.quota / 500000,
+        used: response.data.used_quota / 500000,
+        total: (response.data.quota + response.data.used_quota) / 500000,
+        unit: "USD"
+      };
+    }
+    return { isValid: false, invalidMessage: response.message || "Query failed" };
+  }
+})`;
+  }
+  if (templateType === "token_plan") {
+    return `({
+  request: {
+    url: "{{baseUrl}}/api/user/self",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    var data = response.data || response;
+    var total = data.total || data.quota || data.entitlement || 0;
+    var used = data.used || data.used_quota || 0;
+    return {
+      planName: data.plan || data.plan_name || data.group || "Token plan",
+      remaining: data.remaining !== undefined ? data.remaining : Math.max(total - used, 0),
+      used: used,
+      total: total,
+      unit: data.unit || "tokens"
+    };
+  }
+})`;
+  }
+  if (templateType === "balance") {
+    return `({
+  request: {
+    url: "{{baseUrl}}/dashboard/billing/credit_grants",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    var total = response.total_granted || response.total_available || response.balance || 0;
+    var used = response.total_used || 0;
+    return {
+      remaining: response.total_available !== undefined ? response.total_available : Math.max(total - used, 0),
+      used: used,
+      total: total,
+      unit: "USD"
+    };
+  }
+})`;
+  }
+  return `({
+  request: {
+    url: "{{baseUrl}}/user/balance",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    return {
+      isValid: response.is_active !== false,
+      remaining: response.balance,
+      unit: "USD"
+    };
+  }
+})`;
+}
+
+function mockUsageScriptState(profileId: string): UsageScriptState {
+  const config = mockUsageScripts.get(profileId) ?? null;
+  return {
+    profileId,
+    config,
+    lastResult: mockUsageResults.get(profileId) ?? null,
+    defaultCode: mockDefaultUsageScript(config?.templateType ?? "general")
+  };
+}
+
+function mockUsageConfigFromRequest(
+  request: UsageScriptSaveRequest,
+  existing: UsageScriptConfig | undefined
+): UsageScriptConfig {
+  const now = new Date().toISOString();
+  const profile = mockAllProfiles().find((draft) => draft.id === request.profileId);
+  const codexOfficial = profile ? isCodexOfficialProfile(profile) : false;
+  return {
+    profileId: request.profileId,
+    enabled: request.enabled,
+    templateType: codexOfficial ? "general" : request.templateType,
+    code: codexOfficial ? "" : request.code.trim() || mockDefaultUsageScript(request.templateType),
+    apiKey: codexOfficial
+      ? null
+      : request.apiKey?.trim()
+        ? `keychain:codestudio-lite/${request.profileId}/usage_api_key`
+        : null,
+    baseUrl: codexOfficial ? null : request.baseUrl?.trim() || null,
+    accessToken: codexOfficial
+      ? null
+      : request.accessToken?.trim()
+        ? `keychain:codestudio-lite/${request.profileId}/usage_access_token`
+        : null,
+    userId: codexOfficial ? null : request.userId?.trim() || null,
+    timeoutSeconds: request.timeoutSeconds ?? existing?.timeoutSeconds ?? 10,
+    autoQueryIntervalMinutes: request.autoQueryIntervalMinutes ?? existing?.autoQueryIntervalMinutes ?? 0,
+    updatedAt: now
+  };
+}
+
+function mockUsageResult(profileId: string, source: string): UsageQueryResult {
+  const profile = mockAllProfiles().find((draft) => draft.id === profileId);
+  if (!profile) {
+    throw new Error(`Profile '${profileId}' does not exist`);
+  }
+  if (isCodexOfficialProfile(profile)) {
+    return {
+      success: true,
+      data: [
+        {
+          isValid: true,
+          planName: "Codex 5h limit (pro)",
+          remaining: 58,
+          used: 42,
+          total: 100,
+          unit: "%",
+          extra: "Window: 5h / Reset: 1h"
+        },
+        {
+          isValid: true,
+          planName: "Codex weekly limit (pro)",
+          remaining: 93,
+          used: 7,
+          total: 100,
+          unit: "%",
+          extra: "Window: 7d"
+        },
+        {
+          isValid: true,
+          planName: "Lifetime tokens (pro)",
+          remaining: null,
+          used: 123456,
+          total: null,
+          unit: "tokens",
+          extra: "Mock official OAuth usage"
+        }
+      ],
+      error: null,
+      queriedAt: new Date().toISOString(),
+      source: "codex_official_oauth"
+    };
+  }
+  return {
+    success: true,
+    data: [
+      {
+        isValid: true,
+        planName: profile.provider === "newapi" ? "Default" : "API Balance",
+        remaining: 18.42,
+        used: 6.58,
+        total: 25,
+        unit: "USD",
+        extra: "Mock query result"
+      }
+    ],
+    error: null,
+    queriedAt: new Date().toISOString(),
+    source
+  };
+}
+
+function isCodexOfficialProfile(profile: ProfileDraft): boolean {
+  return isCodexFamilyApp(profile.app) && providerIsOfficial(profile.provider);
+}
 
 function mockTool(overrides: Partial<ToolStatus> & Pick<ToolStatus, "id" | "name" | "command">): ToolStatus {
   return {
@@ -1433,8 +2065,10 @@ function mockTool(overrides: Partial<ToolStatus> & Pick<ToolStatus, "id" | "name
     installState: "missing",
     configState: "unknown",
     configPath: null,
+    installPath: null,
     installCommand: null,
     details: null,
+    running: false,
     ...overrides
   };
 }
@@ -1486,6 +2120,7 @@ function readMockDetectionCache(): DetectionSnapshot | null {
     return {
       ...snapshot,
       source: "cached",
+      platform: snapshot.platform ?? "windows",
       envConflicts: snapshot.envConflicts ?? []
     };
   } catch {
@@ -1630,16 +2265,16 @@ function mockDetection(): DetectionSnapshot {
     }),
     mockTool({
       id: "codex-app",
-      name: "Codex 客户端",
+      name: "Codex",
       command: "Codex.exe",
       version: mockCodexClientInstalled?.version ?? null,
       installState: mockCodexClientInstalled ? "installed" : "missing",
       configState: "configured",
       configPath: "~/.codex",
-      installCommand: "在 Codex 客户端页面中安装或更新",
+      installCommand: "Install or update from the Codex page",
       details: mockCodexClientInstalled
         ? `${mockCodexClientInstalled.source} / ${mockCodexClientInstalled.path}`
-        : "未检测到官方 Codex 桌面客户端",
+        : "Official Codex desktop was not detected",
       ...mockToolUpdateFields("codex-app")
     })
   ];
@@ -1696,7 +2331,7 @@ function mockDetection(): DetectionSnapshot {
             status: "warning",
             candidatePath: "C:\\Users\\you\\AppData\\Roaming\\npm\\pnpm.cmd",
             directory: "C:\\Users\\you\\AppData\\Roaming\\npm",
-            message: "已在常见安装目录发现 pnpm.cmd，但当前 PATH 无法直接解析命令 pnpm。"
+            message: "Found pnpm.cmd in a common install directory, but the current PATH cannot resolve command pnpm."
           },
       ...mockToolUpdateFields("pnpm")
     }),
@@ -1717,6 +2352,7 @@ function mockDetection(): DetectionSnapshot {
   return {
     generatedAt,
     source: "preview",
+    platform: "windows",
     homeDir: "~",
     appConfigDir,
     activeProfile: mockDefaultActiveProfileId(),
@@ -1751,7 +2387,10 @@ function mockFindToolStatus(toolId: string): ToolStatus | null {
 
 function mockToolInstallPlan(toolId: string): ToolInstallPlan {
   const status = mockFindToolStatus(toolId);
-  const definitions: Record<string, { toolName: string; manager: string; command: string; dependency?: string }> = {
+  const definitions: Record<
+    string,
+    { toolName: string; manager: string; command: string; dependency?: string; interactive?: boolean }
+  > = {
     codex: { toolName: "Codex CLI", manager: "npm", command: "npm install -g @openai/codex" },
     "codex-vscode": {
       toolName: "Codex VS Code",
@@ -1779,8 +2418,9 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
     openclaw: { toolName: "OpenClaw", manager: "npm", command: "npm install -g openclaw" },
     hermes: {
       toolName: "Hermes",
-      manager: "powershell",
-      command: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\""
+      manager: "terminal",
+      command: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\"",
+      interactive: true
     },
     node: {
       toolName: "Node.js",
@@ -1792,7 +2432,7 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
       manager: "winget",
       command: "winget install --id Git.Git --exact --accept-source-agreements --accept-package-agreements --disable-interactivity"
     },
-    npm: { toolName: "npm", manager: "dependency", command: "由 Node.js LTS 提供", dependency: "Node.js LTS" },
+    npm: { toolName: "npm", manager: "dependency", command: "Provided by Node.js LTS", dependency: "Node.js LTS" },
     pnpm: { toolName: "pnpm", manager: "npm", command: "npm install -g pnpm" },
     bun: {
       toolName: "Bun",
@@ -1802,14 +2442,14 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
   };
   const definition = definitions[toolId];
   if (!definition) {
-    throw new Error(`工具 '${toolId}' 不在安装白名单中。`);
+    throw new Error(`Tool '${toolId}' is not allowed for installation.`);
   }
   const alreadyInstalled = status?.installState === "installed";
   const missingDependency = definition.manager === "npm" && !mockInstalledToolIds.has("npm");
   const blocker = alreadyInstalled
-    ? `${definition.toolName} 已安装，无需重复安装。`
+    ? `${definition.toolName} is already installed.`
     : definition.dependency
-      ? `${definition.toolName} 由 ${definition.dependency} 提供，请安装 ${definition.dependency}。`
+      ? `${definition.toolName} is provided by ${definition.dependency}; install ${definition.dependency}.`
       : null;
   const prerequisites: ToolInstallPlan["prerequisites"] = missingDependency
     ? [
@@ -1820,7 +2460,7 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
           command: "winget install --id OpenJS.NodeJS.LTS --exact --accept-source-agreements --accept-package-agreements --disable-interactivity",
           installed: mockInstalledToolIds.has("node"),
           canInstall: true,
-          reason: "目标工具需要 npm；npm 随 Node.js LTS 提供。"
+          reason: "The target tool requires npm; npm is provided by Node.js LTS."
         }
       ]
     : [];
@@ -1833,7 +2473,8 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
         stage: "prerequisite",
         manager: prerequisite.manager,
         command: prerequisite.command,
-        requiresAdmin: true
+        requiresAdmin: true,
+        interactive: false
       })),
     {
       toolId,
@@ -1841,7 +2482,8 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
       stage: "target",
       manager: definition.manager,
       command: definition.command,
-      requiresAdmin: definition.manager === "winget"
+      requiresAdmin: definition.manager === "winget",
+      interactive: Boolean(definition.interactive)
     }
   ];
   const canInstall = !alreadyInstalled && !blocker;
@@ -1851,6 +2493,7 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
     toolName: definition.toolName,
     manager: definition.manager,
     command: commands.map((item) => item.command).join(" && "),
+    interactive: Boolean(definition.interactive),
     commands,
     prerequisites,
     requiresPrerequisites: prerequisites.some((prerequisite) => !prerequisite.installed),
@@ -1858,22 +2501,150 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
     alreadyInstalled,
     requiresAdmin: definition.manager === "winget" || prerequisites.some((prerequisite) => !prerequisite.installed),
     steps: buildMockInstallSteps(definition, status?.command ?? toolId),
-    warnings: definition.manager === "winget"
-      ? ["部分 winget 包可能触发系统安装权限提示；CodeStudio Lite 不会绕过系统确认。"]
-      : definition.manager === "npm"
-        ? [
-            ...(missingDependency
-              ? ["此计划包含前置依赖安装：Node.js LTS 会先安装，随后再安装目标 npm 包。"]
-              : []),
-            "全局 npm 安装会写入当前用户或当前 npm 前缀目录，完成后可能需要重新打开终端。"
-          ]
-        : definition.manager === "powershell"
-          ? ["此计划会运行目标工具官方发布的 PowerShell 安装脚本；请只在信任该工具来源时确认。"]
-        : definition.manager === "vscode"
-          ? ["VS Code 扩展会安装到当前用户的 VS Code 配置中，完成后可能需要重启 VS Code。"]
-        : [],
+    warnings: [],
     blocker
   };
+}
+
+function mockToolLaunchPlan(toolId: string): ToolLaunchPlan {
+  const status = mockFindToolStatus(toolId);
+  if (!status) {
+    throw new Error(`Tool '${toolId}' is not supported for launch.`);
+  }
+  const canonicalApp = canonicalProfileApp(toolId);
+  const command =
+    canonicalApp === "claude-desktop"
+      ? "Claude"
+      : ["codex-vscode", "claude-vscode", "gemini-code-assist"].includes(toolId)
+        ? "code"
+        : status.command;
+  return {
+    toolId: canonicalApp,
+    toolName: status.name,
+    command,
+    canLaunch: status.installState === "installed",
+    blocker: status.installState === "installed" ? null : `${status.name} cannot be found.`,
+    shells: [
+      {
+        id: "cmd",
+        label: "Command Prompt",
+        command: "cmd.exe",
+        available: true,
+        default: true
+      },
+      {
+        id: "powershell",
+        label: "Windows PowerShell 5",
+        command: "powershell.exe",
+        available: true,
+        default: false
+      },
+      {
+        id: "pwsh",
+        label: "PowerShell 7",
+        command: "pwsh.exe",
+        available: false,
+        default: false
+      }
+    ],
+    profiles: mockAllProfiles()
+      .filter((profile) => canonicalProfileApp(profile.app) === canonicalApp && profile.mode === "config")
+      .map((profile) => ({
+        id: profile.id,
+        name: profile.name,
+        mode: profile.mode,
+        provider: profile.provider,
+        baseUrl: profile.baseUrl,
+        isBuiltin: profile.isBuiltin
+      }))
+  };
+}
+
+function mockToolUpdatePlan(toolId: string): ToolInstallPlan {
+  const status = mockFindToolStatus(toolId);
+  const update = mockToolUpdates[toolId];
+  if (!status) {
+    throw new Error(`Tool '${toolId}' is not allowed for updates.`);
+  }
+
+  const manager = mockUpdateManager(status.updateCommand ?? update?.command ?? "");
+  const command = status.updateCommand ?? update?.command ?? "";
+  const installed = status.installState === "installed";
+  const supported = Boolean(command);
+  const canInstall = installed && supported && status.updateAvailable;
+  const blocker = !installed
+    ? `${status.name} is not installed and cannot be updated.`
+    : !supported
+      ? `${status.name} does not have a built-in update action.`
+      : !status.updateAvailable
+        ? `${status.name} has no detected update right now.`
+        : null;
+
+  return {
+    toolId,
+    toolName: status.name,
+    manager,
+    command,
+    interactive: false,
+    commands: [
+      {
+        toolId,
+        toolName: status.name,
+        stage: "update",
+        manager,
+        command,
+        requiresAdmin: manager === "winget",
+        interactive: false
+      }
+    ],
+    prerequisites: [],
+    requiresPrerequisites: false,
+    canInstall,
+    alreadyInstalled: installed,
+    requiresAdmin: manager === "winget",
+    steps: [
+      { label: "Check installed app", detail: `Confirm ${status.name} is installed before updating.` },
+      { label: "Run update command", detail: command ? `Run ${command}.` : "No update command is available." },
+      { label: "Verify version", detail: "Refresh detection after the update command finishes." }
+    ],
+    warnings: [],
+    blocker
+  };
+}
+
+function mockToolUninstallCommand(toolId: string) {
+  if (toolId === "claude-desktop") {
+    return "winget uninstall --id Anthropic.Claude --exact";
+  }
+  if (toolId === "claude-vscode") {
+    return "code --uninstall-extension anthropic.claude-code";
+  }
+  if (toolId === "codex-vscode") {
+    return "code --uninstall-extension openai.chatgpt";
+  }
+  if (toolId === "gemini-code-assist") {
+    return "code --uninstall-extension Google.geminicodeassist";
+  }
+  return `uninstall ${toolId}`;
+}
+
+function mockUpdateManager(command: string): string {
+  if (command.startsWith("npm ")) {
+    return "npm";
+  }
+  if (command.startsWith("winget ")) {
+    return "winget";
+  }
+  if (command.startsWith("code ")) {
+    return "vscode";
+  }
+  if (command.startsWith("powershell ")) {
+    return "powershell";
+  }
+  if (command.startsWith("brew ")) {
+    return "homebrew";
+  }
+  return command ? "shell" : "manual";
 }
 
 function buildMockInstallSteps(
@@ -1883,41 +2654,41 @@ function buildMockInstallSteps(
   if (definition.dependency) {
     return [
       {
-        label: "安装上游依赖",
-        detail: `${definition.toolName} 没有独立安装包。`
+        label: "Install upstream dependency",
+        detail: `${definition.toolName} does not have a standalone installer.`
       }
     ];
   }
   if (definition.manager === "winget") {
     return [
-      { label: "检查 winget", detail: "需要 Windows App Installer / winget 可用。" },
-      { label: "安装软件包", detail: `执行 ${definition.command}。` },
-      { label: "复检命令", detail: `安装后运行 ${commandName} --version 并刷新仪表盘。` }
+      { label: "Check winget", detail: "Windows App Installer / winget must be available." },
+      { label: "Install package", detail: `Run ${definition.command}.` },
+      { label: "Verify command", detail: `After installation, run ${commandName} --version and refresh the dashboard.` }
     ];
   }
   if (definition.manager === "powershell") {
     return [
-      { label: "检查 PowerShell", detail: "需要本机 PowerShell 可用。" },
-      { label: "运行官方安装脚本", detail: `执行 ${definition.command}。` },
-      { label: "复检命令", detail: `安装后运行 ${commandName} --version 并刷新仪表盘。` }
+      { label: "Check PowerShell", detail: "Local PowerShell must be available." },
+      { label: "Run official install script", detail: `Run ${definition.command}.` },
+      { label: "Verify command", detail: `After installation, run ${commandName} --version and refresh the dashboard.` }
     ];
   }
   if (definition.manager === "vscode") {
     return [
-      { label: "检查 VS Code CLI", detail: "需要本机 code 命令可用。" },
-      { label: "安装 VS Code 扩展", detail: `执行 ${definition.command}。` },
-      { label: "复检扩展", detail: "安装后运行 code --list-extensions --show-versions 并刷新仪表盘。" }
+      { label: "Check VS Code CLI", detail: "The local code command must be available." },
+      { label: "Install VS Code extension", detail: `Run ${definition.command}.` },
+      { label: "Verify extension", detail: "After installation, run code --list-extensions --show-versions and refresh the dashboard." }
     ];
   }
   const steps = [
-    { label: "检查 npm", detail: "需要本机 npm 可用；npm 通常随 Node.js LTS 一起安装。" },
-    { label: "安装全局包", detail: `执行 ${definition.command}。` },
-    { label: "复检命令", detail: `安装后运行 ${commandName} --version 并刷新仪表盘。` }
+    { label: "Check npm", detail: "Local npm must be available; npm usually ships with Node.js LTS." },
+    { label: "Install global package", detail: `Run ${definition.command}.` },
+    { label: "Verify command", detail: `After installation, run ${commandName} --version and refresh the dashboard.` }
   ];
   if (!mockInstalledToolIds.has("npm")) {
     steps.unshift({
-      label: "安装前置依赖",
-      detail: "检测到 npm 不可用；允许后会先通过 winget 安装 Node.js LTS。"
+      label: "Install prerequisite",
+      detail: "npm is not available; if allowed, Node.js LTS will be installed through winget first."
     });
   }
   return steps;
@@ -1960,29 +2731,30 @@ function mockCodexClientState(includeNetwork: boolean, installClass = mockCodexC
           stagedPath: null,
           installRoot: mockCodexClientSettings.installRoot,
           warnings: mockCodexClientSettings.windowsInstallMode === "portable"
-            ? ["当前计划会安装便携版，并在开始菜单与卸载项中登记。"]
+            ? ["The current plan will install the portable build and register Start menu and uninstall entries."]
             : [],
           capabilities: [
             {
               id: "add-appx",
               label: "Add-AppxPackage",
               status: "ok",
-              detail: "MSIX 安装命令可用。"
+              detail: "MSIX install command is available."
             },
             {
               id: "msix-runtime",
-              label: "MSIX 运行时",
+              label: "MSIX runtime",
               status: "ok",
-              detail: "Windows PackageManager 可激活。"
+              detail: "Windows PackageManager can be activated."
             }
           ]
         }
       : null,
     stagingDir: "~/.codestudio-lite/downloads/codex-client",
     notes: [
-      "Codex 客户端管理复刻 Codex-App-Manager 的安装、更新、卸载、启动和镜像源流程。",
-      "不会修改 Codex 安装包内容；下载后先做 SHA-256 校验，再进入安装步骤。"
-    ]
+      "Codex management covers install, update, uninstall, launch, and mirror-source flows.",
+      "The Codex installer content is not modified; downloads are SHA-256 verified before installation."
+    ],
+    running: false
   };
 }
 
@@ -1995,7 +2767,7 @@ function mockCodexClientStageReport(): CodexClientStageReport {
     sha256: "547618a744149221078a27febdfff65c924b46ff85ab2fe1595180e128be8d85",
     hashVerified: true,
     route: mockCodexClientSettings.windowsInstallMode === "portable" ? "portable-fallback" : "msix-sideload",
-    notes: ["安装包已下载并通过 SHA-256 校验。"]
+    notes: ["Installer downloaded and passed SHA-256 verification."]
   };
 }
 
@@ -2006,11 +2778,74 @@ async function simulateCodexClientProgress(steps: CodexClientProgress[]) {
   }
 }
 
+async function emitMockToolInstallProgress(stage: {
+  rootToolId: string;
+  toolId: string;
+  toolName: string;
+  stage: string;
+  command: string;
+}) {
+  const lines = [
+    `> ${stage.command}`,
+    `Resolving ${stage.toolName} package...`,
+    `Running ${stage.stage} command...`
+  ];
+  for (const line of lines) {
+    toolInstallProgressListeners.forEach((listener) =>
+      listener({
+        ...stage,
+        stream: "stdout",
+        chunk: `${line}\n`,
+        done: false,
+        exitCode: null
+      })
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 140));
+  }
+  toolInstallProgressListeners.forEach((listener) =>
+    listener({
+      ...stage,
+      stream: "status",
+      chunk: "",
+      done: true,
+      exitCode: 0
+    })
+  );
+}
+
+async function simulateInstallTerminalOutput(sessionId: string, _command: string) {
+  const lines = [
+    `CodeStudio Lite interactive installer\r\n`,
+    "Mock installer completed.\r\n"
+  ];
+  for (const line of lines) {
+    installTerminalOutputListeners.forEach((listener) =>
+      listener({
+        sessionId,
+        stream: "output",
+        data: line,
+        done: false,
+        exitCode: null
+      })
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+  }
+  markMockToolUpdated("hermes");
+  writeMockDetectionCache(mockDetection());
+  installTerminalOutputListeners.forEach((listener) =>
+    listener({
+      sessionId,
+      stream: "status",
+      data: "",
+      done: true,
+      exitCode: 0
+    })
+  );
+}
+
 function mockProfiles(): ProfileSummary {
   return {
     configDir: "~/.codestudio-lite",
-    profilesDir: "~/.codestudio-lite/profiles",
-    backupsDir: "~/.codestudio-lite/backups",
     activeProfile: mockDefaultActiveProfileId(),
     activeProfileName: mockActiveProfileName(),
     activeProfilesByMode: cloneMockActiveProfilesByMode(),
@@ -2029,6 +2864,7 @@ function mockGatewayStatus(): GatewayStatus {
     healthUrl: "http://127.0.0.1:43112/health",
     authEnabled: true,
     tokenPreview: "codestudio-local-****7f3a2c",
+    privacyFilterMode: mockGatewayPrivacyFilterMode,
     activeProfileId: activeProfile?.id ?? null,
     activeProfileName: activeProfile?.name ?? null,
     activeModel: activeProfile?.model ?? null,
@@ -2184,7 +3020,7 @@ function mockNativeConfigPreview(
   mode: ProviderApplyMode
 ): PreviewProfileApplyResult["nativeDiff"] {
   if (!isCodexFamilyApp(profile.app)) {
-    return mockNonCodexNativeConfigPreview(profile, nativeConfigPath, mode);
+    return withMockNativeContent(mockNonCodexNativeConfigPreview(profile, nativeConfigPath, mode));
   }
 
   if (mode === "config") {
@@ -2193,7 +3029,7 @@ function mockNativeConfigPreview(
       return null;
     }
     if (profile.provider === "official") {
-      return {
+      return withMockNativeContent({
         tool: "codex",
         path: nativeConfigPath ?? "~/.codex/config.toml",
         status: "preview",
@@ -2239,11 +3075,11 @@ function mockNativeConfigPreview(
           "Official provider uses the target client's own login.",
           "No Provider API key or model override is required."
         ]
-      };
+      });
     }
 
     const providerId = `codestudio-${slugify(profile.provider)}`;
-    return {
+    return withMockNativeContent({
       tool: "codex",
       path: nativeConfigPath ?? "~/.codex/config.toml",
       status: "preview",
@@ -2293,15 +3129,15 @@ function mockNativeConfigPreview(
         }
       ],
       warnings: [
-        "Config file mode writes Codex's provider entry directly to the selected upstream Provider.",
+        "Config profiles write Codex's provider entry directly to the selected upstream Provider.",
         "The preview masks the Provider API key. The actual key is loaded from the system keychain during apply.",
         "Changing Codex config usually requires restarting Codex or opening a new Codex session."
       ]
-    };
+    });
   }
 
   const gatewayBaseUrl = mockGatewayBaseUrlForTool(profile.app);
-  return {
+  return withMockNativeContent({
     tool: "codex",
     path: nativeConfigPath ?? "~/.codex/config.toml",
     status: "preview",
@@ -2344,12 +3180,34 @@ function mockNativeConfigPreview(
       }
     ],
     warnings: [
-      "Gateway mode is a one-time relay injection target, not a direct Provider switch.",
+      "Gateway profiles are a one-time relay injection target, not a direct Provider switch.",
       "Switching profiles later changes only the Gateway active profile for this tool.",
       "The preview masks the local CodeStudio token. Real Provider API keys are never written to Codex config.",
       "Codex official login is still required for the desktop app; the Local Gateway only takes over model requests.",
       "If Codex is already running, restart Codex or open a new Codex session after bootstrap so it reloads config.toml."
     ]
+  });
+}
+
+function withMockNativeContent(
+  preview: PreviewProfileApplyResult["nativeDiff"]
+): PreviewProfileApplyResult["nativeDiff"] {
+  if (!preview || preview.content) {
+    return preview;
+  }
+  const lines = [
+    `# ${preview.tool}`,
+    `# ${preview.path}`,
+    ...preview.changes
+      .map((change) =>
+        change.after === null
+          ? `# remove ${change.key}`
+          : `${change.key} = ${JSON.stringify(change.after)}`
+      )
+  ];
+  return {
+    ...preview,
+    content: lines.join("\n")
   };
 }
 
@@ -2373,10 +3231,6 @@ function mockNonCodexNativeConfigPreview(
     return mockClaudeDesktopNativeConfigPreview(profile, nativeConfigPath, mode);
   }
 
-  if (providerIsOfficial(profile.provider)) {
-    return null;
-  }
-
   if (mode === "gateway") {
     return mockNonCodexGatewayNativeConfigPreview(profile, nativeConfigPath);
   }
@@ -2397,6 +3251,10 @@ function mockNonCodexNativeConfigPreview(
     nativeConfigPath ??
     mockToolConfigPath(app) ??
     "~/.codestudio-lite/native-config";
+
+  if (providerIsOfficial(profile.provider)) {
+    return mockNonCodexOfficialNativeConfigPreview(app, path);
+  }
 
   if (app === "claude") {
     return {
@@ -2428,7 +3286,7 @@ function mockNonCodexNativeConfigPreview(
         }
       ],
       warnings: [
-        "Config file mode writes Claude Code user settings under the env section.",
+        "Config profiles write Claude Code user settings under the env section.",
         "The selected endpoint must be Anthropic/Claude-compatible; generic OpenAI-only endpoints need a translator.",
         "Restart Claude Code or open a new session after applying so settings reload."
       ]
@@ -2654,8 +3512,204 @@ function mockNonCodexNativeConfigPreview(
       warnings: [
         "Hermes custom providers are written to ~/.hermes/config.yaml under the model section.",
         "Existing YAML comments are not preserved when CodeStudio Lite writes the file.",
-        "Hermes config file mode currently targets OpenAI Chat Completions endpoints."
+        "Hermes config profiles currently target OpenAI Chat Completions endpoints."
       ]
+    };
+  }
+
+  return null;
+}
+
+function mockNonCodexOfficialNativeConfigPreview(
+  app: string,
+  path: string
+): PreviewProfileApplyResult["nativeDiff"] {
+  const base = {
+    tool: app,
+    path,
+    status: "preview",
+    writeEnabled: true
+  };
+
+  if (app === "claude") {
+    return {
+      ...base,
+      changes: [
+        {
+          key: "env.ANTHROPIC_BASE_URL",
+          action: "remove",
+          before: "https://api.example.test/v1",
+          after: null,
+          detail: "Restores Claude Code to the client's own official endpoint."
+        },
+        {
+          key: "env.ANTHROPIC_AUTH_TOKEN",
+          action: "remove",
+          before: "<redacted>",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed API token from Claude settings."
+        },
+        {
+          key: "model",
+          action: "remove",
+          before: "claude-sonnet-4-5",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed model override."
+        },
+        {
+          key: "env.ANTHROPIC_MODEL",
+          action: "remove",
+          before: "claude-sonnet-4-5",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed model environment override."
+        }
+      ],
+      warnings: [
+        "Official provider restores Claude Code to its own login.",
+        "CodeStudio Lite removes managed API or Gateway fields from Claude settings."
+      ]
+    };
+  }
+
+  if (app === "gemini") {
+    return {
+      ...base,
+      changes: [
+        {
+          key: "GEMINI_API_KEY",
+          action: "remove",
+          before: "<redacted>",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed Gemini API key."
+        },
+        {
+          key: "GOOGLE_GEMINI_BASE_URL",
+          action: "remove",
+          before: "https://api.example.test/v1",
+          after: null,
+          detail: "Restores Gemini CLI to the client's own official endpoint."
+        },
+        {
+          key: "GEMINI_MODEL",
+          action: "remove",
+          before: "gemini-2.5-pro",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed model override."
+        }
+      ],
+      warnings: [
+        "Official provider restores Gemini CLI to its own login.",
+        "CodeStudio Lite removes managed API or Gateway values from ~/.gemini/.env."
+      ]
+    };
+  }
+
+  if (app === "gemini-code-assist") {
+    return {
+      ...base,
+      changes: [
+        {
+          key: "geminicodeassist.geminiApiKey",
+          action: "remove",
+          before: "<redacted>",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed Gemini Code Assist API key."
+        }
+      ],
+      warnings: [
+        "Official provider restores Gemini Code Assist to its own login.",
+        "CodeStudio Lite removes the managed API key setting from VS Code user settings."
+      ]
+    };
+  }
+
+  if (app === "opencode") {
+    return {
+      ...base,
+      changes: [
+        {
+          key: "provider.codestudio-*",
+          action: "remove",
+          before: "managed provider entries",
+          after: null,
+          detail: "Removes CodeStudio Lite managed OpenCode provider entries."
+        },
+        {
+          key: "model",
+          action: "remove",
+          before: "codestudio-local/codestudio-default",
+          after: null,
+          detail: "Removes the active model only when it points to a CodeStudio Lite managed provider."
+        }
+      ],
+      warnings: ["Official provider removes CodeStudio Lite managed OpenCode provider entries."]
+    };
+  }
+
+  if (app === "openclaw") {
+    return {
+      ...base,
+      changes: [
+        {
+          key: "models.providers.codestudio-*",
+          action: "remove",
+          before: "managed provider entries",
+          after: null,
+          detail: "Removes CodeStudio Lite managed OpenClaw provider entries."
+        },
+        {
+          key: "agents.defaults.model.primary",
+          action: "remove",
+          before: "codestudio-local/codestudio-default",
+          after: null,
+          detail: "Removes the primary model only when it points to a CodeStudio Lite managed provider."
+        }
+      ],
+      warnings: ["Official provider removes CodeStudio Lite managed OpenClaw provider entries."]
+    };
+  }
+
+  if (app === "hermes") {
+    return {
+      ...base,
+      changes: [
+        {
+          key: "model.provider",
+          action: "remove",
+          before: "custom",
+          after: null,
+          detail: "Restores Hermes away from the CodeStudio Lite managed custom provider mode."
+        },
+        {
+          key: "model.base_url",
+          action: "remove",
+          before: "https://api.example.test/v1",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed Base URL."
+        },
+        {
+          key: "model.api_key",
+          action: "remove",
+          before: "<redacted>",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed API key."
+        },
+        {
+          key: "model.api_mode",
+          action: "remove",
+          before: "chat_completions",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed API mode."
+        },
+        {
+          key: "model.default",
+          action: "remove",
+          before: "gpt-5",
+          after: null,
+          detail: "Removes the CodeStudio Lite managed model override."
+        }
+      ],
+      warnings: ["Official provider removes CodeStudio Lite managed Hermes custom endpoint fields."]
     };
   }
 
@@ -2770,9 +3824,9 @@ function mockClaudeDesktopNativeConfigPreview(
         }
       ],
       warnings: [
-        "Claude Desktop config file mode writes the 3P profile system used by Claude Desktop.",
+        "Claude Desktop config profile writes the 3P profile system used by Claude Desktop.",
         "CodeStudio Lite enables Claude Desktop developer mode before writing the 3P profile if it is not already enabled.",
-        "The selected endpoint must be Anthropic Messages compatible; generic OpenAI-only endpoints need Gateway mode.",
+        "The selected endpoint must be Anthropic Messages compatible; generic OpenAI-only endpoints need Gateway profiles.",
         ...commonWarnings
       ]
     };
@@ -2829,7 +3883,7 @@ function mockClaudeDesktopNativeConfigPreview(
       }
     ],
     warnings: [
-      "Claude Desktop gateway mode writes the 3P profile to the tool-scoped CodeStudio Lite Local Gateway URL.",
+      "Claude Desktop gateway profile writes the 3P profile to the tool-scoped CodeStudio Lite Local Gateway URL.",
       "CodeStudio Lite enables Claude Desktop developer mode before writing the Gateway profile if it is not already enabled.",
       "Applying a Gateway profile does not start the Gateway automatically; use the sidebar Gateway controls when you want it running.",
       ...commonWarnings
@@ -2927,7 +3981,7 @@ function mockNonCodexGatewayNativeConfigPreview(
         }
       ],
       warnings: [
-        "Gateway mode writes Claude Code settings to the tool-scoped local gateway URL.",
+        "Gateway profiles write Claude Code settings to the tool-scoped local gateway URL.",
         "Restart Claude Code or open a new session after applying so settings reload.",
         ...commonWarnings
       ]
@@ -2964,7 +4018,7 @@ function mockNonCodexGatewayNativeConfigPreview(
         }
       ],
       warnings: [
-        "Gateway mode writes Gemini CLI environment values to the tool-scoped local gateway URL.",
+        "Gateway profiles write Gemini CLI environment values to the tool-scoped local gateway URL.",
         "Restart Gemini CLI or open a new terminal session after applying so environment variables reload.",
         ...commonWarnings
       ]
@@ -3022,7 +4076,7 @@ function mockNonCodexGatewayNativeConfigPreview(
         }
       ],
       warnings: [
-        "Gateway mode writes OpenCode's provider entry to the tool-scoped local gateway URL.",
+        "Gateway profiles write OpenCode's provider entry to the tool-scoped local gateway URL.",
         "Existing JSONC/JSON5 comments are not preserved when CodeStudio Lite writes the file.",
         ...commonWarnings
       ]
@@ -3073,7 +4127,7 @@ function mockNonCodexGatewayNativeConfigPreview(
         }
       ],
       warnings: [
-        "Gateway mode writes OpenClaw's provider entry to the tool-scoped local gateway URL.",
+        "Gateway profiles write OpenClaw's provider entry to the tool-scoped local gateway URL.",
         "Existing JSON5 comments are not preserved when CodeStudio Lite writes the file.",
         ...commonWarnings
       ]
@@ -3124,7 +4178,7 @@ function mockNonCodexGatewayNativeConfigPreview(
         }
       ],
       warnings: [
-        "Gateway mode writes Hermes custom provider settings to the tool-scoped local gateway URL.",
+        "Gateway profiles write Hermes custom provider settings to the tool-scoped local gateway URL.",
         "Existing YAML comments are not preserved when CodeStudio Lite writes the file.",
         ...commonWarnings
       ]
@@ -3190,7 +4244,7 @@ function ensureMockProfileProtocolSupported(
   if (mockProfileProtocolSupportedForMode(app, mode, provider, protocol)) {
     return;
   }
-  throw new Error(`Config file mode does not support ${mockProtocolLabel(protocol)} for '${canonicalProfileApp(app)}'.`);
+  throw new Error(`Config profiles do not support ${mockProtocolLabel(protocol)} for '${canonicalProfileApp(app)}'.`);
 }
 
 function mockConfigProtocolSupported(profile: ProfileDraft): boolean {
@@ -3199,25 +4253,6 @@ function mockConfigProtocolSupported(profile: ProfileDraft): boolean {
 
 function mockGatewayBaseUrlForTool(toolId: string): string {
   return `http://127.0.0.1:43112/tools/${canonicalProfileApp(toolId)}/v1`;
-}
-
-function parseMockImportProfiles(content: string): Array<Partial<ProfileDraft>> {
-  const value = JSON.parse(content) as
-    | Array<Partial<ProfileDraft>>
-    | { profiles?: Array<Partial<ProfileDraft>>; drafts?: Array<Partial<ProfileDraft>>; bundle?: { profiles?: Array<Partial<ProfileDraft>> } };
-  if (Array.isArray(value)) {
-    return value;
-  }
-  if (Array.isArray(value.profiles)) {
-    return value.profiles;
-  }
-  if (Array.isArray(value.drafts)) {
-    return value.drafts;
-  }
-  if (Array.isArray(value.bundle?.profiles)) {
-    return value.bundle.profiles;
-  }
-  throw new Error("Import file must contain a profiles array.");
 }
 
 function requireMockField(label: string, value: unknown): string {
@@ -3229,18 +4264,13 @@ function requireMockField(label: string, value: unknown): string {
 
 function requireMockToken(label: string, value: unknown): string {
   const trimmed = requireMockField(label, value);
-  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
-    throw new Error(`${label} can only contain letters, numbers, '-' and '_'`);
+  const pattern = label === "Provider" ? /^[A-Za-z0-9_.-]+$/ : /^[A-Za-z0-9_-]+$/;
+  if (!pattern.test(trimmed)) {
+    throw new Error(label === "Provider"
+      ? `${label} can only contain letters, numbers, '-', '_' and '.'`
+      : `${label} can only contain letters, numbers, '-' and '_'`);
   }
   return trimmed;
-}
-
-function normalizeMockTimeout(value: unknown): number {
-  const timeout = typeof value === "number" && Number.isFinite(value) ? value : 120;
-  if (timeout < 5 || timeout > 600) {
-    throw new Error("Timeout must be between 5 and 600 seconds.");
-  }
-  return Math.trunc(timeout);
 }
 
 function mockModePreviews(
@@ -3254,11 +4284,11 @@ function mockModePreviews(
   const configProtocolSupported = mockConfigProtocolSupported(profile);
   const configSupported = Boolean(configNativeDiff) || officialClientConfig;
   const configBlockedReason = !configProtocolSupported && !isOfficial
-    ? `Config file mode does not support ${mockProtocolLabel(profile.protocol)} for '${profile.app}'.`
+    ? `Config profiles do not support ${mockProtocolLabel(profile.protocol)} for '${profile.app}'.`
     : !configSupported && !isOfficial
-    ? `Config file mode adapter is not implemented for '${profile.app}'.`
+    ? `Config profile adapter is not implemented for '${profile.app}'.`
     : !profile.authRef && providerRequiresApiKey(profile.provider)
-      ? "Config file mode needs a stored Provider API key for this Provider."
+      ? "Config profiles need a stored Provider API key for this Provider."
       : null;
   const gatewayWritesNativeConfig = Boolean(gatewayNativeDiff);
   const gatewaySupported = !isOfficial;
@@ -3266,7 +4296,7 @@ function mockModePreviews(
   return [
     {
       mode: "config",
-      label: "CC Switch config file mode",
+      label: "Client config profile",
       description: "Back up and modify the target client's native provider config directly. This makes the client talk to the selected upstream Provider without CodeStudio Lite in the request path.",
       supported: configSupported && !configBlockedReason,
       recommended: isOfficial && configSupported && !configBlockedReason,
@@ -3281,14 +4311,14 @@ function mockModePreviews(
           ]
         : configNativeDiff
         ? [
-            "Direct config file mode writes Provider connection details into the client config.",
+            "Config profiles write Provider connection details into the client config.",
             "Frequent Provider switching may require the client to reload its own config."
           ]
         : []
     },
     {
       mode: "gateway",
-      label: "Gateway mode",
+      label: "Gateway profile",
       description: gatewayWritesNativeConfig
         ? "Back up and point the client at the local CodeStudio Gateway once. This apply only switches the active Provider profile; start the Gateway from the sidebar when needed."
         : "Switch the active Provider profile for the local Gateway. This apply does not start the Gateway or modify this tool's native config.",
@@ -3360,6 +4390,13 @@ function validateBaseUrlOrThrow(baseUrl: string): void {
   }
 }
 
+function validateBaseUrlForProviderOrThrow(provider: string, baseUrl: string): void {
+  if (providerIsOfficial(provider) && !baseUrl.trim()) {
+    return;
+  }
+  validateBaseUrlOrThrow(baseUrl);
+}
+
 function normalizeMockProtocol(value?: string | null): string {
   const protocol = (value ?? "").trim();
   if (
@@ -3392,9 +4429,11 @@ function mockProtocolLabel(value?: string | null): string {
   return "OpenAI Chat Completions";
 }
 
-function mockProfileTomlContent(input: {
+function mockProfileSqlPreviewContent(input: {
   id: string;
   name: string;
+  icon: string | null;
+  remark: string | null;
   app: string;
   mode: ProviderApplyMode;
   provider: string;
@@ -3402,33 +4441,41 @@ function mockProfileTomlContent(input: {
   model: string;
   baseUrl: string;
   authRef: string | null;
-  timeoutSeconds: number;
   timestamp: string;
   secretStatus: string;
 }): string {
-  return `id = "${mockTomlString(input.id)}"
-name = "${mockTomlString(input.name)}"
-app = "${mockTomlString(input.app)}"
-provider = "${mockTomlString(input.provider)}"
-mode = "${input.mode}"
-protocol = "${mockTomlString(input.protocol)}"
-model = "${mockTomlString(input.model)}"
-base_url = "${mockTomlString(input.baseUrl)}"
-timeout_seconds = ${input.timeoutSeconds}
-
-[auth]
-api_key = "${mockTomlString(input.authRef ?? "")}"
-
-[metadata]
-created_at = "${mockTomlString(input.timestamp)}"
-updated_at = "${mockTomlString(input.timestamp)}"
-last_test_status = "pending"
-secret_status = "${mockTomlString(input.secretStatus)}"
-`;
+  return JSON.stringify(
+    {
+      table: "profiles",
+      row: {
+        id: input.id,
+        name: input.name,
+        icon: mockProfileIconPreview(input.icon),
+        remark: input.remark,
+        app: input.app,
+        mode: input.mode,
+        provider: input.provider,
+        protocol: input.protocol,
+        model: input.model,
+        base_url: input.baseUrl,
+        auth_ref: input.authRef,
+        created_at: input.timestamp,
+        updated_at: input.timestamp,
+        last_test_status: "pending",
+        secret_status: input.secretStatus
+      },
+      secrets: "API keys are stored in the system keychain and never written into SQLite."
+    },
+    null,
+    2
+  );
 }
 
-function mockTomlString(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
+function mockProfileIconPreview(icon: string | null): string | null {
+  if (!icon) {
+    return null;
+  }
+  return icon.startsWith("data:image/") ? `image data url (${icon.length} bytes)` : icon;
 }
 
 function credentialStatus(provider: string, secretProvided: boolean): TestProfileConnectionResult["status"] {
@@ -3455,6 +4502,16 @@ function providerRequiresApiKey(provider: string): boolean {
   return !providerIsOfficial(provider);
 }
 
+function customOfficialProfileAllowed(app: string, provider: string, mode: ProviderApplyMode): boolean {
+  return !providerIsOfficial(provider) || (isCodexFamilyApp(app) && mode === "config");
+}
+
+function ensureCustomOfficialProfileAllowed(app: string, provider: string, mode: ProviderApplyMode): void {
+  if (!customOfficialProfileAllowed(app, provider, mode)) {
+    throw new Error("Only Codex OAuth profiles can be saved as custom official profiles.");
+  }
+}
+
 function defaultMockProfileMode(provider: string): ProviderApplyMode {
   return providerIsOfficial(provider) ? "config" : "gateway";
 }
@@ -3465,7 +4522,7 @@ function normalizeMockProfileMode(
 ): ProviderApplyMode {
   const mode = requested ?? defaultMockProfileMode(provider);
   if (providerIsOfficial(provider) && mode === "gateway") {
-    throw new Error("Official provider uses the client login directly and cannot use Gateway mode.");
+    throw new Error("Official provider uses the client login directly and cannot use Gateway profile.");
   }
   return mode;
 }
@@ -3505,9 +4562,9 @@ function canonicalProfileApp(app: string): string {
 
 function mockRestartMessageForProfile(profile: ProfileDraft): string {
   const labels: Record<string, string> = {
-    codex: "Codex 客户端、Codex CLI 或 Codex VS Code",
+    codex: "Codex, Codex CLI, or Codex VS Code",
     "claude-desktop": "Claude Desktop",
-    claude: "Claude Code 或 Claude VS Code",
+    claude: "Claude Code or Claude VS Code",
     gemini: "Gemini CLI",
     "gemini-code-assist": "Gemini Code Assist",
     opencode: "OpenCode",
@@ -3515,7 +4572,7 @@ function mockRestartMessageForProfile(profile: ProfileDraft): string {
     hermes: "Hermes"
   };
   const app = canonicalProfileApp(profile.app);
-  return `未检测到正在运行的 ${labels[app] ?? profile.app}，无需重启。`;
+  return `${labels[app] ?? profile.app} is not running, so no restart is needed.`;
 }
 
 function formatConfigState(state: ToolStatus["configState"]): string {

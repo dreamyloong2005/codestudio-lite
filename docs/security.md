@@ -17,7 +17,7 @@ CodeStudio Lite manages a desktop-local gateway, credentials, and configuration 
 
 - The gateway listens on `127.0.0.1` by default, never `0.0.0.0`.
 - `/v1/*` routes require `Authorization: Bearer codestudio-local-<random-token>`.
-- The local token is stored under `~/.codestudio-lite/gateway.toml` and shown only as a masked preview in the UI.
+- The local token is stored in `~/.codestudio-lite/app_state.sqlite` and shown only as a masked preview in the UI.
 - Unauthorized requests must not reach an upstream provider.
 - Request logs default to metadata only: timestamp, client, method, path, provider, model, status, latency, and error summary.
 - Prompt text, completions, tool-call arguments, and file contents are not persisted by default.

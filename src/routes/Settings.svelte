@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import AppIcon from "../components/AppIcon.svelte";
   import BrandLogo from "../components/BrandLogo.svelte";
@@ -10,18 +9,16 @@
     AUTHOR_NAME
   } from "../lib/appInfo";
   import { appUpdateState, checkForAppUpdate } from "../lib/appUpdateStore";
-  import { ensureAppDirs, loadAppSettings, updateAppSettings } from "../lib/api";
+  import { loadAppSettings, openExternalUrl, updateAppSettings } from "../lib/api";
   import { setLocale, supportedLocales, t } from "../lib/i18n";
   import { applyTheme } from "../lib/theme";
-  import type { AppSettings, CodexAuthStatus, Locale } from "../types";
+  import type { AppSettings, Locale } from "../types";
 
   let settings: AppSettings | null = null;
-  let language: Locale = "zh-CN";
+  let language: Locale = "en-US";
   let theme: AppSettings["theme"] = "system";
   let preserveCodexOfficialAuth = true;
-  let codexAuth: CodexAuthStatus | null = null;
   let saving = false;
-  let message: string | null = null;
   let error: string | null = null;
 
   onMount(() => {
@@ -34,11 +31,9 @@
   async function loadSettings() {
     try {
       settings = await loadAppSettings();
-      const profileSummary = await ensureAppDirs();
       language = settings.language;
       theme = settings.theme;
       preserveCodexOfficialAuth = settings.preserveCodexOfficialAuth;
-      codexAuth = profileSummary.codexAuth;
       setLocale(language);
       applyTheme(theme);
     } catch (err) {
@@ -58,41 +53,27 @@
     await saveSettings({ theme: nextTheme });
   }
 
-  async function changeCodexAuthPreservation(nextValue: boolean) {
+  async function changePreserveCodexOfficialAuth(nextValue: boolean) {
     preserveCodexOfficialAuth = nextValue;
     await saveSettings({ preserveCodexOfficialAuth: nextValue });
   }
 
-  async function saveSettings(request: { language?: Locale; theme?: AppSettings["theme"]; preserveCodexOfficialAuth?: boolean }) {
+  async function saveSettings(request: {
+    language?: Locale;
+    theme?: AppSettings["theme"];
+    preserveCodexOfficialAuth?: boolean;
+  }) {
     saving = true;
-    error = null;
-    message = null;
     try {
       settings = await updateAppSettings(request);
-      message = $t("settings.saved");
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      error = $t("settings.saveFailed", { message: detail });
+      preserveCodexOfficialAuth = settings.preserveCodexOfficialAuth;
+    } catch {
+      // Settings auto-save is best-effort; keep the UI quiet on rare write failures.
     } finally {
       saving = false;
     }
   }
 
-  async function openExternalUrl(url: string) {
-    try {
-      await openUrl(url);
-    } catch {
-      window.open(url, "_blank", "noreferrer");
-    }
-  }
-
-  $: codexAuthStatusLabel = codexAuth
-    ? codexAuth.available
-      ? $t("settings.codexAuthDetected")
-      : $t("settings.codexAuthMissing")
-    : $t("common.unknown");
-  $: codexAuthStatusTone = codexAuth?.available ? "good" : "warn";
-  $: codexAuthDetail = codexAuth ? codexAuthDetailLabel(codexAuth) : "";
   $: updateStatusLabel = (() => {
     if ($appUpdateState.status === "checking") {
       return $t("settings.checkingUpdates");
@@ -120,17 +101,6 @@
         ? "info"
         : "good";
 
-  function codexAuthDetailLabel(status: CodexAuthStatus) {
-    if (status.storage === "keyring" || status.storage === "auto") {
-      return $t("settings.codexAuthKeyringDetail");
-    }
-    if (status.available) {
-      return status.path
-        ? $t("settings.codexAuthFileDetail", { path: status.path })
-        : $t("settings.codexAuthDetectedDetail");
-    }
-    return $t("settings.codexAuthMissingDetail");
-  }
 </script>
 
 <div class="route-stack">
@@ -142,9 +112,6 @@
     </div>
   </section>
 
-  {#if message}
-    <div class="inline-success">{message}</div>
-  {/if}
   {#if error}
     <div class="inline-error">{error}</div>
   {/if}
@@ -168,21 +135,15 @@
     </label>
     <label class="settings-row settings-toggle-row">
       <span><AppIcon name="key" size={18} /> {$t("settings.codexAuthPreservation")}</span>
-      <input
-        type="checkbox"
-        checked={preserveCodexOfficialAuth}
-        disabled={saving}
-        aria-label={$t("settings.codexAuthPreservation")}
-        on:change={(event) => changeCodexAuthPreservation(event.currentTarget.checked)}
-      />
+      <span class="settings-row-value">
+        <input
+          type="checkbox"
+          bind:checked={preserveCodexOfficialAuth}
+          disabled={saving || settings === null}
+          on:change={(event) => changePreserveCodexOfficialAuth(event.currentTarget.checked)}
+        />
+      </span>
     </label>
-    <div class="settings-row codex-auth-row">
-      <span><AppIcon name="key" size={18} /> {$t("settings.codexOAuthStatus")}</span>
-      <div class="settings-row-value">
-        <span class={`pill ${codexAuthStatusTone}`}>{codexAuthStatusLabel}</span>
-        <small>{codexAuthDetail}</small>
-      </div>
-    </div>
   </section>
 
   <section class="panel-band about-panel">

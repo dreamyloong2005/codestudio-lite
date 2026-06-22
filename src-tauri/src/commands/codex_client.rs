@@ -13,6 +13,15 @@ pub async fn inspect_codex_client() -> Result<CodexClientState, String> {
 }
 
 #[tauri::command]
+pub async fn load_cached_codex_client_state() -> Result<Option<CodexClientState>, String> {
+    Ok(
+        tauri::async_runtime::spawn_blocking(|| codex_client::load_cached_state())
+            .await
+            .map_err(|err| err.to_string())?,
+    )
+}
+
+#[tauri::command]
 pub async fn plan_codex_client_update() -> Result<CodexClientState, String> {
     tauri::async_runtime::spawn_blocking(codex_client::plan_update)
         .await

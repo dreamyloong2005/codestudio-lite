@@ -1,79 +1,92 @@
 <script lang="ts" context="module">
-  import arrowLeft from "@iconify-icons/solar/arrow-left-bold-duotone";
-  import arrowRight from "@iconify-icons/solar/arrow-right-bold-duotone";
-  import checkCircle from "@iconify-icons/solar/check-circle-bold-duotone";
-  import checkSquare from "@iconify-icons/solar/check-square-bold-duotone";
-  import clockCircle from "@iconify-icons/solar/clock-circle-bold-duotone";
-  import codeSquare from "@iconify-icons/solar/code-square-bold-duotone";
-  import copy from "@iconify-icons/solar/copy-bold-duotone";
-  import dangerCircle from "@iconify-icons/solar/danger-circle-bold-duotone";
-  import dangerTriangle from "@iconify-icons/solar/danger-triangle-bold-duotone";
-  import downloadSquare from "@iconify-icons/solar/download-square-bold-duotone";
-  import eye from "@iconify-icons/solar/eye-bold-duotone";
-  import eyeClosed from "@iconify-icons/solar/eye-closed-bold-duotone";
-  import folderOpen from "@iconify-icons/solar/folder-open-bold-duotone";
-  import infoCircle from "@iconify-icons/solar/info-circle-bold-duotone";
-  import keyMinimalistic from "@iconify-icons/solar/key-minimalistic-bold-duotone";
-  import magicStick from "@iconify-icons/solar/magic-stick-3-bold-duotone";
-  import pen from "@iconify-icons/solar/pen-new-square-bold-duotone";
-  import playCircle from "@iconify-icons/solar/play-circle-bold-duotone";
-  import power from "@iconify-icons/solar/power-bold-duotone";
-  import programming from "@iconify-icons/solar/programming-bold-duotone";
-  import refreshCircle from "@iconify-icons/solar/refresh-circle-bold-duotone";
-  import restartCircle from "@iconify-icons/solar/restart-circle-bold-duotone";
-  import rocket from "@iconify-icons/solar/rocket-bold-duotone";
-  import settings from "@iconify-icons/solar/settings-bold-duotone";
-  import stopCircle from "@iconify-icons/solar/stop-circle-bold-duotone";
-  import sun from "@iconify-icons/solar/sun-2-bold-duotone";
-  import translation from "@iconify-icons/solar/translation-bold-duotone";
-  import trash from "@iconify-icons/solar/trash-bin-minimalistic-bold-duotone";
-  import tuning from "@iconify-icons/solar/tuning-square-bold-duotone";
-  import uploadSquare from "@iconify-icons/solar/upload-square-bold-duotone";
-  import user from "@iconify-icons/solar/user-rounded-bold-duotone";
-  import usersGroup from "@iconify-icons/solar/users-group-rounded-bold-duotone";
-  import widget from "@iconify-icons/solar/widget-5-bold-duotone";
-  import windowFrame from "@iconify-icons/solar/window-frame-bold-duotone";
+  import arrowLeft from "@iconify-icons/ph/arrow-left";
+  import arrowRight from "@iconify-icons/ph/arrow-right";
+  import plusCircle from "@iconify-icons/ph/plus-circle";
+  import checkCircle from "@iconify-icons/ph/check-circle";
+  import checkSquare from "@iconify-icons/ph/check-square";
+  import chartBar from "@iconify-icons/ph/chart-bar";
+  import clock from "@iconify-icons/ph/clock";
+  import copy from "@iconify-icons/ph/copy";
+  import x from "@iconify-icons/ph/x";
+  import appWindow from "@iconify-icons/ph/app-window";
+  import downloadSimple from "@iconify-icons/ph/download-simple";
+  import dotsSixVertical from "@iconify-icons/ph/dots-six-vertical";
+  import eye from "@iconify-icons/ph/eye";
+  import eyeSlash from "@iconify-icons/ph/eye-slash";
+  import folderOpen from "@iconify-icons/ph/folder-open";
+  import gearSix from "@iconify-icons/ph/gear-six";
+  import globeHemisphereWest from "@iconify-icons/ph/globe-hemisphere-west";
+  import info from "@iconify-icons/ph/info";
+  import key from "@iconify-icons/ph/key";
+  import magicWand from "@iconify-icons/ph/magic-wand";
+  import pencilSimple from "@iconify-icons/ph/pencil-simple";
+  import playCircle from "@iconify-icons/ph/play-circle";
+  import power from "@iconify-icons/ph/power";
+  import rocketLaunch from "@iconify-icons/ph/rocket-launch";
+  import arrowClockwise from "@iconify-icons/ph/arrow-clockwise";
+  import arrowCounterClockwise from "@iconify-icons/ph/arrow-counter-clockwise";
+  import arrowsClockwise from "@iconify-icons/ph/arrows-clockwise";
+  import slidersHorizontal from "@iconify-icons/ph/sliders-horizontal";
+  import squaresFour from "@iconify-icons/ph/squares-four";
+  import stackSimple from "@iconify-icons/ph/stack-simple";
+  import stopCircle from "@iconify-icons/ph/stop-circle";
+  import sun from "@iconify-icons/ph/sun";
+  import terminalWindow from "@iconify-icons/ph/terminal-window";
+  import translate from "@iconify-icons/ph/translate";
+  import trash from "@iconify-icons/ph/trash";
+  import uploadSimple from "@iconify-icons/ph/upload-simple";
+  import user from "@iconify-icons/ph/user";
+  import warning from "@iconify-icons/ph/warning";
+  import warningCircle from "@iconify-icons/ph/warning-circle";
+  import wrench from "@iconify-icons/ph/wrench";
 
-  type SolarIcon = typeof infoCircle;
+  type UiIcon = typeof info;
 
   export const appIcons = {
+    add: plusCircle,
     apply: checkSquare,
     arrowLeft,
     arrowRight,
     check: checkCircle,
-    clock: clockCircle,
-    codexClient: windowFrame,
+    clock,
+    close: x,
+    claudeDesktop: appWindow,
+    codexClient: appWindow,
     copy,
-    dashboard: widget,
+    dashboard: squaresFour,
     delete: trash,
-    download: downloadSquare,
-    edit: pen,
-    error: dangerCircle,
+    download: downloadSimple,
+    drag: dotsSixVertical,
+    edit: pencilSimple,
+    error: warningCircle,
     externalLink: arrowRight,
     folder: folderOpen,
-    info: infoCircle,
-    install: codeSquare,
-    key: keyMinimalistic,
-    language: translation,
-    loading: refreshCircle,
+    gateway: globeHemisphereWest,
+    info,
+    install: downloadSimple,
+    key,
+    language: translate,
+    loading: arrowClockwise,
     play: playCircle,
     power,
-    profiles: usersGroup,
-    repair: tuning,
-    restart: restartCircle,
-    rocket,
-    settings,
+    profiles: stackSimple,
+    repair: wrench,
+    refresh: arrowClockwise,
+    restart: arrowCounterClockwise,
+    rocket: rocketLaunch,
+    settings: gearSix,
+    stats: chartBar,
     stop: stopCircle,
-    system: programming,
+    system: terminalWindow,
     theme: sun,
-    update: uploadSquare,
-    upload: uploadSquare,
+    update: arrowsClockwise,
+    upload: uploadSimple,
     user,
-    warning: dangerTriangle,
-    wizard: magicStick,
+    warning,
+    wizard: magicWand,
     eye,
-    eyeOff: eyeClosed
-  } satisfies Record<string, SolarIcon>;
+    eyeOff: eyeSlash
+  } satisfies Record<string, UiIcon>;
 
   export type AppIconName = keyof typeof appIcons;
 </script>

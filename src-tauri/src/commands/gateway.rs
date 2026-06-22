@@ -1,5 +1,5 @@
 use crate::core::gateway;
-use crate::core::types::{GatewayControlResult, GatewayStatus};
+use crate::core::types::{GatewayControlResult, GatewayStatus, UpdateGatewaySettingsRequest};
 
 #[tauri::command]
 pub fn load_gateway_status() -> Result<GatewayStatus, String> {
@@ -19,4 +19,11 @@ pub fn stop_gateway() -> Result<GatewayControlResult, String> {
 #[tauri::command]
 pub fn restart_gateway() -> Result<GatewayControlResult, String> {
     gateway::restart_gateway()
+}
+
+#[tauri::command]
+pub fn update_gateway_settings(
+    request: UpdateGatewaySettingsRequest,
+) -> Result<GatewayControlResult, String> {
+    gateway::update_gateway_settings(request)
 }

@@ -16,8 +16,10 @@ export interface ToolStatus {
   installState: InstallState;
   configState: ConfigState;
   configPath: string | null;
+  installPath: string | null;
   installCommand: string | null;
   details: string | null;
+  running: boolean;
 }
 
 export interface PathRepairHint {
@@ -54,6 +56,7 @@ export interface ToolInstallCommand {
   manager: string;
   command: string;
   requiresAdmin: boolean;
+  interactive: boolean;
 }
 
 export interface ToolInstallPrerequisite {
@@ -71,6 +74,7 @@ export interface ToolInstallPlan {
   toolName: string;
   manager: string;
   command: string;
+  interactive: boolean;
   commands: ToolInstallCommand[];
   prerequisites: ToolInstallPrerequisite[];
   requiresPrerequisites: boolean;
@@ -86,6 +90,104 @@ export interface ToolInstallRequest {
   toolId: string;
   confirm: boolean;
   installPrerequisites?: boolean;
+}
+
+export interface ToolUninstallRequest {
+  toolId: string;
+  confirm: boolean;
+}
+
+export interface ToolInstallProgress {
+  rootToolId: string;
+  toolId: string;
+  toolName: string;
+  stage: string;
+  command: string;
+  stream: "stdout" | "stderr" | "status" | string;
+  chunk: string;
+  done: boolean;
+  exitCode: number | null;
+}
+
+export interface StartInstallTerminalRequest {
+  toolId: string;
+  command: string;
+  shellId?: string | null;
+  profileId?: string | null;
+  workingDirectory?: string | null;
+  localize?: boolean | null;
+  keepOpen?: boolean | null;
+  cols?: number;
+  rows?: number;
+}
+
+export interface StartInstallTerminalResult {
+  sessionId: string;
+  toolId: string;
+  command: string;
+  started: boolean;
+}
+
+export type LaunchMode = "embedded" | "external";
+
+export interface ExternalToolLaunchResult {
+  started: boolean;
+  toolId: string;
+  command: string;
+}
+
+export interface InstallTerminalInputRequest {
+  sessionId: string;
+  data: string;
+}
+
+export interface InstallTerminalResizeRequest {
+  sessionId: string;
+  cols: number;
+  rows: number;
+}
+
+export interface StopInstallTerminalRequest {
+  sessionId: string;
+}
+
+export interface ClaudeDesktopLaunchRequest {
+  localize?: boolean | null;
+}
+
+export interface InstallTerminalOutput {
+  sessionId: string;
+  stream: "output" | "status" | string;
+  data: string;
+  done: boolean;
+  exitCode: number | null;
+}
+
+export interface ToolLaunchShellOption {
+  id: string;
+  label: string;
+  command: string;
+  available: boolean;
+  default: boolean;
+}
+
+export interface ToolLaunchProfileOption {
+  id: string;
+  name: string;
+  mode: ProviderApplyMode;
+  provider: string;
+  baseUrl: string;
+  isBuiltin: boolean;
+}
+
+export interface ToolLaunchPlan {
+  toolId: string;
+  toolName: string;
+  command: string;
+  canLaunch: boolean;
+  blocker: string | null;
+  shells: ToolLaunchShellOption[];
+  profiles: ToolLaunchProfileOption[];
 }
 
 export interface ToolInstallResult {
@@ -116,8 +218,9 @@ export interface ToolInstallStageResult {
 }
 
 export interface WizardPrefill {
-  toolId: string;
-  toolName: string;
+  toolId?: string;
+  toolName?: string;
+  mode?: ProviderApplyMode;
 }
 
 export interface Problem {
@@ -157,6 +260,7 @@ export interface ClearEnvironmentVariablesResult {
 export interface DetectionSnapshot {
   generatedAt: string;
   source: DetectionSource;
+  platform: string;
   homeDir: string;
   appConfigDir: string;
   activeProfile: string | null;
@@ -177,6 +281,12 @@ export interface CodexAuthStatus {
   storage: CodexAuthStorage;
   path: string | null;
   detail: string;
+}
+
+export interface StartCodexOAuthLoginResult {
+  started: boolean;
+  command: string | null;
+  message: string;
 }
 
 export interface DoctorCheck {
@@ -214,6 +324,8 @@ export interface UpdateAppSettingsRequest {
 export interface ProfileDraft {
   id: string;
   name: string;
+  icon: string | null;
+  remark: string | null;
   app: string;
   isBuiltin: boolean;
   mode: ProviderApplyMode;
@@ -222,45 +334,79 @@ export interface ProfileDraft {
   model: string;
   baseUrl: string;
   authRef: string | null;
-  timeoutSeconds: number;
   createdAt: string | null;
   updatedAt: string | null;
   lastTestStatus: string | null;
+  usageEnabled: boolean;
+  sortOrder: number;
 }
 
 export type ProviderApplyMode = "config" | "gateway";
+
+export type UsageScriptTemplateType = "custom" | "general" | "newapi" | "token_plan" | "balance";
+
+export interface UsageScriptConfig {
+  profileId: string;
+  enabled: boolean;
+  templateType: UsageScriptTemplateType;
+  code: string;
+  apiKey: string | null;
+  baseUrl: string | null;
+  accessToken: string | null;
+  userId: string | null;
+  timeoutSeconds: number;
+  autoQueryIntervalMinutes: number;
+  updatedAt: string | null;
+}
+
+export interface UsageScriptSaveRequest {
+  profileId: string;
+  enabled: boolean;
+  templateType: UsageScriptTemplateType;
+  code: string;
+  apiKey?: string | null;
+  baseUrl?: string | null;
+  accessToken?: string | null;
+  userId?: string | null;
+  timeoutSeconds?: number | null;
+  autoQueryIntervalMinutes?: number | null;
+}
+
+export interface UsageData {
+  isValid?: boolean | null;
+  invalidMessage?: string | null;
+  remaining?: number | null;
+  unit?: string | null;
+  planName?: string | null;
+  total?: number | null;
+  used?: number | null;
+  extra?: string | null;
+}
+
+export interface UsageQueryResult {
+  success: boolean;
+  data: UsageData[];
+  error: string | null;
+  queriedAt: string;
+  source: string;
+}
+
+export interface UsageScriptState {
+  profileId: string;
+  config: UsageScriptConfig | null;
+  lastResult: UsageQueryResult | null;
+  defaultCode: string;
+}
 
 export interface ActiveProfilesByMode {
   config: Record<string, string>;
   gateway: Record<string, string>;
 }
 
-export interface ProfileExportBundle {
-  schemaVersion: number;
-  app: string;
-  exportedAt: string;
-  activeProfilesByMode: ActiveProfilesByMode;
-  profiles: ProfileDraft[];
-  warnings: string[];
-}
-
-export interface ExportProfilesResult {
-  fileName: string;
-  bundle: ProfileExportBundle;
-}
-
-export interface ImportProfilesRequest {
-  content: string;
-}
-
-export interface ImportProfilesResult {
-  imported: ProfileDraft[];
-  skipped: string[];
-  summary: ProfileSummary;
-}
-
 export interface SaveProfileDraftRequest {
   name: string;
+  icon?: string | null;
+  remark?: string | null;
   app: string;
   mode?: ProviderApplyMode | null;
   provider: string;
@@ -269,27 +415,39 @@ export interface SaveProfileDraftRequest {
   baseUrl: string;
   secretProvided: boolean;
   apiKey?: string | null;
-  timeoutSeconds?: number | null;
 }
 
 export interface UpdateProfileDraftRequest {
   profileId: string;
   name: string;
+  icon?: string | null;
+  remark?: string | null;
   mode?: ProviderApplyMode | null;
   provider: string;
   protocol?: string | null;
   model: string;
   baseUrl: string;
   apiKey?: string | null;
-  timeoutSeconds?: number | null;
 }
 
 export interface DuplicateProfileDraftRequest {
   profileId: string;
 }
 
+export interface DeleteProfileDraftRequest {
+  profileId: string;
+}
+
+export interface ReorderProfileDraftsRequest {
+  app: string;
+  mode: ProviderApplyMode;
+  profileIds: string[];
+}
+
 export interface PreviewProfileWriteRequest {
   name: string;
+  icon?: string | null;
+  remark?: string | null;
   app: string;
   mode?: ProviderApplyMode | null;
   provider: string;
@@ -298,7 +456,6 @@ export interface PreviewProfileWriteRequest {
   baseUrl: string;
   secretProvided: boolean;
   apiKey?: string | null;
-  timeoutSeconds?: number | null;
 }
 
 export interface ProfileWritePreviewItem {
@@ -307,7 +464,7 @@ export interface ProfileWritePreviewItem {
   action: string;
   backupRequired: boolean;
   detail: string;
-  content: string | null;
+  content?: string | null;
 }
 
 export interface PreviewProfileWriteResult {
@@ -347,6 +504,7 @@ export interface NativeConfigPreview {
   writeEnabled: boolean;
   changes: NativeConfigDiffLine[];
   warnings: string[];
+  content?: string | null;
 }
 
 export interface ProviderApplyModePreview {
@@ -405,7 +563,6 @@ export interface TestProfileConnectionRequest {
   baseUrl: string;
   secretProvided: boolean;
   apiKey?: string | null;
-  timeoutSeconds?: number | null;
 }
 
 export interface ProfileConnectionCheck {
@@ -440,8 +597,6 @@ export interface RestoreBackupResult {
 
 export interface ProfileSummary {
   configDir: string;
-  profilesDir: string;
-  backupsDir: string;
   activeProfile: string | null;
   activeProfileName: string | null;
   activeProfilesByMode: ActiveProfilesByMode;
@@ -467,7 +622,12 @@ export interface GatewayRequestLogEntry {
   status: number;
   latencyMs: number;
   errorSummary: string | null;
+  privacyFilterMode: PrivacyFilterMode;
+  privacyFilterHitCount: number;
+  privacyFilterAction: "none" | "detected" | "redacted" | "blocked";
 }
+
+export type PrivacyFilterMode = "off" | "detect" | "redact" | "block";
 
 export interface GatewayStatus {
   running: boolean;
@@ -477,6 +637,7 @@ export interface GatewayStatus {
   healthUrl: string;
   authEnabled: boolean;
   tokenPreview: string;
+  privacyFilterMode: PrivacyFilterMode;
   activeProfileId: string | null;
   activeProfileName: string | null;
   activeModel: string | null;
@@ -488,6 +649,10 @@ export interface GatewayControlResult {
   status: GatewayStatus;
 }
 
+export interface UpdateGatewaySettingsRequest {
+  privacyFilterMode?: PrivacyFilterMode | null;
+}
+
 export interface CodexClientSettings {
   source: "mirror" | "official";
   customUrl: string;
@@ -497,6 +662,8 @@ export interface CodexClientSettings {
   windowsInstallMode: "msix" | "portable";
   installRoot: string;
   keepUserDataOnUninstall: boolean;
+  syncHistoryOnLaunch: boolean;
+  patchForcePluginUnlock: boolean;
 }
 
 export interface UpdateCodexClientSettingsRequest {
@@ -507,6 +674,8 @@ export interface UpdateCodexClientSettingsRequest {
   windowsInstallMode?: CodexClientSettings["windowsInstallMode"] | null;
   installRoot?: string | null;
   keepUserDataOnUninstall?: boolean | null;
+  syncHistoryOnLaunch?: boolean | null;
+  patchForcePluginUnlock?: boolean | null;
 }
 
 export interface InstalledCodexClient {
@@ -566,6 +735,7 @@ export interface CodexClientState {
   plan: CodexClientPlan | null;
   stagingDir: string;
   notes: string[];
+  running: boolean;
 }
 
 export interface CodexClientStageReport {

@@ -5,6 +5,27 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub fn is_process_running(name: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        let script = format!(
+            r#"(Get-Process -Name {} -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0"#,
+            name
+        );
+        run_powershell(&script)
+            .map(|output| output.trim() == "True")
+            .unwrap_or(false)
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("pgrep")
+            .args(["-x", name])
+            .output()
+            .map(|output| !output.stdout.is_empty())
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+
 #[derive(Debug, Clone, Default)]
 pub struct ProcessTerminationReport {
     pub total: u64,
@@ -19,11 +40,13 @@ impl ProcessTerminationReport {
         }
         if self.forced > 0 {
             Some(format!(
-                "检测到正在运行的 {label}，已强制结束 {} 个进程后继续更新。",
+                "{label} was running; force-closed {} process(es) before continuing the update.",
                 self.forced
             ))
         } else {
-            Some(format!("检测到正在运行的 {label}，已自动关闭后继续更新。"))
+            Some(format!(
+                "{label} was running and was closed before continuing the update."
+            ))
         }
     }
 }
@@ -51,16 +74,29 @@ pub fn close_appx_package_for_update(
     label: &str,
     package_identity: &str,
 ) -> Result<ProcessTerminationReport, String> {
+    close_appx_packages_for_update(label, &[package_identity])
+}
+
+pub fn close_appx_packages_for_update(
+    label: &str,
+    package_identities: &[&str],
+) -> Result<ProcessTerminationReport, String> {
     if !cfg!(target_os = "windows") {
         return Ok(ProcessTerminationReport::default());
     }
+    if package_identities.is_empty() {
+        return Ok(ProcessTerminationReport::default());
+    }
 
-    let package_identity = ps_quote(package_identity);
+    let package_identities = ps_array(package_identities);
     let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
-$PackageIdentity = {package_identity}
-$packages = @(Get-AppxPackage -Name $PackageIdentity -ErrorAction SilentlyContinue)
+$PackageIdentities = {package_identities}
+$packages = @()
+foreach ($PackageIdentity in $PackageIdentities) {{
+  $packages += @(Get-AppxPackage -Name $PackageIdentity -ErrorAction SilentlyContinue)
+}}
 $packageFullNames = @($packages | ForEach-Object {{ [string]$_.PackageFullName }})
 $packageFamilyNames = @($packages | ForEach-Object {{ [string]$_.PackageFamilyName }})
 $installRoots = @($packages | ForEach-Object {{
@@ -85,8 +121,10 @@ function Test-RootMatch([string]$PathValue) {{
 }}
 function Test-IdentityMarker([string]$Value) {{
   if (-not $Value) {{ return $false }}
-  if ($Value.IndexOf($PackageIdentity, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {{
-    return $true
+  foreach ($identity in $PackageIdentities) {{
+    if ($identity -and $Value.IndexOf($identity, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {{
+      return $true
+    }}
   }}
   foreach ($name in $packageFullNames) {{
     if ($name -and $Value.IndexOf($name, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {{
@@ -173,9 +211,11 @@ foreach ($id in $targetIds) {{
     );
     let json = run_powershell(&script)?;
     let report: RawProcessTerminationReport = serde_json::from_str(&json)
-        .map_err(|err| format!("解析 {label} AppX 进程关闭结果失败：{err}"))?;
+        .map_err(|err| format!("Failed to parse {label} AppX close result: {err}"))?;
     if report.remaining > 0 {
-        return Err(format!("仍有 {label} 进程无法结束，未继续更新。"));
+        return Err(format!(
+            "{label} is still running; the update was not continued."
+        ));
     }
     Ok(ProcessTerminationReport {
         total: report.total,
@@ -303,9 +343,11 @@ foreach ($id in $targetIds) {{
     );
     let json = run_powershell(&script)?;
     let report: RawProcessTerminationReport = serde_json::from_str(&json)
-        .map_err(|err| format!("解析 {label} 进程关闭结果失败：{err}"))?;
+        .map_err(|err| format!("Failed to parse {label} close result: {err}"))?;
     if report.remaining > 0 {
-        return Err(format!("仍有 {label} 进程无法结束，未继续更新。"));
+        return Err(format!(
+            "{label} is still running; the update was not continued."
+        ));
     }
     Ok(ProcessTerminationReport {
         total: report.total,
@@ -354,7 +396,7 @@ fn close_processes_macos(
     for pid in &remaining_after_term {
         let output = hidden_command_with_args("kill", &["-KILL", &pid.to_string()])
             .output()
-            .map_err(|err| format!("强制结束 {label} 进程失败：{err}"))?;
+            .map_err(|err| format!("Failed to force-close {label}: {err}"))?;
         if output.status.success() {
             forced += 1;
         }
@@ -367,7 +409,9 @@ fn close_processes_macos(
         .filter(|pid| macos_pid_alive(*pid))
         .count() as u64;
     if still_running > 0 {
-        return Err(format!("仍有 {label} 进程无法结束，未继续更新。"));
+        return Err(format!(
+            "{label} is still running; the update was not continued."
+        ));
     }
 
     Ok(ProcessTerminationReport {
@@ -412,7 +456,7 @@ fn collect_macos_target_pids(
 fn pgrep_macos(args: &[&str]) -> Result<Vec<u32>, String> {
     let output = hidden_command_with_args("pgrep", args)
         .output()
-        .map_err(|err| format!("执行 pgrep 失败：{err}"))?;
+        .map_err(|err| format!("Failed to run pgrep: {err}"))?;
     if !output.status.success() {
         return Ok(Vec::new());
     }

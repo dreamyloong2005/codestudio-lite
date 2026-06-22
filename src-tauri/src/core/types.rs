@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
+
+use crate::core::privacy_filter::{PrivacyFilterAction, PrivacyFilterMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,8 +18,11 @@ pub struct ToolStatus {
     pub install_state: InstallState,
     pub config_state: ConfigState,
     pub config_path: Option<String>,
+    pub install_path: Option<String>,
     pub install_command: Option<String>,
     pub details: Option<String>,
+    #[serde(default)]
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +60,7 @@ pub struct ToolInstallPlan {
     pub tool_name: String,
     pub manager: String,
     pub command: String,
+    pub interactive: bool,
     pub commands: Vec<ToolInstallCommand>,
     pub prerequisites: Vec<ToolInstallPrerequisite>,
     pub requires_prerequisites: bool,
@@ -75,6 +81,7 @@ pub struct ToolInstallCommand {
     pub manager: String,
     pub command: String,
     pub requires_admin: bool,
+    pub interactive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +110,127 @@ pub struct ToolInstallRequest {
     pub confirm: bool,
     #[serde(default)]
     pub install_prerequisites: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUninstallRequest {
+    pub tool_id: String,
+    pub confirm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolInstallProgress {
+    pub root_tool_id: String,
+    pub tool_id: String,
+    pub tool_name: String,
+    pub stage: String,
+    pub command: String,
+    pub stream: String,
+    pub chunk: String,
+    pub done: bool,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartInstallTerminalRequest {
+    pub tool_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub shell_id: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub working_directory: Option<String>,
+    #[serde(default)]
+    pub localize: Option<bool>,
+    #[serde(default)]
+    pub keep_open: Option<bool>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartInstallTerminalResult {
+    pub session_id: String,
+    pub tool_id: String,
+    pub command: String,
+    pub started: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalToolLaunchResult {
+    pub started: bool,
+    pub tool_id: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallTerminalInputRequest {
+    pub session_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallTerminalResizeRequest {
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopInstallTerminalRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallTerminalOutput {
+    pub session_id: String,
+    pub stream: String,
+    pub data: String,
+    pub done: bool,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolLaunchShellOption {
+    pub id: String,
+    pub label: String,
+    pub command: String,
+    pub available: bool,
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolLaunchProfileOption {
+    pub id: String,
+    pub name: String,
+    pub mode: ProviderApplyMode,
+    pub provider: String,
+    pub base_url: String,
+    pub is_builtin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolLaunchPlan {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub command: String,
+    pub can_launch: bool,
+    pub blocker: Option<String>,
+    pub shells: Vec<ToolLaunchShellOption>,
+    pub profiles: Vec<ToolLaunchProfileOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +352,7 @@ pub struct ClearEnvironmentVariablesResult {
 pub struct DetectionSnapshot {
     pub generated_at: String,
     pub source: DetectionSource,
+    pub platform: String,
     pub home_dir: String,
     pub app_config_dir: String,
     pub active_profile: Option<String>,
@@ -264,6 +393,14 @@ pub struct CodexAuthStatus {
     pub storage: CodexAuthStorage,
     pub path: Option<String>,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartCodexOAuthLoginResult {
+    pub started: bool,
+    pub command: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +449,10 @@ pub struct UpdateAppSettingsRequest {
 pub struct ProfileDraft {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub remark: Option<String>,
     pub app: String,
     #[serde(default)]
     pub is_builtin: bool,
@@ -323,51 +464,131 @@ pub struct ProfileDraft {
     pub base_url: String,
     #[serde(default)]
     pub auth_ref: Option<String>,
-    pub timeout_seconds: u16,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
     #[serde(default)]
     pub last_test_status: Option<String>,
+    #[serde(default)]
+    pub usage_enabled: bool,
+    #[serde(default)]
+    pub sort_order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageScriptTemplateType {
+    Custom,
+    General,
+    NewApi,
+    TokenPlan,
+    Balance,
+}
+
+impl Default for UsageScriptTemplateType {
+    fn default() -> Self {
+        Self::General
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProfileExportBundle {
-    pub schema_version: u16,
-    pub app: String,
-    pub exported_at: String,
-    pub active_profiles_by_mode: ActiveProfilesByMode,
-    pub profiles: Vec<ProfileDraft>,
-    pub warnings: Vec<String>,
+pub struct UsageScriptConfig {
+    pub profile_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub template_type: UsageScriptTemplateType,
+    pub code: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub access_token: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    pub timeout_seconds: u16,
+    pub auto_query_interval_minutes: u16,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExportProfilesResult {
-    pub file_name: String,
-    pub bundle: ProfileExportBundle,
+pub struct UsageScriptSaveRequest {
+    pub profile_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub template_type: UsageScriptTemplateType,
+    pub code: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub access_token: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u16>,
+    #[serde(default)]
+    pub auto_query_interval_minutes: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ImportProfilesRequest {
-    pub content: String,
+pub struct UsageData {
+    #[serde(default)]
+    pub is_valid: Option<bool>,
+    #[serde(default)]
+    pub invalid_message: Option<String>,
+    #[serde(default)]
+    pub remaining: Option<f64>,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub plan_name: Option<String>,
+    #[serde(default)]
+    pub total: Option<f64>,
+    #[serde(default)]
+    pub used: Option<f64>,
+    #[serde(default)]
+    pub extra: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ImportProfilesResult {
-    pub imported: Vec<ProfileDraft>,
-    pub skipped: Vec<String>,
-    pub summary: ProfileSummary,
+pub struct UsageQueryResult {
+    pub success: bool,
+    #[serde(default)]
+    pub data: Vec<UsageData>,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub queried_at: String,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageScriptState {
+    pub profile_id: String,
+    #[serde(default)]
+    pub config: Option<UsageScriptConfig>,
+    #[serde(default)]
+    pub last_result: Option<UsageQueryResult>,
+    pub default_code: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveProfileDraftRequest {
     pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub remark: Option<String>,
     pub app: String,
     #[serde(default)]
     pub mode: Option<ProviderApplyMode>,
@@ -379,8 +600,6 @@ pub struct SaveProfileDraftRequest {
     pub secret_provided: bool,
     #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub timeout_seconds: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,6 +607,10 @@ pub struct SaveProfileDraftRequest {
 pub struct UpdateProfileDraftRequest {
     pub profile_id: String,
     pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub remark: Option<String>,
     #[serde(default)]
     pub mode: Option<ProviderApplyMode>,
     pub provider: String,
@@ -397,8 +620,6 @@ pub struct UpdateProfileDraftRequest {
     pub base_url: String,
     #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub timeout_seconds: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,8 +630,26 @@ pub struct DuplicateProfileDraftRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteProfileDraftRequest {
+    pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderProfileDraftsRequest {
+    pub app: String,
+    pub mode: ProviderApplyMode,
+    pub profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreviewProfileWriteRequest {
     pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub remark: Option<String>,
     pub app: String,
     #[serde(default)]
     pub mode: Option<ProviderApplyMode>,
@@ -422,8 +661,6 @@ pub struct PreviewProfileWriteRequest {
     pub secret_provided: bool,
     #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub timeout_seconds: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,7 +692,7 @@ pub struct PreviewProfileApplyRequest {
     pub profile_id: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderApplyMode {
     Config,
@@ -506,6 +743,7 @@ pub struct NativeConfigPreview {
     pub write_enabled: bool,
     pub changes: Vec<NativeConfigDiffLine>,
     pub warnings: Vec<String>,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -580,8 +818,6 @@ pub struct TestProfileConnectionRequest {
     pub secret_provided: bool,
     #[serde(default)]
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub timeout_seconds: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -634,8 +870,6 @@ pub struct RestoreBackupResult {
 #[serde(rename_all = "camelCase")]
 pub struct ProfileSummary {
     pub config_dir: String,
-    pub profiles_dir: String,
-    pub backups_dir: String,
     pub active_profile: Option<String>,
     pub active_profile_name: Option<String>,
     pub active_profiles_by_mode: ActiveProfilesByMode,
@@ -665,6 +899,9 @@ pub struct GatewayRequestLogEntry {
     pub status: u16,
     pub latency_ms: u128,
     pub error_summary: Option<String>,
+    pub privacy_filter_mode: PrivacyFilterMode,
+    pub privacy_filter_hit_count: usize,
+    pub privacy_filter_action: PrivacyFilterAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -677,6 +914,7 @@ pub struct GatewayStatus {
     pub health_url: String,
     pub auth_enabled: bool,
     pub token_preview: String,
+    pub privacy_filter_mode: PrivacyFilterMode,
     pub active_profile_id: Option<String>,
     pub active_profile_name: Option<String>,
     pub active_model: Option<String>,
@@ -688,4 +926,11 @@ pub struct GatewayStatus {
 #[serde(rename_all = "camelCase")]
 pub struct GatewayControlResult {
     pub status: GatewayStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateGatewaySettingsRequest {
+    #[serde(default)]
+    pub privacy_filter_mode: Option<PrivacyFilterMode>,
 }

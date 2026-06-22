@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { cubicOut } from "svelte/easing";
+  import { fade, fly } from "svelte/transition";
   import AppIcon, { type AppIconName } from "./components/AppIcon.svelte";
   import BrandLogo from "./components/BrandLogo.svelte";
   import {
@@ -10,26 +12,31 @@
     loadGatewayStatus,
     restartGateway,
     startGateway,
-    stopGateway
+    stopGateway,
+    updateGatewaySettings
   } from "./lib/api";
   import { appUpdateState, checkForAppUpdate } from "./lib/appUpdateStore";
   import { setLocale, t } from "./lib/i18n";
   import { applyTheme } from "./lib/theme";
+import { disposeTerminalSession } from "./lib/terminalSessionStore";
+  import ClaudeDesktop from "./routes/ClaudeDesktop.svelte";
   import CodexClient from "./routes/CodexClient.svelte";
-  import CodexOAuth from "./routes/CodexOAuth.svelte";
   import Dashboard from "./routes/Dashboard.svelte";
+  import Gateway from "./routes/Gateway.svelte";
   import Profiles from "./routes/Profiles.svelte";
   import SettingsRoute from "./routes/Settings.svelte";
+import TerminalPanel from "./routes/TerminalPanel.svelte";
   import SetupWizard from "./routes/SetupWizard.svelte";
   import type {
     DetectionSnapshot,
     GatewayStatus,
+    PrivacyFilterMode,
     ProfileSummary,
     ToolStatus,
     WizardPrefill
   } from "./types";
 
-  type Route = "dashboard" | "codexClient" | "codexOAuth" | "wizard" | "profiles" | "settings";
+  type Route = "dashboard" | "codexClient" | "claudeDesktop" | "wizard" | "profiles" | "gateway" | "settings" | "terminal";
 
   let route: Route = "dashboard";
   let dashboardLoading = true;
@@ -44,26 +51,29 @@
   let dashboardRefreshRunId = 0;
   let visibleRefreshRunId: number | null = null;
 
-  const BACKGROUND_DETECTION_WARMUP_DELAYS_MS = [3500, 12000];
+  // detect_environment now returns local detection immediately and kicks off
+  // update checks in the background (npm outdated / winget / claude.ai release).
+  // Re-scan a little earlier so the "update available" badges surface soon after
+  // the fast initial scan, with a mid-window catch-up for slower fetches.
+  const BACKGROUND_DETECTION_WARMUP_DELAYS_MS = [2500, 8000, 16000];
   const BACKGROUND_DETECTION_INTERVAL_MS = 30000;
 
   const navItems: Array<{ id: Route; labelKey: Parameters<typeof $t>[0]; icon: AppIconName }> = [
     { id: "dashboard", labelKey: "app.nav.dashboard", icon: "dashboard" },
     { id: "codexClient", labelKey: "app.nav.codexClient", icon: "codexClient" },
-    { id: "codexOAuth", labelKey: "app.nav.codexOAuth", icon: "key" },
-    { id: "wizard", labelKey: "app.nav.wizard", icon: "wizard" },
+    { id: "claudeDesktop", labelKey: "app.nav.claudeDesktop", icon: "claudeDesktop" },
     { id: "profiles", labelKey: "app.nav.profiles", icon: "profiles" },
+    { id: "gateway", labelKey: "app.nav.gateway", icon: "gateway" },
     { id: "settings", labelKey: "app.nav.settings", icon: "settings" }
   ];
+  const routeEnterTransition = { y: 22, duration: 320, opacity: 0, easing: cubicOut };
+  const routeExitTransition = { duration: 140 };
 
-  $: activeProfileId = snapshot?.activeProfile ?? profileSummary?.activeProfile ?? null;
-  $: activeProfileName =
-    snapshot?.activeProfileName ??
-    profileSummary?.activeProfileName ??
-    profileSummary?.drafts.find((profile) => profile.id === activeProfileId)?.name ??
-    null;
-  $: sidebarGatewayState = gatewayStatus?.running ? $t("common.running") : $t("common.stopped");
-  $: sidebarGatewayTone = gatewayStatus?.running ? "online" : "offline";
+  $: desktopClientPagesAvailable = ["windows", "macos"].includes(snapshot?.platform ?? "");
+  $: visibleNavItems = navItems.filter((item) => !["codexClient", "claudeDesktop"].includes(item.id) || desktopClientPagesAvailable);
+  $: if (["codexClient", "claudeDesktop"].includes(route) && !desktopClientPagesAvailable) {
+    route = "dashboard";
+  }
 
   async function copyGatewayUrl() {
     if (!gatewayStatus?.baseUrl) {
@@ -73,10 +83,18 @@
   }
 
   function selectRoute(nextRoute: Route) {
+    if (["codexClient", "claudeDesktop"].includes(nextRoute) && !desktopClientPagesAvailable) {
+      route = "dashboard";
+      return;
+    }
     if (nextRoute === "wizard") {
       wizardPrefill = null;
     }
     route = nextRoute;
+  }
+
+  function openTerminal() {
+    route = "terminal";
   }
 
   function clearBackgroundDetection() {
@@ -179,7 +197,30 @@
   }
 
   async function refreshAfterProfileChange() {
-    await refreshDashboard();
+    // A profile duplicate/delete/reorder/switch changes profile data and the
+    // gateway, but not the installed-tool environment. Avoid blocking the
+    // action on a full live detectEnvironment() (slow): refresh only the
+    // lightweight profile summary + gateway status so the UI updates instantly,
+    // and let the heavier environment re-scan run in the background.
+    const runId = ++dashboardRefreshRunId;
+    try {
+      const [nextProfileSummary, nextGatewayStatus] = await Promise.all([
+        ensureAppDirs(),
+        loadGatewayStatus()
+      ]);
+      if (runId !== dashboardRefreshRunId) {
+        return;
+      }
+      profileSummary = nextProfileSummary;
+      gatewayStatus = nextGatewayStatus;
+    } catch (err) {
+      if (visibleRefreshRunId === runId) {
+        error = err instanceof Error ? err.message : String(err);
+      }
+    }
+    // Supersede with a full scan in the background (quiet, no loading bar) so
+    // the dashboard's tool/env state stays current without stalling the action.
+    void refreshDashboard({ quiet: true, scheduleFollowup: false });
   }
 
   function mergeToolStatus(status: ToolStatus) {
@@ -245,6 +286,11 @@
     }
   }
 
+  async function updateGatewayPrivacyFilter(mode: PrivacyFilterMode) {
+    const result = await updateGatewaySettings({ privacyFilterMode: mode });
+    gatewayStatus = result.status;
+  }
+
   onMount(() => {
     applyTheme("system");
     void refreshSettings();
@@ -254,6 +300,7 @@
 
   onDestroy(() => {
     clearBackgroundDetection();
+    disposeTerminalSession();
   });
 
   function openWizard(prefill: WizardPrefill | null = null) {
@@ -264,7 +311,8 @@
   function configureTool(tool: ToolStatus) {
     openWizard({
       toolId: tool.id,
-      toolName: tool.name
+      toolName: tool.name,
+      mode: "config"
     });
   }
 </script>
@@ -282,7 +330,7 @@
 
     <nav class="sidebar-nav" aria-label="Primary">
       <div class="nav-section-title">Workspace</div>
-      {#each navItems as item}
+      {#each visibleNavItems as item}
         <button class:active={route === item.id} title={$t(item.labelKey)} on:click={() => selectRoute(item.id)}>
           <AppIcon name={item.icon} size={18} />
           <span class="nav-item-label">{$t(item.labelKey)}</span>
@@ -292,47 +340,6 @@
         </button>
       {/each}
     </nav>
-
-    <section class={`sidebar-gateway ${sidebarGatewayTone}`} aria-label={$t("dashboard.localGateway")}>
-      <div class="sidebar-status-line">
-        <span class="status-dot"></span>
-        <strong>{$t("dashboard.localGateway")}</strong>
-        <span>{sidebarGatewayState}</span>
-      </div>
-
-      <div class="sidebar-gateway-field">
-        <span>{$t("common.url")}</span>
-        <code>{gatewayStatus?.baseUrl ?? "http://127.0.0.1:43112/v1"}</code>
-      </div>
-
-      <div class="sidebar-gateway-field">
-        <span>{$t("dashboard.activeProfile")}</span>
-        <strong>{activeProfileName ?? $t("dashboard.notConfigured")}</strong>
-      </div>
-
-      {#if gatewayStatus?.lastError}
-        <div class="sidebar-gateway-error">{gatewayStatus.lastError}</div>
-      {/if}
-
-      <div class="sidebar-gateway-actions">
-        <button class="icon-button gateway-start-button" title={$t("common.start")} on:click={() => runGatewayAction("start")} disabled={gatewayBusy || gatewayStatus?.running}>
-          <AppIcon name="power" size={16} />
-        </button>
-        <button class="icon-button" title={$t("common.restart")} on:click={() => runGatewayAction("restart")} disabled={gatewayBusy}>
-          <AppIcon name="restart" size={16} class={gatewayBusy ? "spin" : ""} />
-        </button>
-        <button class="icon-button" title={$t("common.stop")} on:click={() => runGatewayAction("stop")} disabled={gatewayBusy || !gatewayStatus?.running}>
-          <AppIcon name="stop" size={16} />
-        </button>
-        <button class="icon-button" title={$t("dashboard.copyGatewayUrl")} on:click={copyGatewayUrl} disabled={!gatewayStatus?.baseUrl}>
-          <AppIcon name="copy" size={16} />
-        </button>
-      </div>
-    </section>
-
-    <div class="sidebar-status">
-      <small>{$t("app.version")}</small>
-    </div>
   </aside>
 
   <section class="workspace">
@@ -340,29 +347,51 @@
       <div class="error-banner">{error}</div>
     {/if}
 
-    {#if route === "dashboard"}
-      <Dashboard
-        {snapshot}
-        onRefresh={refreshDashboard}
-        onToolStatusUpdated={mergeToolStatus}
-        onConfigureTool={configureTool}
-        onOpenCodexClient={() => {
-          route = "codexClient";
-        }}
-      />
-    {:else if route === "codexClient"}
-      <CodexClient />
-    {:else if route === "codexOAuth"}
-      <CodexOAuth summary={profileSummary} {snapshot} onProfileSwitched={refreshAfterProfileChange} />
-    {:else if route === "wizard"}
-      <SetupWizard {snapshot} prefill={wizardPrefill} onProfileSaved={async () => {
-        await refreshAfterProfileChange();
-        route = "profiles";
-      }} />
-    {:else if route === "profiles"}
-      <Profiles summary={profileSummary} {snapshot} onProfileSwitched={refreshAfterProfileChange} />
-    {:else}
-      <SettingsRoute />
-    {/if}
+    {#key route}
+      <div class="route-transition" in:fly={routeEnterTransition} out:fade={routeExitTransition}>
+        {#if route === "dashboard"}
+          <Dashboard
+            {snapshot}
+            onRefresh={refreshDashboard}
+            onToolStatusUpdated={mergeToolStatus}
+            onConfigureTool={configureTool}
+            onOpenTerminal={openTerminal}
+          />
+        {:else if route === "codexClient"}
+          <CodexClient />
+        {:else if route === "claudeDesktop"}
+          <ClaudeDesktop />
+        {:else if route === "wizard"}
+          <SetupWizard {snapshot} prefill={wizardPrefill} onProfileSaved={async (mode) => {
+            await refreshAfterProfileChange();
+            route = mode === "gateway" ? "gateway" : "profiles";
+          }} />
+        {:else if route === "profiles"}
+          <Profiles
+            summary={profileSummary}
+            {snapshot}
+            modeFilter="config"
+            onProfileSwitched={refreshAfterProfileChange}
+            onCreateProfile={(prefill) => openWizard({ ...prefill, mode: "config" })}
+          />
+        {:else if route === "gateway"}
+          <Gateway
+            summary={profileSummary}
+            {snapshot}
+            {gatewayStatus}
+            {gatewayBusy}
+            onGatewayAction={runGatewayAction}
+            onPrivacyFilterChange={updateGatewayPrivacyFilter}
+            onCopyGatewayUrl={copyGatewayUrl}
+            onProfileSwitched={refreshAfterProfileChange}
+            onCreateProfile={openWizard}
+          />
+        {:else if route === "terminal"}
+          <TerminalPanel onBack={() => { route = "dashboard"; }} />
+        {:else}
+          <SettingsRoute />
+        {/if}
+      </div>
+    {/key}
   </section>
 </main>

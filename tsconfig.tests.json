@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": ".tmp-tests",
+    "rootDir": "src",
+    "noEmit": false,
+    "emitDeclarationOnly": false
+  },
+  "include": ["src/lib/profileSortable.ts"]
+}

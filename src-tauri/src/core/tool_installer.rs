@@ -6,10 +6,13 @@ use crate::core::process_control;
 use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
     InstallState, RepairToolPathRequest, RepairToolPathResult, Severity, ToolInstallCommand,
-    ToolInstallPlan, ToolInstallPrerequisite, ToolInstallRequest, ToolInstallResult,
-    ToolInstallStageResult, ToolInstallStep, ToolStatus,
+    ToolInstallPlan, ToolInstallPrerequisite, ToolInstallProgress, ToolInstallRequest,
+    ToolInstallResult, ToolInstallStageResult, ToolInstallStep, ToolStatus, ToolUninstallRequest,
 };
 use std::env;
+use std::io::Read;
+use std::process::Stdio;
+use std::sync::mpsc;
 
 #[derive(Debug, Clone)]
 enum InstallAction {
@@ -17,7 +20,13 @@ enum InstallAction {
     Winget(&'static str),
     HomebrewFormula(&'static str),
     HomebrewCask(&'static str),
+    // Reserved install action for a bundled PowerShell script. The match arms
+    // across plan/run/preview already handle it; no tool currently constructs
+    // it, so it is intentionally dead until a tool opts in.
+    #[allow(dead_code)]
     PowerShellScript(&'static str, &'static str),
+    ShellScript(&'static str, &'static str),
+    InteractiveShellScript(&'static str, &'static str),
     VsCodeExtension(&'static str),
     ProvidedBy(&'static str),
     CustomUnsupported(&'static str),
@@ -38,21 +47,49 @@ struct InstallCommandOutput {
     missing_command: Option<String>,
 }
 
+pub const TOOL_INSTALL_PROGRESS_EVENT: &str = "tool-install://progress";
+
+pub type ToolInstallProgressEmitter = dyn Fn(ToolInstallProgress) + Send + Sync;
+
+struct InstallProgressContext<'a> {
+    root_tool_id: &'a str,
+    tool_id: &'a str,
+    tool_name: &'a str,
+    stage: &'a str,
+    command: &'a str,
+    progress: Option<&'a ToolInstallProgressEmitter>,
+}
+
 pub fn plan_tool_install(tool_id: &str) -> Result<ToolInstallPlan, String> {
     let definition = install_definition(tool_id)
-        .ok_or_else(|| format!("工具 '{tool_id}' 不在安装白名单中。"))?;
+        .ok_or_else(|| format!("Tool '{tool_id}' is not allowed for installation."))?;
     let current_status = current_status(tool_id).ok();
     Ok(build_plan(&definition, current_status.as_ref()))
 }
 
+pub fn plan_tool_update(tool_id: &str) -> Result<ToolInstallPlan, String> {
+    let definition = install_definition(tool_id)
+        .ok_or_else(|| format!("Tool '{tool_id}' is not allowed for updates."))?;
+    let current_status = current_status(tool_id).ok();
+    Ok(build_update_plan(&definition, current_status.as_ref()))
+}
+
 pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, String> {
+    install_tool_with_progress(request, None)
+}
+
+pub fn install_tool_with_progress(
+    request: ToolInstallRequest,
+    progress: Option<&ToolInstallProgressEmitter>,
+) -> Result<ToolInstallResult, String> {
     if !request.confirm {
-        return Err("拒绝执行：安装软件前必须显式确认。".to_string());
+        return Err("Refused: installing software requires explicit confirmation.".to_string());
     }
 
-    let definition = install_definition(&request.tool_id)
-        .ok_or_else(|| format!("工具 '{}' 不在安装白名单中。", request.tool_id))?;
-    let before = current_status(&request.tool_id).ok();
+    let tool_id = request.tool_id.clone();
+    let definition = install_definition(&tool_id)
+        .ok_or_else(|| format!("Tool '{}' is not allowed for installation.", tool_id))?;
+    let before = current_status(&tool_id).ok();
     let plan = build_plan(&definition, before.as_ref());
     if !plan.can_install {
         return Ok(ToolInstallResult {
@@ -66,14 +103,14 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
             },
             message: plan
                 .blocker
-                .unwrap_or_else(|| "安装计划不可执行。".to_string()),
+                .unwrap_or_else(|| "The install plan cannot be executed.".to_string()),
             command: plan.command,
             exit_code: None,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
             current_status: before,
             stage_results: Vec::new(),
-            notes: plan.warnings,
+            notes: Vec::new(),
         });
     }
 
@@ -83,14 +120,14 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
             tool_id: plan.tool_id,
             tool_name: plan.tool_name,
             action: "prerequisites-required".to_string(),
-            message: "安装此工具前需要安装前置依赖，请勾选允许安装前置后再继续。".to_string(),
+            message: "This tool requires prerequisites. Allow prerequisite installation before continuing.".to_string(),
             command: plan.command,
             exit_code: None,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
             current_status: before,
             stage_results: Vec::new(),
-            notes: plan.warnings,
+            notes: Vec::new(),
         });
     }
 
@@ -103,16 +140,30 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
     );
 
     let mut stage_results = Vec::new();
-    let mut notes = plan.warnings.clone();
+    let mut notes = Vec::new();
 
     for prerequisite in &plan.prerequisites {
         if prerequisite.installed {
             continue;
         }
 
-        let prerequisite_definition = install_definition(&prerequisite.tool_id)
-            .ok_or_else(|| format!("前置依赖 '{}' 不在安装白名单中。", prerequisite.tool_id))?;
-        let output = run_install_action(&prerequisite_definition.action)?;
+        let prerequisite_definition =
+            install_definition(&prerequisite.tool_id).ok_or_else(|| {
+                format!(
+                    "Prerequisite '{}' is not allowed for installation.",
+                    prerequisite.tool_id
+                )
+            })?;
+        let command = command_preview(&prerequisite_definition.action);
+        let context = InstallProgressContext {
+            root_tool_id: &tool_id,
+            tool_id: &prerequisite.tool_id,
+            tool_name: &prerequisite.tool_name,
+            stage: "prerequisite",
+            command: &command,
+            progress,
+        };
+        let output = run_install_action(&prerequisite_definition.action, Some(&context))?;
         let missing_command = output.missing_command.clone();
         if output.success {
             refresh_process_environment_after_install(&mut notes);
@@ -120,20 +171,23 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
         let verified = dependency_satisfied(&definition.action);
         let success = output.success && verified;
         let message = if success {
-            format!("{} 前置依赖安装完成。", prerequisite.tool_name)
+            format!("{} prerequisite installed.", prerequisite.tool_name)
         } else if output.success {
             format!(
-                "{} 安装命令已结束，但尚未检测到目标工具所需前置命令。请检查 PATH 或安装日志后刷新。",
+                "{} install command finished, but the prerequisite command required by the target tool was not detected. Check PATH or install logs, then refresh.",
                 prerequisite.tool_name
             )
         } else {
-            format!("{} 前置依赖安装失败。", prerequisite.tool_name)
+            format!(
+                "{} prerequisite installation failed.",
+                prerequisite.tool_name
+            )
         };
         stage_results.push(ToolInstallStageResult {
             tool_id: prerequisite.tool_id.clone(),
             tool_name: prerequisite.tool_name.clone(),
             stage: "prerequisite".to_string(),
-            command: command_preview(&prerequisite_definition.action),
+            command,
             success,
             exit_code: output.exit_code,
             stdout_tail: output.stdout_tail,
@@ -145,7 +199,7 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
             let _ = activity_log::append(Severity::Warning, message.clone());
             return Ok(ToolInstallResult {
                 success: false,
-                tool_id: request.tool_id,
+                tool_id,
                 tool_name: definition.tool.name.to_string(),
                 action: "prerequisite-failed".to_string(),
                 message,
@@ -169,14 +223,22 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
         }
     }
 
-    let output = run_install_action(&definition.action)?;
+    let command = command_preview(&definition.action);
+    let context = InstallProgressContext {
+        root_tool_id: &tool_id,
+        tool_id: &tool_id,
+        tool_name: definition.tool.name,
+        stage: "target",
+        command: &command,
+        progress,
+    };
+    let output = run_install_action(&definition.action, Some(&context))?;
     if output.success {
         refresh_process_environment_after_install(&mut notes);
     }
 
     detector::invalidate_update_cache();
-    let after =
-        current_status_for_missing_command(output.missing_command.as_deref(), &request.tool_id);
+    let after = current_status_for_missing_command(output.missing_command.as_deref(), &tool_id);
     let verified = after
         .as_ref()
         .map(|status| status.install_state == InstallState::Installed)
@@ -185,14 +247,14 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
     let success = process_success && verified;
     let exit_code = output.exit_code;
     let message = if success {
-        format!("{} 安装完成并通过复检。", definition.tool.name)
+        format!("{} installed and verified.", definition.tool.name)
     } else if process_success {
         format!(
-            "{} 安装命令已结束，但复检仍未确认可用。请检查 PATH 或安装日志后刷新。",
+            "{} install command finished, but verification still did not confirm it is available. Check PATH or install logs, then refresh.",
             definition.tool.name
         )
     } else {
-        format!("{} 安装失败。", definition.tool.name)
+        format!("{} installation failed.", definition.tool.name)
     };
     let level = if success {
         Severity::Ok
@@ -202,10 +264,10 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
     let _ = activity_log::append(level, message.clone());
 
     stage_results.push(ToolInstallStageResult {
-        tool_id: request.tool_id.clone(),
+        tool_id: tool_id.clone(),
         tool_name: definition.tool.name.to_string(),
         stage: "target".to_string(),
-        command: command_preview(&definition.action),
+        command,
         success,
         exit_code,
         stdout_tail: output.stdout_tail.clone(),
@@ -215,7 +277,7 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
 
     Ok(ToolInstallResult {
         success,
-        tool_id: request.tool_id,
+        tool_id,
         tool_name: definition.tool.name.to_string(),
         action: manager_label(&definition.action).to_string(),
         message,
@@ -230,14 +292,26 @@ pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, St
 }
 
 pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, String> {
+    update_tool_with_progress(request, None)
+}
+
+pub fn uninstall_tool(request: ToolUninstallRequest) -> Result<ToolInstallResult, String> {
+    uninstall_tool_with_progress(request, None)
+}
+
+pub fn update_tool_with_progress(
+    request: ToolInstallRequest,
+    progress: Option<&ToolInstallProgressEmitter>,
+) -> Result<ToolInstallResult, String> {
     if !request.confirm {
-        return Err("拒绝执行：更新软件前必须显式确认。".to_string());
+        return Err("Refused: updating software requires explicit confirmation.".to_string());
     }
 
-    let definition = install_definition(&request.tool_id)
-        .ok_or_else(|| format!("工具 '{}' 不在更新白名单中。", request.tool_id))?;
-    let before = current_status(&request.tool_id).ok();
-    let command = update_command_preview_for_tool(&request.tool_id, &definition.action);
+    let tool_id = request.tool_id.clone();
+    let definition = install_definition(&tool_id)
+        .ok_or_else(|| format!("Tool '{}' is not allowed for updates.", tool_id))?;
+    let before = current_status(&tool_id).ok();
+    let command = update_command_preview_for_tool(&tool_id, &definition.action);
 
     if before
         .as_ref()
@@ -246,10 +320,13 @@ pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, Str
     {
         return Ok(ToolInstallResult {
             success: false,
-            tool_id: request.tool_id,
+            tool_id,
             tool_name: definition.tool.name.to_string(),
             action: "blocked".to_string(),
-            message: format!("{} 未安装，无法更新。", definition.tool.name),
+            message: format!(
+                "{} is not installed and cannot be updated.",
+                definition.tool.name
+            ),
             command,
             exit_code: None,
             stdout_tail: String::new(),
@@ -260,13 +337,16 @@ pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, Str
         });
     }
 
-    if !update_supported_for_tool(&request.tool_id, &definition.action) {
+    if !update_supported_for_tool(&tool_id, &definition.action) {
         return Ok(ToolInstallResult {
             success: false,
-            tool_id: request.tool_id,
+            tool_id,
             tool_name: definition.tool.name.to_string(),
             action: "blocked".to_string(),
-            message: format!("{} 暂无内置更新动作。", definition.tool.name),
+            message: format!(
+                "{} does not have a built-in update action.",
+                definition.tool.name
+            ),
             command,
             exit_code: None,
             stdout_tail: String::new(),
@@ -283,19 +363,26 @@ pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, Str
     );
 
     let mut notes = Vec::new();
-    let termination = close_processes_before_update(&request.tool_id, definition.tool.name)?;
+    let termination = close_processes_before_update(&tool_id, definition.tool.name)?;
     if let Some(note) = termination.note(definition.tool.name) {
         let _ = activity_log::append(Severity::Info, note.clone());
         notes.push(note);
     }
 
-    let output = run_update_action_for_tool(&request.tool_id, &definition.action)?;
+    let context = InstallProgressContext {
+        root_tool_id: &tool_id,
+        tool_id: &tool_id,
+        tool_name: definition.tool.name,
+        stage: "update",
+        command: &command,
+        progress,
+    };
+    let output = run_update_action_for_tool(&tool_id, &definition.action, Some(&context))?;
     if output.success {
         refresh_process_environment_after_install(&mut notes);
     }
     detector::invalidate_update_cache();
-    let after =
-        current_status_for_missing_command(output.missing_command.as_deref(), &request.tool_id);
+    let after = current_status_for_missing_command(output.missing_command.as_deref(), &tool_id);
     let verified = after
         .as_ref()
         .map(|status| status.install_state == InstallState::Installed)
@@ -303,14 +390,17 @@ pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, Str
     let success = output.success && verified;
     let exit_code = output.exit_code;
     let message = if success {
-        format!("{} 更新命令已完成并通过复检。", definition.tool.name)
+        format!(
+            "{} update command completed and verified.",
+            definition.tool.name
+        )
     } else if output.success {
         format!(
-            "{} 更新命令已结束，但复检仍未确认可用。请检查 PATH 或安装日志后刷新。",
+            "{} update command finished, but verification still did not confirm it is available. Check PATH or install logs, then refresh.",
             definition.tool.name
         )
     } else {
-        format!("{} 更新失败。", definition.tool.name)
+        format!("{} update failed.", definition.tool.name)
     };
     let level = if success {
         Severity::Ok
@@ -320,7 +410,7 @@ pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, Str
     let _ = activity_log::append(level, message.clone());
 
     let stage_results = vec![ToolInstallStageResult {
-        tool_id: request.tool_id.clone(),
+        tool_id: tool_id.clone(),
         tool_name: definition.tool.name.to_string(),
         stage: "update".to_string(),
         command: command.clone(),
@@ -333,7 +423,7 @@ pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, Str
 
     Ok(ToolInstallResult {
         success,
-        tool_id: request.tool_id,
+        tool_id,
         tool_name: definition.tool.name.to_string(),
         action: "update".to_string(),
         message,
@@ -343,6 +433,141 @@ pub fn update_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, Str
         stderr_tail: output.stderr_tail,
         current_status: after,
         stage_results,
+        notes,
+    })
+}
+
+pub fn uninstall_tool_with_progress(
+    request: ToolUninstallRequest,
+    progress: Option<&ToolInstallProgressEmitter>,
+) -> Result<ToolInstallResult, String> {
+    if !request.confirm {
+        return Err("Refused: uninstalling software requires explicit confirmation.".to_string());
+    }
+
+    let tool_id = request.tool_id.clone();
+    let definition = install_definition(&tool_id)
+        .ok_or_else(|| format!("Tool '{}' is not allowed for uninstallation.", tool_id))?;
+    let before = current_status(&tool_id).ok();
+    let command = uninstall_command_preview_for_tool(&tool_id, &definition.action);
+
+    if before
+        .as_ref()
+        .map(|status| status.install_state != InstallState::Installed)
+        .unwrap_or(true)
+    {
+        return Ok(ToolInstallResult {
+            success: false,
+            tool_id,
+            tool_name: definition.tool.name.to_string(),
+            action: "blocked".to_string(),
+            message: format!(
+                "{} is not installed and cannot be uninstalled.",
+                definition.tool.name
+            ),
+            command,
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            current_status: before,
+            stage_results: Vec::new(),
+            notes: Vec::new(),
+        });
+    }
+
+    if !uninstall_supported_for_tool(&tool_id, &definition.action) {
+        return Ok(ToolInstallResult {
+            success: false,
+            tool_id,
+            tool_name: definition.tool.name.to_string(),
+            action: "blocked".to_string(),
+            message: format!(
+                "{} does not have a built-in uninstall action.",
+                definition.tool.name
+            ),
+            command,
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            current_status: before,
+            stage_results: Vec::new(),
+            notes: Vec::new(),
+        });
+    }
+
+    let _ = activity_log::append(
+        Severity::Info,
+        format!("Started uninstall for {}.", definition.tool.name),
+    );
+
+    let mut notes = Vec::new();
+    let termination = close_processes_before_update(&tool_id, definition.tool.name)?;
+    if let Some(note) = termination.note(definition.tool.name) {
+        let _ = activity_log::append(Severity::Info, note.clone());
+        notes.push(note);
+    }
+
+    let context = InstallProgressContext {
+        root_tool_id: &tool_id,
+        tool_id: &tool_id,
+        tool_name: definition.tool.name,
+        stage: "uninstall",
+        command: &command,
+        progress,
+    };
+    let output = run_uninstall_action_for_tool(&tool_id, &definition.action, Some(&context))?;
+    if output.success {
+        refresh_process_environment_after_install(&mut notes);
+    }
+
+    detector::invalidate_update_cache();
+    let after = current_status_for_missing_command(output.missing_command.as_deref(), &tool_id);
+    let uninstalled = after
+        .as_ref()
+        .map(|status| status.install_state != InstallState::Installed)
+        .unwrap_or(true);
+    let success = output.success && uninstalled;
+    let message = if success {
+        format!("{} uninstalled.", definition.tool.name)
+    } else if output.success {
+        format!(
+            "{} uninstall command finished, but verification still detects it. Check install state and refresh.",
+            definition.tool.name
+        )
+    } else {
+        format!("{} uninstall failed.", definition.tool.name)
+    };
+    let level = if success {
+        Severity::Ok
+    } else {
+        Severity::Warning
+    };
+    let _ = activity_log::append(level, message.clone());
+
+    let stage = ToolInstallStageResult {
+        tool_id: tool_id.clone(),
+        tool_name: definition.tool.name.to_string(),
+        stage: "uninstall".to_string(),
+        command: command.clone(),
+        success,
+        exit_code: output.exit_code,
+        stdout_tail: output.stdout_tail.clone(),
+        stderr_tail: output.stderr_tail.clone(),
+        message: message.clone(),
+    };
+
+    Ok(ToolInstallResult {
+        success,
+        tool_id,
+        tool_name: definition.tool.name.to_string(),
+        action: "uninstall".to_string(),
+        message,
+        command,
+        exit_code: output.exit_code,
+        stdout_tail: output.stdout_tail,
+        stderr_tail: output.stderr_tail,
+        current_status: after,
+        stage_results: vec![stage],
         notes,
     })
 }
@@ -363,8 +588,10 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "claude-desktop" => {
             if cfg!(target_os = "macos") {
                 InstallAction::HomebrewCask("claude")
-            } else {
+            } else if cfg!(target_os = "windows") {
                 InstallAction::Winget("Anthropic.Claude")
+            } else {
+                InstallAction::CustomUnsupported("Claude Desktop has no built-in Linux installer.")
             }
         }
         "claude-vscode" => InstallAction::VsCodeExtension("anthropic.claude-code"),
@@ -375,16 +602,26 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "hermes" => {
             if cfg!(target_os = "macos") {
                 InstallAction::HomebrewFormula("hermes-agent")
+            } else if cfg!(target_os = "linux") {
+                InstallAction::InteractiveShellScript(
+                    "Hermes official install script",
+                    "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+                )
             } else {
-                InstallAction::PowerShellScript(
-                    "Hermes 官方安装脚本",
-                    "iex (irm https://hermes-agent.nousresearch.com/install.ps1)",
+                InstallAction::InteractiveShellScript(
+                    "Hermes official install script",
+                    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\"",
                 )
             }
         }
         "node" => {
             if cfg!(target_os = "macos") {
                 InstallAction::HomebrewFormula("node")
+            } else if cfg!(target_os = "linux") {
+                InstallAction::ShellScript(
+                    "NodeSource Node.js LTS install script",
+                    "curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs",
+                )
             } else {
                 InstallAction::Winget("OpenJS.NodeJS.LTS")
             }
@@ -392,6 +629,11 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "git" => {
             if cfg!(target_os = "macos") {
                 InstallAction::HomebrewFormula("git")
+            } else if cfg!(target_os = "linux") {
+                InstallAction::ShellScript(
+                    "APT Git install command",
+                    "sudo apt-get update && sudo apt-get install -y git",
+                )
             } else {
                 InstallAction::Winget("Git.Git")
             }
@@ -400,12 +642,17 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "bun" => {
             if cfg!(target_os = "macos") {
                 InstallAction::HomebrewFormula("bun")
+            } else if cfg!(target_os = "linux") {
+                InstallAction::ShellScript(
+                    "Bun official install script",
+                    "curl -fsSL https://bun.sh/install | bash",
+                )
             } else {
                 InstallAction::Winget("Oven-sh.Bun")
             }
         }
         "npm" => InstallAction::ProvidedBy("Node.js LTS"),
-        _ => InstallAction::CustomUnsupported("暂无内置安装器。"),
+        _ => InstallAction::CustomUnsupported("No built-in installer is available."),
     };
     Some(InstallDefinition { tool, action })
 }
@@ -420,29 +667,30 @@ fn build_plan(
     let manager = manager_label(&definition.action).to_string();
     let mut prerequisites = Vec::new();
     let mut steps = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
     let mut blocker = None;
     let mut can_install = !already_installed;
 
     if already_installed {
-        blocker = Some(format!("{} 已安装，无需重复安装。", definition.tool.name));
+        blocker = Some(format!("{} is already installed.", definition.tool.name));
         can_install = false;
     }
 
     match &definition.action {
         InstallAction::NpmGlobal(package) => {
             steps.push(ToolInstallStep {
-                label: "检查 npm".to_string(),
-                detail: "需要本机 npm 可用；npm 通常随 Node.js LTS 一起安装。".to_string(),
+                label: "Check npm".to_string(),
+                detail: "Local npm must be available; npm usually ships with Node.js LTS."
+                    .to_string(),
             });
             steps.push(ToolInstallStep {
-                label: "安装全局包".to_string(),
-                detail: format!("执行 npm install -g {package}。"),
+                label: "Install global package".to_string(),
+                detail: format!("Run npm install -g {package}."),
             });
             steps.push(ToolInstallStep {
-                label: "复检命令".to_string(),
+                label: "Verify command".to_string(),
                 detail: format!(
-                    "安装后运行 {} --version 并刷新仪表盘。",
+                    "After installation, run {} --version and refresh the dashboard.",
                     definition.tool.command
                 ),
             });
@@ -462,7 +710,7 @@ fn build_plan(
                 let node_command = node_definition
                     .as_ref()
                     .map(|definition| command_preview(&definition.action))
-                    .unwrap_or_else(|| "安装 Node.js LTS".to_string());
+                    .unwrap_or_else(|| "Install Node.js LTS".to_string());
                 prerequisites.push(ToolInstallPrerequisite {
                     tool_id: "node".to_string(),
                     tool_name: "Node.js LTS".to_string(),
@@ -470,26 +718,23 @@ fn build_plan(
                     command: node_command,
                     installed: node_installed,
                     can_install: node_can_install,
-                    reason: "目标工具需要 npm；npm 随 Node.js LTS 提供。".to_string(),
+                    reason: "The target tool requires npm; npm is provided by Node.js LTS."
+                        .to_string(),
                 });
                 steps.insert(
                     0,
                     ToolInstallStep {
-                        label: "安装前置依赖".to_string(),
+                        label: "Install prerequisite".to_string(),
                         detail: format!(
-                            "检测到 npm 不可用；允许后会先通过 {} 安装 Node.js LTS。",
+                            "npm is not available; if allowed, Node.js LTS will be installed through {} first.",
                             node_manager
                         )
                         .to_string(),
                     },
                 );
-                warnings.push(
-                    "此计划包含前置依赖安装：Node.js LTS 会先安装，随后再安装目标 npm 包。"
-                        .to_string(),
-                );
                 if !node_can_install {
                     blocker = Some(
-                        "npm 不可用，且当前平台的 Node.js 自动安装器不可用；无法自动安装前置依赖。"
+                        "npm is not available, and the current platform has no automatic Node.js installer; prerequisites cannot be installed automatically."
                             .to_string(),
                     );
                     can_install = false;
@@ -498,114 +743,194 @@ fn build_plan(
         }
         InstallAction::Winget(package_id) => {
             steps.push(ToolInstallStep {
-                label: "检查 winget".to_string(),
-                detail: "需要 Windows App Installer / winget 可用。".to_string(),
+                label: "Check winget".to_string(),
+                detail: "Windows App Installer / winget must be available.".to_string(),
             });
             steps.push(ToolInstallStep {
-                label: "安装软件包".to_string(),
-                detail: format!("通过 winget 安装 {package_id}。"),
+                label: "Install package".to_string(),
+                detail: format!("Install {package_id} through winget."),
             });
             steps.push(ToolInstallStep {
-                label: "复检命令".to_string(),
+                label: "Verify command".to_string(),
                 detail: format!(
-                    "安装后运行 {} --version 并刷新仪表盘。",
+                    "After installation, run {} --version and refresh the dashboard.",
                     definition.tool.command
                 ),
             });
             if !cfg!(target_os = "windows") {
-                blocker = Some("winget 安装器仅支持 Windows。".to_string());
+                blocker = Some("The winget installer is only supported on Windows.".to_string());
                 can_install = false;
             } else if !command_available("winget") {
-                blocker = Some("winget 不可用。请先安装或修复 Windows App Installer。".to_string());
+                blocker = Some(
+                    "winget is not available. Install or repair Windows App Installer first."
+                        .to_string(),
+                );
                 can_install = false;
             }
         }
         InstallAction::HomebrewFormula(formula) => {
             steps.push(ToolInstallStep {
-                label: "检查 Homebrew".to_string(),
-                detail: "需要本机 brew 命令可用。".to_string(),
+                label: "Check Homebrew".to_string(),
+                detail: "The local brew command must be available.".to_string(),
             });
             steps.push(ToolInstallStep {
-                label: "安装公式".to_string(),
-                detail: format!("通过 Homebrew 安装 {formula}。"),
+                label: "Install formula".to_string(),
+                detail: format!("Install {formula} through Homebrew."),
             });
             steps.push(ToolInstallStep {
-                label: "复检命令".to_string(),
+                label: "Verify command".to_string(),
                 detail: format!(
-                    "安装后运行 {} --version 并刷新仪表盘。",
+                    "After installation, run {} --version and refresh the dashboard.",
                     definition.tool.command
                 ),
             });
             if !cfg!(target_os = "macos") {
-                blocker = Some("Homebrew 安装器当前仅在 macOS 上启用。".to_string());
+                blocker =
+                    Some("The Homebrew installer is currently enabled only on macOS.".to_string());
                 can_install = false;
             } else if !command_available("brew") {
-                blocker = Some("brew 不可用。请先安装 Homebrew，或使用手动安装。".to_string());
+                blocker = Some(
+                    "brew is not available. Install Homebrew first, or install manually."
+                        .to_string(),
+                );
                 can_install = false;
             }
         }
         InstallAction::HomebrewCask(cask) => {
             steps.push(ToolInstallStep {
-                label: "检查 Homebrew".to_string(),
-                detail: "需要本机 brew 命令可用。".to_string(),
+                label: "Check Homebrew".to_string(),
+                detail: "The local brew command must be available.".to_string(),
             });
             steps.push(ToolInstallStep {
-                label: "安装应用".to_string(),
-                detail: format!("通过 Homebrew Cask 安装 {cask}。"),
+                label: "Install app".to_string(),
+                detail: format!("Install {cask} through Homebrew Cask."),
             });
             steps.push(ToolInstallStep {
-                label: "复检应用".to_string(),
-                detail: format!("安装后检测 {} 是否可用。", definition.tool.name),
+                label: "Verify app".to_string(),
+                detail: format!(
+                    "After installation, check whether {} is available.",
+                    definition.tool.name
+                ),
             });
             if !cfg!(target_os = "macos") {
-                blocker = Some("Homebrew Cask 安装器当前仅在 macOS 上启用。".to_string());
+                blocker = Some(
+                    "The Homebrew Cask installer is currently enabled only on macOS.".to_string(),
+                );
                 can_install = false;
             } else if !command_available("brew") {
-                blocker = Some("brew 不可用。请先安装 Homebrew，或使用手动安装。".to_string());
+                blocker = Some(
+                    "brew is not available. Install Homebrew first, or install manually."
+                        .to_string(),
+                );
                 can_install = false;
             }
         }
         InstallAction::PowerShellScript(label, script) => {
             steps.push(ToolInstallStep {
-                label: "检查 PowerShell".to_string(),
-                detail: "需要本机 PowerShell 可用。".to_string(),
+                label: "Check PowerShell".to_string(),
+                detail: "Local PowerShell must be available.".to_string(),
             });
             steps.push(ToolInstallStep {
-                label: "运行官方安装脚本".to_string(),
-                detail: format!("执行 {label}：{script}。"),
+                label: "Run official install script".to_string(),
+                detail: format!("Run {label}: {script}."),
             });
             steps.push(ToolInstallStep {
-                label: "复检命令".to_string(),
+                label: "Verify command".to_string(),
                 detail: format!(
-                    "安装后运行 {} --version 并刷新仪表盘。",
+                    "After installation, run {} --version and refresh the dashboard.",
                     definition.tool.command
                 ),
             });
             if !cfg!(target_os = "windows") {
-                blocker = Some("此 PowerShell 安装脚本目前仅在 Windows 上启用。".to_string());
+                blocker = Some(
+                    "This PowerShell install script is currently enabled only on Windows."
+                        .to_string(),
+                );
                 can_install = false;
             } else if !powershell_available() {
-                blocker = Some("PowerShell 不可用，无法运行官方安装脚本。".to_string());
+                blocker = Some(
+                    "PowerShell is not available, so the official install script cannot run."
+                        .to_string(),
+                );
+                can_install = false;
+            }
+        }
+        InstallAction::ShellScript(label, script) => {
+            steps.push(ToolInstallStep {
+                label: "Check shell".to_string(),
+                detail: "Local bash must be available.".to_string(),
+            });
+            steps.push(ToolInstallStep {
+                label: "Run install script".to_string(),
+                detail: format!("Run {label}: {script}."),
+            });
+            steps.push(ToolInstallStep {
+                label: "Verify command".to_string(),
+                detail: format!(
+                    "After installation, run {} --version and refresh the dashboard.",
+                    definition.tool.command
+                ),
+            });
+            if !cfg!(target_os = "linux") {
+                blocker = Some(
+                    "This shell install route is currently enabled only on Linux.".to_string(),
+                );
+                can_install = false;
+            } else if !command_available("bash") {
+                blocker = Some(
+                    "bash is not available, so the Linux install script cannot run.".to_string(),
+                );
+                can_install = false;
+            }
+        }
+        InstallAction::InteractiveShellScript(label, script) => {
+            steps.push(ToolInstallStep {
+                label: "Open interactive terminal".to_string(),
+                detail: "The installer may ask for choices, credentials, or shell confirmation."
+                    .to_string(),
+            });
+            steps.push(ToolInstallStep {
+                label: "Run official install script".to_string(),
+                detail: format!("Run {label}: {script}."),
+            });
+            steps.push(ToolInstallStep {
+                label: "Verify command".to_string(),
+                detail: format!(
+                    "After installation, run {} --version and refresh the dashboard.",
+                    definition.tool.command
+                ),
+            });
+            if cfg!(target_os = "linux") && !command_available("bash") {
+                blocker = Some(
+                    "bash is not available, so the interactive install script cannot run."
+                        .to_string(),
+                );
+                can_install = false;
+            } else if cfg!(target_os = "windows") && !powershell_available() {
+                blocker = Some(
+                    "PowerShell is not available, so the interactive install script cannot run."
+                        .to_string(),
+                );
                 can_install = false;
             }
         }
         InstallAction::VsCodeExtension(extension_id) => {
             steps.push(ToolInstallStep {
-                label: "检查 VS Code CLI".to_string(),
-                detail: "需要本机 code 命令可用。".to_string(),
+                label: "Check VS Code CLI".to_string(),
+                detail: "The local code command must be available.".to_string(),
             });
             steps.push(ToolInstallStep {
-                label: "安装 VS Code 扩展".to_string(),
-                detail: format!("执行 code --install-extension {extension_id}。"),
+                label: "Install VS Code extension".to_string(),
+                detail: format!("Run code --install-extension {extension_id}."),
             });
             steps.push(ToolInstallStep {
-                label: "复检扩展".to_string(),
-                detail: "安装后运行 code --list-extensions --show-versions 并刷新仪表盘。"
+                label: "Verify extension".to_string(),
+                detail: "After installation, run code --list-extensions --show-versions and refresh the dashboard."
                     .to_string(),
             });
             if !command_available("code") {
                 blocker = Some(
-                    "VS Code CLI 不可用。请先安装 VS Code，或在 VS Code 中启用 code 命令。"
+                    "VS Code CLI is not available. Install VS Code first, or enable the code command in VS Code."
                         .to_string(),
                 );
                 can_install = false;
@@ -613,52 +938,22 @@ fn build_plan(
         }
         InstallAction::ProvidedBy(provider) => {
             blocker = Some(format!(
-                "{} 由 {provider} 提供，请安装 {provider}。",
+                "{} is provided by {provider}; install {provider}.",
                 definition.tool.name
             ));
             can_install = false;
             steps.push(ToolInstallStep {
-                label: "安装上游依赖".to_string(),
-                detail: format!("{} 没有独立安装包。", definition.tool.name),
+                label: "Install upstream dependency".to_string(),
+                detail: format!(
+                    "{} does not have a standalone installer.",
+                    definition.tool.name
+                ),
             });
         }
         InstallAction::CustomUnsupported(reason) => {
             blocker = Some(reason.to_string());
             can_install = false;
         }
-    }
-
-    if matches!(definition.action, InstallAction::Winget(_)) {
-        warnings.push(
-            "部分 winget 包可能触发系统安装权限提示；CodeStudio Lite 不会绕过系统确认。"
-                .to_string(),
-        );
-    }
-    if matches!(
-        definition.action,
-        InstallAction::HomebrewFormula(_) | InstallAction::HomebrewCask(_)
-    ) {
-        warnings.push(
-            "Homebrew 安装会写入当前用户的 Homebrew 前缀，完成后可能需要重新打开终端。".to_string(),
-        );
-    }
-    if matches!(definition.action, InstallAction::NpmGlobal(_)) {
-        warnings.push(
-            "全局 npm 安装会写入当前用户或当前 npm 前缀目录，完成后可能需要重新打开终端。"
-                .to_string(),
-        );
-    }
-    if matches!(definition.action, InstallAction::PowerShellScript(_, _)) {
-        warnings.push(
-            "此计划会运行目标工具官方发布的 PowerShell 安装脚本；请只在信任该工具来源时确认。"
-                .to_string(),
-        );
-    }
-    if matches!(definition.action, InstallAction::VsCodeExtension(_)) {
-        warnings.push(
-            "VS Code 扩展会安装到当前用户的 VS Code 配置中，完成后可能需要重启 VS Code。"
-                .to_string(),
-        );
     }
 
     let mut commands = prerequisites
@@ -671,10 +966,13 @@ fn build_plan(
     let requires_prerequisites = prerequisites
         .iter()
         .any(|prerequisite| !prerequisite.installed);
-    let requires_admin = matches!(definition.action, InstallAction::Winget(_))
+    let requires_admin = action_requires_admin(&definition.action)
         || prerequisites
             .iter()
-            .any(|prerequisite| !prerequisite.installed && prerequisite.manager == "winget");
+            .filter(|prerequisite| !prerequisite.installed)
+            .filter_map(|prerequisite| install_definition(&prerequisite.tool_id))
+            .any(|definition| action_requires_admin(&definition.action));
+    let interactive = action_interactive(&definition.action);
 
     ToolInstallPlan {
         tool_id: definition.tool.id.to_string(),
@@ -685,6 +983,7 @@ fn build_plan(
             .map(|command| command.command.clone())
             .collect::<Vec<_>>()
             .join(" && "),
+        interactive,
         commands,
         requires_prerequisites,
         prerequisites,
@@ -697,6 +996,89 @@ fn build_plan(
     }
 }
 
+fn build_update_plan(
+    definition: &InstallDefinition,
+    detected_status: Option<&ToolStatus>,
+) -> ToolInstallPlan {
+    let installed = detected_status
+        .map(|status| status.install_state == InstallState::Installed)
+        .unwrap_or(false);
+    let update_detected = detected_status
+        .map(|status| status.update_available)
+        .unwrap_or(false);
+    let supported = update_supported_for_tool(definition.tool.id, &definition.action);
+    let command = update_command_preview_for_tool(definition.tool.id, &definition.action);
+    let manager = manager_label(&definition.action).to_string();
+    let mut blocker = None;
+
+    if !installed {
+        blocker = Some(format!(
+            "{} is not installed and cannot be updated.",
+            definition.tool.name
+        ));
+    } else if !supported {
+        blocker = Some(format!(
+            "{} does not have a built-in update action.",
+            definition.tool.name
+        ));
+    } else if action_interactive(&definition.action) {
+        blocker = Some(format!(
+            "{} requires an interactive installer and cannot be updated from this dialog yet.",
+            definition.tool.name
+        ));
+    } else if !update_detected {
+        blocker = Some(format!(
+            "{} has no detected update right now.",
+            definition.tool.name
+        ));
+    }
+
+    let can_install =
+        installed && supported && !action_interactive(&definition.action) && update_detected;
+    let command_entry = ToolInstallCommand {
+        tool_id: definition.tool.id.to_string(),
+        tool_name: definition.tool.name.to_string(),
+        stage: "update".to_string(),
+        manager: manager.clone(),
+        command: command.clone(),
+        requires_admin: action_requires_admin(&definition.action),
+        interactive: false,
+    };
+
+    ToolInstallPlan {
+        tool_id: definition.tool.id.to_string(),
+        tool_name: definition.tool.name.to_string(),
+        manager,
+        command,
+        interactive: false,
+        commands: vec![command_entry],
+        prerequisites: Vec::new(),
+        requires_prerequisites: false,
+        can_install,
+        already_installed: installed,
+        requires_admin: action_requires_admin(&definition.action),
+        steps: vec![
+            ToolInstallStep {
+                label: "Check installed app".to_string(),
+                detail: format!(
+                    "Confirm {} is installed before updating.",
+                    definition.tool.name
+                ),
+            },
+            ToolInstallStep {
+                label: "Run update command".to_string(),
+                detail: "Close the target app if needed, then run the update command.".to_string(),
+            },
+            ToolInstallStep {
+                label: "Verify version".to_string(),
+                detail: "Refresh detection after the update command finishes.".to_string(),
+            },
+        ],
+        warnings: Vec::new(),
+        blocker,
+    }
+}
+
 fn command_entry(definition: &InstallDefinition, stage: &str) -> ToolInstallCommand {
     ToolInstallCommand {
         tool_id: definition.tool.id.to_string(),
@@ -704,7 +1086,8 @@ fn command_entry(definition: &InstallDefinition, stage: &str) -> ToolInstallComm
         stage: stage.to_string(),
         manager: manager_label(&definition.action).to_string(),
         command: command_preview(&definition.action),
-        requires_admin: matches!(definition.action, InstallAction::Winget(_)),
+        requires_admin: action_requires_admin(&definition.action),
+        interactive: action_interactive(&definition.action),
     }
 }
 
@@ -715,15 +1098,23 @@ fn dependency_satisfied(action: &InstallAction) -> bool {
             command_available("brew")
         }
         InstallAction::PowerShellScript(_, _) => powershell_available(),
+        InstallAction::ShellScript(_, _) | InstallAction::InteractiveShellScript(_, _) => {
+            command_available("bash") || cfg!(target_os = "windows")
+        }
         InstallAction::VsCodeExtension(_) => command_available("code"),
         _ => true,
     }
 }
 
-fn run_install_action(action: &InstallAction) -> Result<InstallCommandOutput, String> {
+fn run_install_action(
+    action: &InstallAction,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
     match action {
-        InstallAction::NpmGlobal(package) => run_action_command("npm", &["install", "-g", package]),
-        InstallAction::Winget(package_id) => run_action_command(
+        InstallAction::NpmGlobal(package) => {
+            run_action_command("npm", &["install", "-g", package], progress)
+        }
+        InstallAction::Winget(package_id) => run_action_command_elevated_on_windows(
             "winget",
             &[
                 "install",
@@ -734,12 +1125,13 @@ fn run_install_action(action: &InstallAction) -> Result<InstallCommandOutput, St
                 "--accept-package-agreements",
                 "--disable-interactivity",
             ],
+            progress,
         ),
         InstallAction::HomebrewFormula(formula) => {
-            run_action_command("brew", &["install", formula])
+            run_action_command("brew", &["install", formula], progress)
         }
         InstallAction::HomebrewCask(cask) => {
-            run_action_command("brew", &["install", "--cask", cask])
+            run_action_command("brew", &["install", "--cask", cask], progress)
         }
         InstallAction::PowerShellScript(_, script) => run_action_command(
             "powershell",
@@ -750,26 +1142,37 @@ fn run_install_action(action: &InstallAction) -> Result<InstallCommandOutput, St
                 "-Command",
                 script,
             ],
+            progress,
         ),
+        InstallAction::ShellScript(_, script) => {
+            run_action_command("bash", &["-lc", script], progress)
+        }
+        InstallAction::InteractiveShellScript(_, _) => {
+            Err("This install action requires the interactive terminal.".to_string())
+        }
         InstallAction::VsCodeExtension(extension_id) => {
-            run_action_command("code", &["--install-extension", extension_id])
+            run_action_command("code", &["--install-extension", extension_id], progress)
         }
         InstallAction::ProvidedBy(_) | InstallAction::CustomUnsupported(_) => {
-            Err("此工具没有可执行的独立安装动作。".to_string())
+            Err("This tool has no executable standalone install action.".to_string())
         }
     }
 }
 
-fn run_update_action(action: &InstallAction) -> Result<InstallCommandOutput, String> {
+fn run_update_action(
+    action: &InstallAction,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
     match action {
         InstallAction::NpmGlobal(package) => {
             let package = format!("{package}@latest");
             run_action_command_owned(
                 "npm",
                 vec!["install".to_string(), "-g".to_string(), package],
+                progress,
             )
         }
-        InstallAction::Winget(package_id) => run_action_command(
+        InstallAction::Winget(package_id) => run_action_command_elevated_on_windows(
             "winget",
             &[
                 "upgrade",
@@ -780,12 +1183,13 @@ fn run_update_action(action: &InstallAction) -> Result<InstallCommandOutput, Str
                 "--accept-package-agreements",
                 "--disable-interactivity",
             ],
+            progress,
         ),
         InstallAction::HomebrewFormula(formula) => {
-            run_action_command("brew", &["upgrade", formula])
+            run_action_command("brew", &["upgrade", formula], progress)
         }
         InstallAction::HomebrewCask(cask) => {
-            run_action_command("brew", &["upgrade", "--cask", cask])
+            run_action_command("brew", &["upgrade", "--cask", cask], progress)
         }
         InstallAction::PowerShellScript(_, script) => run_action_command(
             "powershell",
@@ -796,12 +1200,21 @@ fn run_update_action(action: &InstallAction) -> Result<InstallCommandOutput, Str
                 "-Command",
                 script,
             ],
+            progress,
         ),
-        InstallAction::VsCodeExtension(extension_id) => {
-            run_action_command("code", &["--install-extension", extension_id, "--force"])
+        InstallAction::ShellScript(_, script) => {
+            run_action_command("bash", &["-lc", script], progress)
         }
+        InstallAction::InteractiveShellScript(_, _) => {
+            Err("This update action requires the interactive terminal.".to_string())
+        }
+        InstallAction::VsCodeExtension(extension_id) => run_action_command(
+            "code",
+            &["--install-extension", extension_id, "--force"],
+            progress,
+        ),
         InstallAction::ProvidedBy(_) | InstallAction::CustomUnsupported(_) => {
-            Err("此工具没有可执行的独立更新动作。".to_string())
+            Err("This tool has no executable standalone update action.".to_string())
         }
     }
 }
@@ -809,12 +1222,89 @@ fn run_update_action(action: &InstallAction) -> Result<InstallCommandOutput, Str
 fn run_update_action_for_tool(
     tool_id: &str,
     action: &InstallAction,
+    progress: Option<&InstallProgressContext>,
 ) -> Result<InstallCommandOutput, String> {
     if tool_id == "npm" {
-        return run_update_action(&InstallAction::NpmGlobal("npm"));
+        return run_update_action(&InstallAction::NpmGlobal("npm"), progress);
     }
-    run_update_action(action)
+    if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        return run_action_command(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                CLAUDE_DESKTOP_WINDOWS_UPDATE_SCRIPT,
+            ],
+            progress,
+        );
+    }
+    run_update_action(action, progress)
 }
+
+fn run_uninstall_action_for_tool(
+    _tool_id: &str,
+    action: &InstallAction,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    match action {
+        InstallAction::Winget(package_id) => run_action_command_elevated_on_windows(
+            "winget",
+            &["uninstall", "--id", package_id, "--exact"],
+            progress,
+        ),
+        InstallAction::HomebrewCask(cask) => {
+            run_action_command("brew", &["uninstall", "--cask", cask], progress)
+        }
+        InstallAction::HomebrewFormula(formula) => {
+            run_action_command("brew", &["uninstall", formula], progress)
+        }
+        InstallAction::VsCodeExtension(extension_id) => {
+            run_action_command("code", &["--uninstall-extension", extension_id], progress)
+        }
+        InstallAction::NpmGlobal(package) => {
+            run_action_command("npm", &["uninstall", "-g", package], progress)
+        }
+        InstallAction::PowerShellScript(_, _)
+        | InstallAction::ShellScript(_, _)
+        | InstallAction::InteractiveShellScript(_, _)
+        | InstallAction::ProvidedBy(_)
+        | InstallAction::CustomUnsupported(_) => {
+            Err("This tool has no executable standalone uninstall action.".to_string())
+        }
+    }
+}
+
+const CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND: &str =
+    "Download and run the latest Claude Desktop installer from downloads.claude.ai";
+
+const CLAUDE_DESKTOP_WINDOWS_UPDATE_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$latest = Invoke-RestMethod -Uri 'https://downloads.claude.ai/releases/win32/x64/.latest' -Headers @{ 'User-Agent' = 'CodeStudio Lite' }
+$version = [string]$latest.version
+$hash = [string]$latest.hash
+if ([string]::IsNullOrWhiteSpace($version) -or [string]::IsNullOrWhiteSpace($hash)) {
+  throw 'Claude Desktop latest metadata is incomplete.'
+}
+$url = "https://downloads.claude.ai/releases/win32/x64/$version/Claude-$hash.exe"
+$target = Join-Path $env:TEMP "Claude-$version.exe"
+Write-Output "Downloading Claude Desktop $version"
+Invoke-WebRequest -Uri $url -OutFile $target -Headers @{ 'User-Agent' = 'CodeStudio Lite' }
+if (-not (Test-Path -LiteralPath $target)) {
+  throw "Claude Desktop installer was not downloaded."
+}
+$item = Get-Item -LiteralPath $target
+if ($item.Length -le 0) {
+  throw "Claude Desktop installer is empty."
+}
+Write-Output "Starting Claude Desktop installer"
+$process = Start-Process -FilePath $target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($target)) -Wait -PassThru
+if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {
+  exit $process.ExitCode
+}
+"#;
 
 fn current_status(tool_id: &str) -> Result<ToolStatus, String> {
     let snapshot = detector::detect_environment()?;
@@ -823,7 +1313,7 @@ fn current_status(tool_id: &str) -> Result<ToolStatus, String> {
         .into_iter()
         .chain(snapshot.system)
         .find(|tool| tool.id == tool_id)
-        .ok_or_else(|| format!("没有找到工具 '{tool_id}' 的检测状态。"))
+        .ok_or_else(|| format!("No detection status found for tool '{tool_id}'."))
 }
 
 fn current_status_for_missing_command(
@@ -883,37 +1373,172 @@ fn powershell_available() -> bool {
     .unwrap_or(false)
 }
 
-fn run_action_command(program: &str, args: &[&str]) -> Result<InstallCommandOutput, String> {
+fn run_action_command(
+    program: &str,
+    args: &[&str],
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
     let Some(resolved) = resolve_command(program) else {
         return Ok(missing_command_output(program));
     };
-    match hidden_command_with_args(&resolved, args).output() {
-        Ok(output) => Ok(output_to_install_command_output(output, None)),
-        Err(err) => Ok(start_failed_output(program, err)),
+    let mut command = hidden_command_with_args(&resolved, args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    run_streaming_command(command, program, progress)
+}
+
+fn run_action_command_elevated_on_windows(
+    program: &str,
+    args: &[&str],
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    #[cfg(windows)]
+    {
+        let Some(resolved) = resolve_command(program) else {
+            return Ok(missing_command_output(program));
+        };
+        let powershell_args = windows_elevated_powershell_args(&resolved, args);
+        let powershell_args = powershell_args
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut command = hidden_command_with_args("powershell.exe", &powershell_args);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        return run_streaming_command(command, program, progress);
     }
+
+    #[cfg(not(windows))]
+    {
+        run_action_command(program, args, progress)
+    }
+}
+
+#[cfg(windows)]
+fn windows_elevated_powershell_args(program: &str, args: &[&str]) -> Vec<String> {
+    let argument_list = args
+        .iter()
+        .map(|arg| ps_single_quote(arg))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        "$process = Start-Process -FilePath {} -ArgumentList @({}) -Verb RunAs -Wait -PassThru; if ($null -ne $process.ExitCode) {{ exit $process.ExitCode }}; exit 0",
+        ps_single_quote(program),
+        argument_list
+    );
+    vec![
+        "-NoLogo".to_string(),
+        "-NoProfile".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-Command".to_string(),
+        script,
+    ]
+}
+
+#[cfg(windows)]
+fn ps_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn run_action_command_owned(
     program: &str,
     args: Vec<String>,
+    progress: Option<&InstallProgressContext>,
 ) -> Result<InstallCommandOutput, String> {
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_action_command(program, &args)
+    run_action_command(program, &args, progress)
 }
 
-fn output_to_install_command_output(
-    output: std::process::Output,
-    missing_command: Option<String>,
-) -> InstallCommandOutput {
-    let stdout = decode(&output.stdout);
-    let stderr = decode(&output.stderr);
-    InstallCommandOutput {
-        success: output.status.success(),
-        exit_code: output.status.code(),
+fn run_streaming_command(
+    mut command: std::process::Command,
+    missing_command_name: &str,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => return Ok(start_failed_output(missing_command_name, err)),
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel::<(&'static str, String)>();
+
+    if let Some(stdout) = stdout {
+        let tx = tx.clone();
+        std::thread::spawn(move || read_stream_chunks(stdout, "stdout", tx));
+    }
+    if let Some(stderr) = stderr {
+        let tx = tx.clone();
+        std::thread::spawn(move || read_stream_chunks(stderr, "stderr", tx));
+    }
+    drop(tx);
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for (stream, chunk) in rx {
+        if stream == "stdout" {
+            stdout.push_str(&chunk);
+        } else {
+            stderr.push_str(&chunk);
+        }
+        emit_install_progress(progress, stream, chunk, None, false);
+    }
+
+    let status = child
+        .wait()
+        .map_err(|err| format!("Failed to wait for install command: {err}"))?;
+    emit_install_progress(progress, "status", String::new(), status.code(), true);
+    Ok(InstallCommandOutput {
+        success: status.success(),
+        exit_code: status.code(),
         stdout_tail: tail(&stdout),
         stderr_tail: tail(&stderr),
-        missing_command,
+        missing_command: None,
+    })
+}
+
+fn read_stream_chunks<R: Read + Send + 'static>(
+    mut reader: R,
+    stream: &'static str,
+    tx: mpsc::Sender<(&'static str, String)>,
+) {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(size) => {
+                let _ = tx.send((stream, decode(&buffer[..size])));
+            }
+            Err(err) => {
+                let _ = tx.send((stream, format!("Failed to read {stream}: {err}\n")));
+                break;
+            }
+        }
     }
+}
+
+fn emit_install_progress(
+    context: Option<&InstallProgressContext>,
+    stream: &str,
+    chunk: String,
+    exit_code: Option<i32>,
+    done: bool,
+) {
+    let Some(context) = context else {
+        return;
+    };
+    let Some(progress) = context.progress else {
+        return;
+    };
+    progress(ToolInstallProgress {
+        root_tool_id: context.root_tool_id.to_string(),
+        tool_id: context.tool_id.to_string(),
+        tool_name: context.tool_name.to_string(),
+        stage: context.stage.to_string(),
+        command: context.command.to_string(),
+        stream: stream.to_string(),
+        chunk,
+        done,
+        exit_code,
+    });
 }
 
 fn missing_command_output(command: &str) -> InstallCommandOutput {
@@ -921,7 +1546,9 @@ fn missing_command_output(command: &str) -> InstallCommandOutput {
         success: false,
         exit_code: None,
         stdout_tail: String::new(),
-        stderr_tail: format!("命令不可用：{command}。它可能已被移动或卸载。"),
+        stderr_tail: format!(
+            "Command is unavailable: {command}. It may have been moved or uninstalled."
+        ),
         missing_command: Some(command.to_string()),
     }
 }
@@ -931,16 +1558,16 @@ fn start_failed_output(command: &str, err: std::io::Error) -> InstallCommandOutp
         success: false,
         exit_code: None,
         stdout_tail: String::new(),
-        stderr_tail: format!("启动命令失败：{err}"),
+        stderr_tail: format!("Failed to start command: {err}"),
         missing_command: Some(command.to_string()),
     }
 }
 
 fn refresh_process_environment_after_install(notes: &mut Vec<String>) {
     match refresh_process_path_from_registry() {
-        Ok(true) => push_note_once(notes, "已刷新当前应用进程 PATH，后续检测无需重启应用。"),
+        Ok(true) => push_note_once(notes, "Refreshed the current app process PATH, so later detection does not require restarting the app."),
         Ok(false) => {}
-        Err(err) => push_note_once(notes, &format!("当前应用进程 PATH 刷新失败：{err}")),
+        Err(err) => push_note_once(notes, &format!("Failed to refresh the current app process PATH: {err}")),
     }
 }
 
@@ -988,7 +1615,7 @@ foreach ($part in $parts) {
         ],
     )
     .output()
-    .map_err(|err| format!("启动 PowerShell 刷新 PATH 失败：{err}"))?;
+    .map_err(|err| format!("Failed to start PowerShell to refresh PATH: {err}"))?;
     if !output.status.success() {
         return Err(decode(&output.stderr).trim().to_string());
     }
@@ -1010,6 +1637,8 @@ fn manager_label(action: &InstallAction) -> &'static str {
         InstallAction::Winget(_) => "winget",
         InstallAction::HomebrewFormula(_) | InstallAction::HomebrewCask(_) => "homebrew",
         InstallAction::PowerShellScript(_, _) => "powershell",
+        InstallAction::ShellScript(_, _) => "shell",
+        InstallAction::InteractiveShellScript(_, _) => "terminal",
         InstallAction::VsCodeExtension(_) => "vscode",
         InstallAction::ProvidedBy(_) => "dependency",
         InstallAction::CustomUnsupported(_) => "manual",
@@ -1027,10 +1656,12 @@ fn command_preview(action: &InstallAction) -> String {
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
         }
+        InstallAction::ShellScript(_, script) => format!("bash -lc '{script}'"),
+        InstallAction::InteractiveShellScript(_, script) => script.to_string(),
         InstallAction::VsCodeExtension(extension_id) => {
             format!("code --install-extension {extension_id}")
         }
-        InstallAction::ProvidedBy(provider) => format!("由 {provider} 提供"),
+        InstallAction::ProvidedBy(provider) => format!("Provided by {provider}"),
         InstallAction::CustomUnsupported(reason) => reason.to_string(),
     }
 }
@@ -1053,10 +1684,12 @@ fn update_command_preview(action: &InstallAction) -> String {
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
         }
+        InstallAction::ShellScript(_, script) => format!("bash -lc '{script}'"),
+        InstallAction::InteractiveShellScript(_, script) => script.to_string(),
         InstallAction::VsCodeExtension(extension_id) => {
             format!("code --install-extension {extension_id} --force")
         }
-        InstallAction::ProvidedBy(provider) => format!("由 {provider} 提供"),
+        InstallAction::ProvidedBy(provider) => format!("Provided by {provider}"),
         InstallAction::CustomUnsupported(reason) => reason.to_string(),
     }
 }
@@ -1065,11 +1698,59 @@ fn update_supported_for_tool(tool_id: &str, action: &InstallAction) -> bool {
     tool_id == "npm" || update_supported(action)
 }
 
+fn uninstall_supported_for_tool(_tool_id: &str, action: &InstallAction) -> bool {
+    matches!(
+        action,
+        InstallAction::NpmGlobal(_)
+            | InstallAction::Winget(_)
+            | InstallAction::HomebrewFormula(_)
+            | InstallAction::HomebrewCask(_)
+            | InstallAction::VsCodeExtension(_)
+    )
+}
+
 fn update_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> String {
     if tool_id == "npm" {
         return "npm install -g npm@latest".to_string();
     }
+    if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        return CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND.to_string();
+    }
     update_command_preview(action)
+}
+
+fn uninstall_command_preview_for_tool(_tool_id: &str, action: &InstallAction) -> String {
+    match action {
+        InstallAction::NpmGlobal(package) => format!("npm uninstall -g {package}"),
+        InstallAction::Winget(package_id) => {
+            format!("winget uninstall --id {package_id} --exact")
+        }
+        InstallAction::HomebrewFormula(formula) => format!("brew uninstall {formula}"),
+        InstallAction::HomebrewCask(cask) => format!("brew uninstall --cask {cask}"),
+        InstallAction::VsCodeExtension(extension_id) => {
+            format!("code --uninstall-extension {extension_id}")
+        }
+        InstallAction::PowerShellScript(_, _)
+        | InstallAction::ShellScript(_, _)
+        | InstallAction::InteractiveShellScript(_, _)
+        | InstallAction::ProvidedBy(_)
+        | InstallAction::CustomUnsupported(_) => {
+            "No built-in uninstall action is available.".to_string()
+        }
+    }
+}
+
+fn action_requires_admin(action: &InstallAction) -> bool {
+    match action {
+        InstallAction::Winget(_) => true,
+        InstallAction::ShellScript(_, script) => script.contains("sudo "),
+        InstallAction::InteractiveShellScript(_, script) => script.contains("sudo "),
+        _ => false,
+    }
+}
+
+fn action_interactive(action: &InstallAction) -> bool {
+    matches!(action, InstallAction::InteractiveShellScript(_, _))
 }
 
 fn close_processes_before_update(
@@ -1079,6 +1760,12 @@ fn close_processes_before_update(
     let targets = update_process_targets(tool_id);
     if targets.process_names.is_empty() && targets.command_line_markers.is_empty() {
         return Ok(process_control::ProcessTerminationReport::default());
+    }
+    if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        return process_control::close_appx_packages_for_update(
+            tool_name,
+            detector::claude_desktop_windows_package_identities(),
+        );
     }
     process_control::close_processes(
         tool_name,
@@ -1097,7 +1784,7 @@ struct UpdateProcessTargets {
 fn update_process_targets(tool_id: &str) -> UpdateProcessTargets {
     match tool_id {
         "codex" => UpdateProcessTargets {
-            process_names: vec!["codex"],
+            process_names: if cfg!(target_os = "windows") { Vec::new() } else { vec!["codex"] },
             command_line_markers: vec!["@openai/codex"],
         },
         "codex-vscode" | "claude-vscode" | "gemini-code-assist" => UpdateProcessTargets {
@@ -1109,7 +1796,7 @@ fn update_process_targets(tool_id: &str) -> UpdateProcessTargets {
             command_line_markers: Vec::new(),
         },
         "claude" => UpdateProcessTargets {
-            process_names: vec!["claude"],
+            process_names: if cfg!(target_os = "windows") { Vec::new() } else { vec!["claude"] },
             command_line_markers: vec!["@anthropic-ai/claude-code"],
         },
         "gemini" => UpdateProcessTargets {
@@ -1171,6 +1858,7 @@ fn tail(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::types::{ConfigState, ToolCategory};
 
     #[test]
     fn npm_tool_plan_is_whitelisted() {
@@ -1221,5 +1909,113 @@ mod tests {
             update_command_preview(&InstallAction::HomebrewCask("claude")),
             "brew upgrade --cask claude"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn winget_commands_are_wrapped_in_elevated_powershell() {
+        let args = windows_elevated_powershell_args(
+            "C:\\Program Files\\WindowsApps\\winget.exe",
+            &[
+                "install",
+                "--id",
+                "OpenJS.NodeJS.LTS",
+                "--exact",
+                "--source",
+                "O'Reilly",
+            ],
+        );
+        let script = args.last().expect("powershell script");
+
+        assert!(script.contains("Start-Process"));
+        assert!(script.contains("-Verb RunAs"));
+        assert!(script.contains("-Wait"));
+        assert!(script.contains("-PassThru"));
+        assert!(script.contains("'C:\\Program Files\\WindowsApps\\winget.exe'"));
+        assert!(script.contains("'OpenJS.NodeJS.LTS'"));
+        assert!(script.contains("'O''Reilly'"));
+        assert!(script.contains("exit $process.ExitCode"));
+    }
+
+    #[test]
+    fn update_plan_allows_installed_tools_with_detected_updates() {
+        let definition = install_definition("claude").expect("definition");
+        let status = ToolStatus {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            category: ToolCategory::AiTool,
+            command: "claude".to_string(),
+            path_repair: None,
+            version: Some("2.1.126".to_string()),
+            latest_version: Some("2.1.130".to_string()),
+            update_available: true,
+            update_command: Some("npm install -g @anthropic-ai/claude-code@latest".to_string()),
+            install_state: InstallState::Installed,
+            config_state: ConfigState::Configured,
+            config_path: Some("~/.claude".to_string()),
+            install_path: None,
+            install_command: Some("npm install -g @anthropic-ai/claude-code".to_string()),
+            details: Some("Ready".to_string()),
+            running: false,
+        };
+
+        let plan = build_update_plan(&definition, Some(&status));
+
+        assert!(plan.can_install);
+        assert!(plan.already_installed);
+        assert_eq!(plan.commands.len(), 1);
+        assert_eq!(plan.commands[0].stage, "update");
+        assert!(plan.command.contains("@anthropic-ai/claude-code@latest"));
+        assert!(plan.blocker.is_none());
+    }
+
+    #[test]
+    fn claude_desktop_windows_update_does_not_use_stale_winget_source() {
+        let definition = install_definition("claude-desktop").expect("definition");
+        let command = update_command_preview_for_tool("claude-desktop", &definition.action);
+
+        if cfg!(target_os = "windows") {
+            assert!(command.contains("downloads.claude.ai"));
+            assert!(!command.contains("winget"));
+        } else {
+            assert_eq!(command, update_command_preview(&definition.action));
+        }
+    }
+
+    #[test]
+    fn install_progress_payload_keeps_root_tool_scope() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_for_progress = captured.clone();
+        let progress = move |progress| {
+            captured_for_progress
+                .lock()
+                .expect("captured")
+                .push(progress);
+        };
+        let context = InstallProgressContext {
+            root_tool_id: "opencode",
+            tool_id: "node",
+            tool_name: "Node.js LTS",
+            stage: "prerequisite",
+            command: "winget install OpenJS.NodeJS.LTS",
+            progress: Some(&progress),
+        };
+
+        emit_install_progress(
+            Some(&context),
+            "stdout",
+            "installing\n".to_string(),
+            None,
+            false,
+        );
+        emit_install_progress(Some(&context), "status", String::new(), Some(0), true);
+
+        let captured = captured.lock().expect("captured");
+        assert_eq!(TOOL_INSTALL_PROGRESS_EVENT, "tool-install://progress");
+        assert_eq!(captured[0].root_tool_id, "opencode");
+        assert_eq!(captured[0].tool_id, "node");
+        assert_eq!(captured[0].chunk, "installing\n");
+        assert!(captured[1].done);
+        assert_eq!(captured[1].exit_code, Some(0));
     }
 }

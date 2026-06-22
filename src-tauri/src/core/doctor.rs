@@ -16,18 +16,18 @@ pub fn run_doctor() -> Result<DoctorReport, String> {
         detail: display_path(&paths.config_dir),
     });
     checks.push(DoctorCheck {
-        id: "profiles-dir".to_string(),
+        id: "state-database".to_string(),
         group: "Config Files".to_string(),
-        label: "Profiles directory".to_string(),
-        status: path_status(paths.profiles_dir.exists()),
-        detail: display_path(&paths.profiles_dir),
+        label: "State database".to_string(),
+        status: path_status(paths.database_file.exists()),
+        detail: display_path(&paths.database_file),
     });
     checks.push(DoctorCheck {
-        id: "backups-dir".to_string(),
+        id: "downloads-dir".to_string(),
         group: "Config Files".to_string(),
-        label: "Backups directory".to_string(),
-        status: path_status(paths.backups_dir.exists()),
-        detail: display_path(&paths.backups_dir),
+        label: "Downloads directory".to_string(),
+        status: path_status(paths.downloads_dir.exists()),
+        detail: display_path(&paths.downloads_dir),
     });
     checks.push(DoctorCheck {
         id: "secret-store".to_string(),

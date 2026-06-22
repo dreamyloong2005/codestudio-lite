@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-portable/
+.tmp-tests/
 src-tauri/target/
 *.log
 *.tmp
@@ -9,3 +10,6 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+# Temporary one-off patch/build scripts (not part of the codebase)
+/*.cjs
+/*.mjs

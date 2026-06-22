@@ -174,7 +174,7 @@ pub fn system_tools() -> Vec<ToolDefinition> {
 
 fn claude_desktop_config_relative_path() -> Option<&'static str> {
     if cfg!(target_os = "windows") {
-        Some("AppData/Roaming/Claude")
+        Some("AppData/Local/Claude")
     } else if cfg!(target_os = "macos") {
         Some("Library/Application Support/Claude")
     } else {
@@ -210,7 +210,7 @@ fn hermes_install_command() -> Option<&'static str> {
     } else if cfg!(target_os = "macos") {
         Some("brew install hermes-agent")
     } else {
-        None
+        Some("curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash")
     }
 }
 
@@ -220,7 +220,7 @@ fn node_install_command() -> Option<&'static str> {
     } else if cfg!(target_os = "macos") {
         Some("brew install node")
     } else {
-        None
+        Some("curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs")
     }
 }
 
@@ -230,7 +230,7 @@ fn git_install_command() -> Option<&'static str> {
     } else if cfg!(target_os = "macos") {
         Some("brew install git")
     } else {
-        None
+        Some("sudo apt-get update && sudo apt-get install -y git")
     }
 }
 
@@ -240,6 +240,6 @@ fn bun_install_command() -> Option<&'static str> {
     } else if cfg!(target_os = "macos") {
         Some("brew install bun")
     } else {
-        None
+        Some("curl -fsSL https://bun.sh/install | bash")
     }
 }

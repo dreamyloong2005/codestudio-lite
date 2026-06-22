@@ -1,9 +1,9 @@
 use crate::core::types::{
     ApplyProfileRequest, ApplyProfileResult, ClearEnvironmentVariablesRequest,
-    ClearEnvironmentVariablesResult, DuplicateProfileDraftRequest, ExportProfilesResult,
-    ImportProfilesRequest, ImportProfilesResult, PreviewProfileApplyRequest,
-    PreviewProfileApplyResult, PreviewProfileWriteRequest, PreviewProfileWriteResult, ProfileDraft,
-    ProfileSummary, SaveProfileDraftRequest, SwitchActiveProfileRequest,
+    ClearEnvironmentVariablesResult, DeleteProfileDraftRequest, DuplicateProfileDraftRequest,
+    PreviewProfileApplyRequest, PreviewProfileApplyResult, PreviewProfileWriteRequest,
+    PreviewProfileWriteResult, ProfileDraft, ProfileSummary, ReorderProfileDraftsRequest,
+    SaveProfileDraftRequest, StartCodexOAuthLoginResult, SwitchActiveProfileRequest,
     TestProfileConnectionRequest, TestProfileConnectionResult, UpdateProfileDraftRequest,
 };
 use crate::core::{env_health, profile};
@@ -11,6 +11,11 @@ use crate::core::{env_health, profile};
 #[tauri::command]
 pub fn load_profile_summary() -> Result<ProfileSummary, String> {
     profile::load_profile_summary().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn start_codex_oauth_login() -> Result<StartCodexOAuthLoginResult, String> {
+    profile::start_codex_oauth_login().map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -31,13 +36,15 @@ pub fn duplicate_profile_draft(
 }
 
 #[tauri::command]
-pub fn export_profiles() -> Result<ExportProfilesResult, String> {
-    profile::export_profiles().map_err(|err| err.to_string())
+pub fn delete_profile_draft(request: DeleteProfileDraftRequest) -> Result<ProfileSummary, String> {
+    profile::delete_profile_draft(request).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-pub fn import_profiles(request: ImportProfilesRequest) -> Result<ImportProfilesResult, String> {
-    profile::import_profiles(request).map_err(|err| err.to_string())
+pub fn reorder_profile_drafts(
+    request: ReorderProfileDraftsRequest,
+) -> Result<ProfileSummary, String> {
+    profile::reorder_profile_drafts(request).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

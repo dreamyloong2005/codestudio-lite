@@ -2,6 +2,7 @@ import { get, writable } from "svelte/store";
 import {
   inspectCodexClient,
   installCodexClient,
+  loadCachedCodexClientState,
   launchCodexClient,
   listenCodexClientProgress,
   planCodexClientUpdate,
@@ -16,6 +17,11 @@ import type {
   CodexClientStageReport,
   CodexClientState
 } from "../types";
+import type { TranslationKey } from "./i18n";
+
+export type CodexClientNoticeMessage =
+  | string
+  | { key: TranslationKey; values?: Record<string, string | number> };
 
 interface CodexClientViewState {
   state: CodexClientState | null;
@@ -25,7 +31,7 @@ interface CodexClientViewState {
   loaded: boolean;
   busyAction: string | null;
   error: string | null;
-  success: string | null;
+  success: CodexClientNoticeMessage | null;
   stageReport: CodexClientStageReport | null;
   operationResult: CodexClientOperationResult | null;
   progress: CodexClientProgress | null;
@@ -34,7 +40,11 @@ interface CodexClientViewState {
 
 const initialState: CodexClientViewState = {
   state: null,
-  settingsDraft: null,
+  // Pre-seeded with backend defaults so the launch options section renders and
+  // is editable before the first scan completes. applyState replaces this with
+  // the real settings once loaded, while preserving any pre-scan edits to the
+  // launch-option fields.
+  settingsDraft: defaultCodexClientSettings(),
   settingsSaveStatus: "idle",
   loading: false,
   loaded: false,
@@ -58,6 +68,25 @@ let lastSavedSettingsKey: string | null = null;
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 650;
 
+// Defaults mirror the backend's CodexClientSettings::default() so a pre-scan
+// draft looks like what the scan would return. Used only to render the launch
+// options before the first scan completes; applyState preserves any edits the
+// user made to these fields during that window.
+function defaultCodexClientSettings(): CodexClientSettings {
+  return {
+    source: "mirror",
+    customUrl: "",
+    autoCheck: true,
+    askBefore: true,
+    signedOnly: true,
+    windowsInstallMode: "msix",
+    installRoot: "",
+    keepUserDataOnUninstall: true,
+    syncHistoryOnLaunch: false,
+    patchForcePluginUnlock: false
+  };
+}
+
 function patch(next: Partial<CodexClientViewState>) {
   codexClientView.update((current) => ({ ...current, ...next }));
 }
@@ -71,15 +100,31 @@ function settingsKey(settings: CodexClientSettings) {
     signedOnly: settings.signedOnly,
     windowsInstallMode: settings.windowsInstallMode,
     installRoot: settings.installRoot,
-    keepUserDataOnUninstall: settings.keepUserDataOnUninstall
+    keepUserDataOnUninstall: settings.keepUserDataOnUninstall,
+    syncHistoryOnLaunch: settings.syncHistoryOnLaunch,
+    patchForcePluginUnlock: settings.patchForcePluginUnlock
   });
 }
 
 function applyState(state: CodexClientState) {
-  lastSavedSettingsKey = settingsKey(state.settings);
+  const current = get(codexClientView);
+  const draft = current.settingsDraft;
+  // If the user edited a launch option before the scan completed, keep their
+  // choice instead of clobbering it with the scanned value. Only the two
+  // launch-option toggles are preserved this way; other settings always reflect
+  // the authoritative scanned state.
+  const preserveLaunchOptions = !current.loaded && Boolean(draft);
+  const mergedSettings: CodexClientSettings = preserveLaunchOptions && draft
+    ? {
+        ...state.settings,
+        syncHistoryOnLaunch: draft.syncHistoryOnLaunch,
+        patchForcePluginUnlock: draft.patchForcePluginUnlock
+      }
+    : state.settings;
+  lastSavedSettingsKey = settingsKey(mergedSettings);
   patch({
     state,
-    settingsDraft: { ...state.settings },
+    settingsDraft: { ...mergedSettings },
     loaded: true,
     settingsSaveStatus: "idle"
   });
@@ -139,18 +184,53 @@ export function startCodexClientProgressListener() {
   });
 }
 
+// Hydrate the Codex client view from the on-disk state cache so the page can
+// render a prior session plan instantly, before a fresh network re-fetch
+// completes. Mirrors the Claude Desktop page hydrateClaudeDesktopFromCache.
+// Marks the view as loaded so a subsequent navigation does not re-block; the
+// async re-scan still runs and supersedes this with live data.
+async function hydrateCodexClientFromCache(): Promise<boolean> {
+  try {
+    const cached = await loadCachedCodexClientState();
+    if (cached) {
+      // Pre-mark loaded so applyState uses the cached settings verbatim
+      // instead of preserving the default-seeded draft launch options.
+      patch({ loaded: true });
+      applyState(cached);
+      return true;
+    }
+  } catch {
+    // Cache read failures are non-fatal: the async re-fetch will populate.
+  }
+  return false;
+}
+
 export async function ensureCodexClientLoaded() {
   startCodexClientProgressListener();
   const snapshot = get(codexClientView);
   if (snapshot.loaded || snapshot.loading || snapshot.busyAction) {
     return;
   }
-  if (!loadPromise) {
-    loadPromise = refreshCodexClient(false).finally(() => {
-      loadPromise = null;
-    });
+  // Hydrate from the on-disk cache first so the page renders instantly with
+  // a prior session plan, then kick off an async re-fetch to stay current.
+  const hydrated = await hydrateCodexClientFromCache();
+  if (!loadPromise && !get(codexClientView).loading && !get(codexClientView).busyAction) {
+    if (hydrated) {
+      // We already have a full cached state; only re-fetch the network plan
+      // when auto-check is enabled, and skip the plan-less local inspect so
+      // the cached plan stays visible until the network fetch supersedes it.
+      const settings = get(codexClientView).settingsDraft;
+      if (settings?.autoCheck) {
+        loadPromise = refreshCodexClient(true).finally(() => {
+          loadPromise = null;
+        });
+      }
+    } else {
+      loadPromise = refreshCodexClient(false).finally(() => {
+        loadPromise = null;
+      });
+    }
   }
-  await loadPromise;
 }
 
 export async function refreshCodexClient(withNetwork = true, force = false) {
@@ -206,7 +286,12 @@ export function updateCodexClientDraft(patchValue: Partial<CodexClientSettings>)
   });
   if (nextDraft) {
     settingsSaveRevision += 1;
-    scheduleSettingsAutoSave();
+    // Only auto-save once the real settings are loaded; before that, the draft
+    // is seeded from defaults and saving it could overwrite the user's real
+    // backend settings (source/customUrl/etc.) with those defaults.
+    if (get(codexClientView).loaded) {
+      scheduleSettingsAutoSave();
+    }
   }
 }
 
@@ -281,7 +366,7 @@ export async function stageCodexClientPackage() {
   const snapshot = get(codexClientView);
   patch({
     progress: progressSeed(
-      "正在准备暂存 Codex 客户端安装包...",
+      "codexClient.progressStagePreparing",
       snapshot.state?.plan?.downloadSize ?? snapshot.state?.release?.contentLength,
       4
     )
@@ -289,7 +374,7 @@ export async function stageCodexClientPackage() {
   await runAction("stage", stageCodexClientUpdate, (report) => {
     patch({
       stageReport: report,
-      success: "安装包已暂存并校验。"
+      success: { key: "codexClient.stageComplete" }
     });
   });
 }
@@ -297,7 +382,7 @@ export async function stageCodexClientPackage() {
 export async function installOrUpdateCodexClient() {
   const plan = get(codexClientView).state?.plan ?? null;
   patch({
-    progress: progressSeed("正在准备安装 Codex 客户端...", plan?.downloadSize, 7)
+    progress: progressSeed("codexClient.progressInstallPreparing", plan?.downloadSize, 7)
   });
   await runAction(
     "install",
@@ -311,7 +396,9 @@ export async function installOrUpdateCodexClient() {
       applyInstallResult(result);
       patch({
         operationResult: result,
-        success: result.message
+        success: result.installed
+          ? { key: "codexClient.ready", values: { version: result.installed.version } }
+          : result.message
       });
       window.setTimeout(() => {
         void refreshCodexClient(true, true);
@@ -332,7 +419,7 @@ export async function removeCodexClient() {
       patch({
         operationResult: result,
         confirmUninstall: false,
-        success: result.message
+        success: { key: "codexClient.uninstallComplete" }
       });
       await refreshCodexClient(true, true);
     }
@@ -340,7 +427,9 @@ export async function removeCodexClient() {
 }
 
 export async function launchManagedCodexClient() {
-  await runAction("launch", launchCodexClient, () => {
-    patch({ success: "已请求启动 Codex 客户端。" });
+  await runAction("launch", launchCodexClient, async () => {
+    patch({ success: { key: "codexClient.launchRequested" } });
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await refreshCodexClient(false, true);
   });
 }

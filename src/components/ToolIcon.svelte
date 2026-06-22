@@ -13,6 +13,7 @@
 
   const iconMap: Record<string, IconDef> = {
     codex: { src: "/tool-icons/codex.svg", tone: "codex" },
+    "codex-app": { src: "/tool-icons/codex-app.png", tone: "codex-app" },
     "codex-vscode": { src: "/tool-icons/codex-vscode.svg", tone: "codex" },
     claude: { src: "/tool-icons/claude-code.svg", tone: "claude" },
     "claude-desktop": { src: "/tool-icons/claude-desktop.svg", tone: "claude" },
@@ -21,7 +22,7 @@
     "gemini-code-assist": { src: "/tool-icons/gemini-code-assist.svg", tone: "gemini" },
     opencode: { src: "/tool-icons/opencode.svg", tone: "light" },
     openclaw: { src: "/tool-icons/openclaw.svg", tone: "openclaw" },
-    hermes: { src: "/tool-icons/hermes.svg", tone: "light" },
+    hermes: { src: "/tool-icons/hermes.png", tone: "hermes" },
     node: { src: "/tool-icons/nodejs.svg", tone: "light" },
     git: { src: "/tool-icons/git.svg", tone: "light" },
     npm: { src: "/tool-icons/npm.svg", tone: "light" },
@@ -32,11 +33,12 @@
   function canonicalIconId(id: string | null | undefined) {
     switch (id) {
       case "codex":
-      case "codex-app":
       case "codex-cli":
+        return "codex";
+      case "codex-app":
       case "codex-client":
       case "codex-desktop":
-        return "codex";
+        return "codex-app";
       case "codex-vscode":
       case "codex-code-vscode":
       case "codex-vs-code":

@@ -106,8 +106,6 @@
         {/if}
         {updating ? $t("tool.updating") : $t("common.update")}
       </button>
-    {:else}
-      <span class="quiet">{$t("common.ready")}</span>
     {/if}
   </div>
 </article>

@@ -41,7 +41,7 @@ pub fn path_repair_hint(definition: &ToolDefinition) -> Option<PathRepairHint> {
         candidate_path: display_path(&candidate),
         directory: display_path(&directory),
         message: format!(
-            "已在常见安装目录发现 {}，但当前 PATH 无法直接解析命令 {}。",
+            "Found {} in a common install directory, but the current PATH cannot resolve command {}.",
             display_path(&candidate),
             definition.command
         ),
@@ -50,17 +50,20 @@ pub fn path_repair_hint(definition: &ToolDefinition) -> Option<PathRepairHint> {
 
 pub fn repair_tool_path(request: RepairToolPathRequest) -> Result<RepairToolPathResult, String> {
     if !request.confirm {
-        return Err("拒绝执行：修复 PATH 前必须显式确认。".to_string());
+        return Err("Refused: repairing PATH requires explicit confirmation.".to_string());
     }
     let definition = tool_definition(&request.tool_id)
-        .ok_or_else(|| format!("工具 '{}' 不在 PATH 修复白名单中。", request.tool_id))?;
+        .ok_or_else(|| format!("Tool '{}' is not allowed for PATH repair.", request.tool_id))?;
     if resolve_command_on_path(definition.command).is_some() {
         return Ok(RepairToolPathResult {
             success: true,
             tool_id: definition.id.to_string(),
             tool_name: definition.name.to_string(),
             added_path: None,
-            message: format!("{} 已经在当前 PATH 中可用。", definition.name),
+            message: format!(
+                "{} is already available on the current PATH.",
+                definition.name
+            ),
             current_status: find_current_tool_status(definition.id),
             notes: Vec::new(),
         });
@@ -72,7 +75,10 @@ pub fn repair_tool_path(request: RepairToolPathRequest) -> Result<RepairToolPath
             tool_id: definition.id.to_string(),
             tool_name: definition.name.to_string(),
             added_path: None,
-            message: format!("没有在常见安装目录中找到 {}。", definition.name),
+            message: format!(
+                "Could not find {} in common install directories.",
+                definition.name
+            ),
             current_status: find_current_tool_status(definition.id),
             notes: Vec::new(),
         });
@@ -88,16 +94,16 @@ pub fn repair_tool_path(request: RepairToolPathRequest) -> Result<RepairToolPath
             .unwrap_or(false);
     let message = if success {
         if added {
-            format!("已把 {} 加入用户 PATH。", display_path(&directory))
+            format!("Added {} to the user PATH.", display_path(&directory))
         } else {
             format!(
-                "{} 已存在于持久 PATH，已刷新当前进程 PATH。",
+                "{} is already in the persistent PATH; refreshed the current process PATH.",
                 display_path(&directory)
             )
         }
     } else {
         format!(
-            "已尝试修复 PATH，但 {} 仍未通过复检。新终端或重启应用后可能生效。",
+            "Tried to repair PATH, but {} still did not pass verification. It may take effect in a new terminal or after restarting the app.",
             definition.name
         )
     };
@@ -197,10 +203,14 @@ pub fn clear_environment_variables(
     request: ClearEnvironmentVariablesRequest,
 ) -> Result<ClearEnvironmentVariablesResult, String> {
     if !request.confirm {
-        return Err("拒绝执行：清理环境变量前必须显式确认。".to_string());
+        return Err(
+            "Refused: clearing environment variables requires explicit confirmation.".to_string(),
+        );
     }
     if canonical_tool_id(&request.tool_id) != CLAUDE_TOOL_ID {
-        return Err("当前只支持清理 Claude 相关环境变量。".to_string());
+        return Err(
+            "Only Claude-related environment variables can be cleared right now.".to_string(),
+        );
     }
 
     let requested = if request.variables.is_empty() {
@@ -221,7 +231,7 @@ pub fn clear_environment_variables(
         .filter(|name| seen.insert(name.clone()))
         .collect::<Vec<_>>();
     if variables.is_empty() {
-        return Err("没有可清理的 Claude 环境变量。".to_string());
+        return Err("No Claude environment variables are available to clear.".to_string());
     }
 
     let mut cleared = Vec::new();
@@ -235,7 +245,7 @@ pub fn clear_environment_variables(
             }
         }
         for name in machine_present {
-            skipped.push(format!("{name} 存在于机器级环境变量，需要管理员手动清理。"));
+            skipped.push(format!("{name} exists as a machine-level environment variable and must be cleared manually as administrator."));
         }
     } else if cfg!(target_os = "macos") {
         let launchctl_cleared = clear_launchctl_env_vars_macos(&variables)?;
@@ -245,20 +255,20 @@ pub fn clear_environment_variables(
             }
         }
         skipped.push(
-            "已清理当前进程和 launchctl 全局变量；如果 shell 启动文件里还有 export，需要手动移除。"
+            "Cleared current-process and launchctl global variables. If shell startup files still export them, remove those manually."
                 .to_string(),
         );
     } else {
-        skipped.push("当前平台仅清理了本进程环境变量；Shell 启动文件需要手动检查。".to_string());
+        skipped.push("Only this process environment was cleared on the current platform; shell startup files must be checked manually.".to_string());
     }
 
     let conflicts = claude_env_conflicts_without_profile();
     let success =
         conflicts.is_empty() || conflicts.iter().all(|conflict| conflict.scope == "machine");
     let message = if success {
-        "Claude 全局环境变量已清理。".to_string()
+        "Claude global environment variables were cleared.".to_string()
     } else {
-        "已清理可写环境变量，但仍检测到残留冲突。".to_string()
+        "Writable environment variables were cleared, but conflicts are still detected.".to_string()
     };
     let _ = activity_log::append(
         if success {
@@ -309,7 +319,7 @@ fn claude_env_conflicts(
                 ExpectedEnvValue::Exact(expected) if !expected.trim().is_empty() => {
                     Some(preview_env_value(&value.name, &expected))
                 }
-                ExpectedEnvValue::Secret(_) => Some("已保存的 Provider API Key".to_string()),
+                ExpectedEnvValue::Secret(_) => Some("saved Provider API key".to_string()),
                 ExpectedEnvValue::Exact(_) | ExpectedEnvValue::Absent => None,
             };
             Some(EnvironmentVariableConflict {
@@ -321,7 +331,7 @@ fn claude_env_conflicts(
                 scope: value.scope,
                 severity: Severity::Warning,
                 message: format!(
-                    "{} 会影响 Claude API 连接，且与当前 CodeStudio 配置不一致。",
+                    "{} affects Claude API connections and does not match the current CodeStudio configuration.",
                     value.name
                 ),
             })
@@ -379,11 +389,11 @@ $items | ConvertTo-Json -Compress -Depth 3
     }
     if json.trim_start().starts_with('[') {
         serde_json::from_str::<Vec<RawEnvVarValue>>(&json)
-            .map_err(|err| format!("解析 Claude 环境变量失败：{err}"))
+            .map_err(|err| format!("Failed to parse Claude environment variables: {err}"))
     } else {
         serde_json::from_str::<RawEnvVarValue>(&json)
             .map(|item| vec![item])
-            .map_err(|err| format!("解析 Claude 环境变量失败：{err}"))
+            .map_err(|err| format!("Failed to parse Claude environment variables: {err}"))
     }
 }
 
@@ -444,8 +454,8 @@ foreach ($name in $names) {{
 "#
     );
     let json = run_powershell(&script)?;
-    let value: serde_json::Value =
-        serde_json::from_str(&json).map_err(|err| format!("解析环境变量清理结果失败：{err}"))?;
+    let value: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse environment variable cleanup result: {err}"))?;
     Ok((
         json_string_array(&value["cleared"]),
         json_string_array(&value["machine"]),
@@ -457,13 +467,13 @@ fn clear_launchctl_env_vars_macos(variables: &[String]) -> Result<Vec<String>, S
     for name in variables {
         let before = hidden_command_with_args("launchctl", &["getenv", name])
             .output()
-            .map_err(|err| format!("读取 launchctl 环境变量失败：{err}"))?;
+            .map_err(|err| format!("Failed to read launchctl environment variable: {err}"))?;
         if !before.status.success() || String::from_utf8_lossy(&before.stdout).trim().is_empty() {
             continue;
         }
         let output = hidden_command_with_args("launchctl", &["unsetenv", name])
             .output()
-            .map_err(|err| format!("清理 launchctl 环境变量失败：{err}"))?;
+            .map_err(|err| format!("Failed to clear launchctl environment variable: {err}"))?;
         if output.status.success() {
             cleared.push(name.clone());
         }
@@ -478,7 +488,7 @@ fn repair_user_path(directory: &Path, notes: &mut Vec<String>) -> Result<bool, S
     if cfg!(target_os = "macos") {
         return repair_user_path_macos(directory, notes);
     }
-    Err("当前平台暂不支持自动修复用户 PATH。".to_string())
+    Err("Automatic user PATH repair is not supported on the current platform.".to_string())
 }
 
 fn repair_user_path_windows(directory: &Path, notes: &mut Vec<String>) -> Result<bool, String> {
@@ -541,7 +551,7 @@ $items | ConvertTo-Json -Compress -Depth 3
     } else {
         serde_json::from_str::<PathItem>(&json).map(|item| vec![item])
     }
-    .map_err(|err| format!("解析 PATH 失败：{err}"))?;
+    .map_err(|err| format!("Failed to parse PATH: {err}"))?;
     Ok(items
         .into_iter()
         .map(|item| PathBuf::from(item.path))
@@ -583,7 +593,8 @@ fn append_user_path_macos(directory: &str) -> Result<(), String> {
         return Ok(());
     }
     if let Some(parent) = profile.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("创建 shell 配置目录失败：{err}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create shell config directory: {err}"))?;
     }
     let addition = if profile
         .file_name()
@@ -604,9 +615,9 @@ fn append_user_path_macos(directory: &str) -> Result<(), String> {
         .create(true)
         .append(true)
         .open(&profile)
-        .map_err(|err| format!("打开 shell 配置文件失败：{err}"))?;
+        .map_err(|err| format!("Failed to open shell config file: {err}"))?;
     file.write_all(addition.as_bytes())
-        .map_err(|err| format!("写入 shell 配置文件失败：{err}"))
+        .map_err(|err| format!("Failed to write shell config file: {err}"))
 }
 
 fn macos_shell_profile_path() -> Result<PathBuf, String> {
@@ -633,7 +644,7 @@ fn refresh_process_path(directory: &Path, notes: &mut Vec<String>) {
     dirs.push(directory.to_path_buf());
     match env::join_paths(dirs) {
         Ok(joined) => env::set_var("PATH", joined),
-        Err(err) => notes.push(format!("当前进程 PATH 刷新失败：{err}")),
+        Err(err) => notes.push(format!("Failed to refresh the current process PATH: {err}")),
     }
 }
 
