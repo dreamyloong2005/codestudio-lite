@@ -15,6 +15,7 @@ pub struct StoredAppConfig {
     pub active_profiles_by_mode: ActiveProfilesByMode,
     pub theme: String,
     pub language: String,
+    pub language_set_by_user: bool,
     pub backup_before_write: bool,
     pub redact_secrets: bool,
     pub confirm_install_commands: bool,
@@ -30,10 +31,16 @@ pub fn ensure_initialized() -> Result<(), String> {
 pub fn load_app_config() -> Result<StoredAppConfig, String> {
     let conn = connection()?;
     let active_profiles_by_mode = load_active_profiles_with_conn(&conn)?;
+    let language_set_by_user = setting_bool(&conn, "ui.language_set_by_user")?.unwrap_or(false);
     Ok(StoredAppConfig {
         active_profiles_by_mode,
         theme: setting_string(&conn, "ui.theme")?.unwrap_or_else(|| "system".to_string()),
-        language: load_or_initialize_language_with_conn(&conn, detect_system_locale_name)?,
+        language: load_or_initialize_language_with_conn(
+            &conn,
+            language_set_by_user,
+            detect_system_locale_name,
+        )?,
+        language_set_by_user,
         backup_before_write: setting_bool(&conn, "security.backup_before_write")?.unwrap_or(true),
         redact_secrets: setting_bool(&conn, "security.redact_secrets")?.unwrap_or(true),
         confirm_install_commands: setting_bool(&conn, "security.confirm_install_commands")?
@@ -52,6 +59,11 @@ pub fn save_app_config(config: &StoredAppConfig) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     save_setting(&tx, "ui.theme", &config.theme)?;
     save_setting(&tx, "ui.language", &config.language)?;
+    save_setting(
+        &tx,
+        "ui.language_set_by_user",
+        bool_value(config.language_set_by_user),
+    )?;
     save_setting(
         &tx,
         "security.backup_before_write",
@@ -935,18 +947,23 @@ fn setting_bool(conn: &Connection, key: &str) -> Result<Option<bool>, String> {
 
 fn load_or_initialize_language_with_conn<F>(
     conn: &Connection,
+    language_set_by_user: bool,
     detect_locale: F,
 ) -> Result<String, String>
 where
     F: FnOnce() -> Option<String>,
 {
+    let detected_locale = detect_locale();
+    let detected_language = app_language_from_system_locale(detected_locale.as_deref());
     if let Some(language) = setting_string(conn, "ui.language")? {
+        if !language_set_by_user && language == "en-US" && detected_language != "en-US" {
+            save_setting(conn, "ui.language", detected_language)?;
+            return Ok(detected_language.to_string());
+        }
         return Ok(language);
     }
-    let detected_locale = detect_locale();
-    let language = app_language_from_system_locale(detected_locale.as_deref());
-    save_setting(conn, "ui.language", language)?;
-    Ok(language.to_string())
+    save_setting(conn, "ui.language", detected_language)?;
+    Ok(detected_language.to_string())
 }
 
 fn app_language_from_system_locale(locale: Option<&str>) -> &'static str {
@@ -986,8 +1003,47 @@ fn detect_system_locale_name() -> Option<String> {
     Some(String::from_utf16_lossy(&buffer[..usable_len]))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn detect_system_locale_name() -> Option<String> {
+    detect_macos_preferred_locale_name().or_else(detect_unix_locale_name)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn detect_system_locale_name() -> Option<String> {
+    detect_unix_locale_name()
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_preferred_locale_name() -> Option<String> {
+    let output = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleLanguages"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_apple_languages(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_apple_languages(value: &str) -> Option<String> {
+    value.lines().find_map(|line| {
+        let candidate = line
+            .trim()
+            .trim_start_matches('"')
+            .trim_end_matches(',')
+            .trim_end_matches('"')
+            .trim();
+        (!candidate.is_empty()
+            && candidate != "("
+            && candidate != ")"
+            && !candidate.starts_with('{'))
+        .then(|| candidate.to_string())
+    })
+}
+
+#[cfg(not(windows))]
+fn detect_unix_locale_name() -> Option<String> {
     ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
         .find_map(|key| {
@@ -1274,7 +1330,7 @@ mod tests {
         initialize_schema(&conn).expect("schema should initialize");
 
         let initialized =
-            load_or_initialize_language_with_conn(&conn, || Some("zh-Hant-HK".to_string()))
+            load_or_initialize_language_with_conn(&conn, false, || Some("zh-Hant-HK".to_string()))
                 .expect("language should initialize");
         assert_eq!(initialized, "zh-TW");
         assert_eq!(
@@ -1284,9 +1340,62 @@ mod tests {
             Some("zh-TW")
         );
 
-        let loaded = load_or_initialize_language_with_conn(&conn, || Some("zh-CN".to_string()))
-            .expect("existing language should load");
+        let loaded =
+            load_or_initialize_language_with_conn(&conn, false, || Some("zh-CN".to_string()))
+                .expect("existing language should load");
         assert_eq!(loaded, "zh-TW");
+    }
+
+    #[test]
+    fn default_english_language_is_corrected_to_detected_chinese() {
+        let conn = Connection::open_in_memory().expect("in-memory database should open");
+        initialize_schema(&conn).expect("schema should initialize");
+        save_setting(&conn, "ui.language", "en-US").expect("language should save");
+
+        let loaded =
+            load_or_initialize_language_with_conn(&conn, false, || Some("zh-Hans-CN".to_string()))
+                .expect("language should load");
+
+        assert_eq!(loaded, "zh-CN");
+        assert_eq!(
+            setting_string(&conn, "ui.language")
+                .expect("language setting should load")
+                .as_deref(),
+            Some("zh-CN")
+        );
+    }
+
+    #[test]
+    fn user_selected_english_language_is_preserved() {
+        let conn = Connection::open_in_memory().expect("in-memory database should open");
+        initialize_schema(&conn).expect("schema should initialize");
+        save_setting(&conn, "ui.language", "en-US").expect("language should save");
+
+        let loaded =
+            load_or_initialize_language_with_conn(&conn, true, || Some("zh-Hans-CN".to_string()))
+                .expect("language should load");
+
+        assert_eq!(loaded, "en-US");
+        assert_eq!(
+            setting_string(&conn, "ui.language")
+                .expect("language setting should load")
+                .as_deref(),
+            Some("en-US")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_apple_languages_output_reads_first_locale() {
+        let output = r#"(
+    "zh-Hans-CN",
+    "en-CN"
+)"#;
+
+        assert_eq!(
+            parse_macos_apple_languages(output).as_deref(),
+            Some("zh-Hans-CN")
+        );
     }
 
     #[test]

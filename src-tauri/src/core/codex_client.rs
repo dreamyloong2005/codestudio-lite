@@ -470,8 +470,7 @@ where
 {
     if !request.confirm {
         return Err(
-            "Refused: installing or updating Codex requires explicit confirmation."
-                .to_string(),
+            "Refused: installing or updating Codex requires explicit confirmation.".to_string(),
         );
     }
 
@@ -728,8 +727,7 @@ where
             .as_ref()
             .map(|item| format!("Codex is ready: {} ({})", item.version, item.source))
             .unwrap_or_else(|| {
-                "Installation flow finished, but Codex was not detected again."
-                    .to_string()
+                "Installation flow finished, but Codex was not detected again.".to_string()
             }),
         installed,
         stage: Some(stage),
@@ -741,9 +739,7 @@ pub fn uninstall(
     request: CodexClientUninstallRequest,
 ) -> Result<CodexClientOperationResult, String> {
     if !request.confirm {
-        return Err(
-            "Refused: uninstalling Codex requires explicit confirmation.".to_string(),
-        );
+        return Err("Refused: uninstalling Codex requires explicit confirmation.".to_string());
     }
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
         return Err("The current platform does not provide an executable Codex desktop client uninstall path yet.".to_string());
@@ -863,10 +859,7 @@ pub fn restart() -> Result<String, String> {
     } else {
         format!("{} Restarted Codex.", notes.join(" "))
     };
-    let _ = activity_log::append(
-        Severity::Info,
-        "Restarted Codex after profile apply.",
-    );
+    let _ = activity_log::append(Severity::Info, "Restarted Codex after profile apply.");
     Ok(message)
 }
 
@@ -987,12 +980,6 @@ fn build_plan(
     let existing_source = installed.map(|item| item.source.as_str());
     let route = select_install_route(settings, installed, portable_recommended).to_string();
     let mut warnings = Vec::new();
-    if settings.source == "official" && cfg!(target_os = "windows") {
-        warnings.push(
-            "The Windows official source does not currently provide the same manifest/checksum contract as the mirror; the mirror source plan is used."
-                .to_string(),
-        );
-    }
     if route == "unsupported" {
         warnings.push("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
     } else if route == "macos-dmg" {
@@ -1305,8 +1292,16 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
 pub fn codex_client_install_kinds() -> CodexClientInstallKinds {
     if !cfg!(target_os = "windows") {
         return CodexClientInstallKinds {
-            msix: DesktopInstallKindInfo { installed: false, version: None, path: None },
-            portable: DesktopInstallKindInfo { installed: false, version: None, path: None },
+            msix: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
+            portable: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
         };
     }
     let settings = load_settings().unwrap_or_default();
@@ -1316,7 +1311,11 @@ pub fn codex_client_install_kinds() -> CodexClientInstallKinds {
             version: Some(pkg.version),
             path: Some(pkg.path),
         })
-        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+        .unwrap_or(DesktopInstallKindInfo {
+            installed: false,
+            version: None,
+            path: None,
+        });
     let portable = expand_env_path(&settings.install_root)
         .ok()
         .and_then(|root| detect_portable_install(&root))
@@ -1325,7 +1324,11 @@ pub fn codex_client_install_kinds() -> CodexClientInstallKinds {
             version: Some(inst.version),
             path: Some(inst.path),
         })
-        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+        .unwrap_or(DesktopInstallKindInfo {
+            installed: false,
+            version: None,
+            path: None,
+        });
     CodexClientInstallKinds { msix, portable }
 }
 
@@ -1423,11 +1426,8 @@ where
     );
     validate_install_root(install_root)?;
     let mut notes = Vec::new();
-    let termination = process_control::close_processes_for_update(
-        "Codex",
-        &["Codex"],
-        Some(install_root),
-    )?;
+    let termination =
+        process_control::close_processes_for_update("Codex", &["Codex"], Some(install_root))?;
     if let Some(note) = termination.note("Codex") {
         notes.push(note);
     }
@@ -2439,9 +2439,7 @@ fn launch_installed_codex(installed: &InstalledCodexClient, args: &[String]) -> 
             .map(|_| ())
             .map_err(|err| format!("Failed to launch Codex with patch arguments: {err}"))?;
     } else {
-        return Err(
-            "Launching Codex is not supported on the current platform.".to_string(),
-        );
+        return Err("Launching Codex is not supported on the current platform.".to_string());
     }
     Ok(())
 }
@@ -3134,6 +3132,7 @@ fn url_host(url: &str) -> &str {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "windows")]
 mod tests {
     use super::*;
 

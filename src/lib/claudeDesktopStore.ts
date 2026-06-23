@@ -6,6 +6,7 @@ import {
   launchClaudeDesktop,
   listenToolInstallProgress,
   loadCachedDetection,
+  openClaudeDesktopPath,
   planToolInstall,
   planToolUpdate,
   uninstallTool,
@@ -204,9 +205,9 @@ async function hydrateClaudeDesktopFromCache() {
   }
 }
 
-export async function refreshClaudeDesktop() {
+export async function refreshClaudeDesktop(force = false) {
   startClaudeDesktopProgressListener();
-  if (get(claudeDesktopView).busyAction) {
+  if (get(claudeDesktopView).busyAction && !force) {
     return;
   }
   patch({ loading: true, error: null });
@@ -252,7 +253,7 @@ async function runAction(
       success: result.message,
       status: result.currentStatus ?? get(claudeDesktopView).status
     });
-    await refreshClaudeDesktop();
+    await refreshClaudeDesktop(true);
     // MSIX package registration (winget install) can lag slightly behind the
     // installer process exiting. If the install/update action succeeded but
     // the immediate re-detect still does not see Claude installed, retry once
@@ -262,7 +263,7 @@ async function runAction(
       const stillMissing = get(claudeDesktopView).status?.installState !== "installed";
       if (stillMissing) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        await refreshClaudeDesktop();
+        await refreshClaudeDesktop(true);
       }
     }
     return result;
@@ -277,7 +278,7 @@ async function runAction(
 export async function launchClaudeDesktopFromDashboard() {
   await launchClaudeDesktop({ localize: getClaudeDesktopLocalizeLaunch() });
   await new Promise((resolve) => setTimeout(resolve, 2500));
-  await refreshClaudeDesktop();
+  await refreshClaudeDesktop(true);
 }
 
 export async function installOrUpdateClaudeDesktop(mode?: "install" | "update") {
@@ -343,3 +344,10 @@ export function setClaudeDesktopSelectedKind(kind: "msix" | "exe") {
   patch({ selectedKind: kind });
 }
 
+export async function openClaudeDesktopStagingPath() {
+  try {
+    await openClaudeDesktopPath("staging");
+  } catch (err) {
+    patch({ error: err instanceof Error ? err.message : String(err) });
+  }
+}

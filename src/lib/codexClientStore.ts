@@ -30,6 +30,8 @@ interface CodexClientViewState {
   state: CodexClientState | null;
   settingsDraft: CodexClientSettings | null;
   settingsSaveStatus: "idle" | "dirty" | "saving" | "saved" | "error";
+  planRefreshing: boolean;
+  planStale: boolean;
   loading: boolean;
   loaded: boolean;
   busyAction: string | null;
@@ -53,6 +55,8 @@ const initialState: CodexClientViewState = {
   // launch-option fields.
   settingsDraft: defaultCodexClientSettings(),
   settingsSaveStatus: "idle",
+  planRefreshing: false,
+  planStale: false,
   loading: false,
   loaded: false,
   busyAction: null,
@@ -74,6 +78,7 @@ let settingsSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
 let settingsSaveInFlight = false;
 let settingsSaveRevision = 0;
 let lastSavedSettingsKey: string | null = null;
+let lastSavedSettings: CodexClientSettings | null = null;
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 650;
 
@@ -115,6 +120,16 @@ function settingsKey(settings: CodexClientSettings) {
   });
 }
 
+function planAffectingSettingsChanged(
+  before: CodexClientSettings,
+  after: CodexClientSettings
+) {
+  return before.source !== after.source
+    || before.customUrl !== after.customUrl
+    || before.windowsInstallMode !== after.windowsInstallMode
+    || before.installRoot !== after.installRoot;
+}
+
 function applyState(state: CodexClientState) {
   const current = get(codexClientView);
   const draft = current.settingsDraft;
@@ -131,10 +146,13 @@ function applyState(state: CodexClientState) {
       }
     : state.settings;
   lastSavedSettingsKey = settingsKey(mergedSettings);
+  lastSavedSettings = { ...mergedSettings };
   patch({
     state,
     settingsDraft: { ...mergedSettings },
     loaded: true,
+    planRefreshing: false,
+    planStale: false,
     settingsSaveStatus: "idle"
   });
 }
@@ -257,11 +275,12 @@ export async function refreshCodexClient(withNetwork = true, force = false) {
   if (get(codexClientView).busyAction && !force) {
     return;
   }
-  patch({ loading: true, error: null });
+  patch({ loading: true, error: null, planRefreshing: withNetwork });
   try {
     let nextState = withNetwork ? await planCodexClientUpdate() : await inspectCodexClient();
     applyState(nextState);
     if (!withNetwork && nextState.settings.autoCheck) {
+      patch({ planRefreshing: true });
       nextState = await planCodexClientUpdate();
       applyState(nextState);
     }
@@ -270,7 +289,7 @@ export async function refreshCodexClient(withNetwork = true, force = false) {
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });
   } finally {
-    patch({ loading: false });
+    patch({ loading: false, planRefreshing: false });
   }
 }
 
@@ -293,15 +312,28 @@ async function runAction<T>(
 
 export function updateCodexClientDraft(patchValue: Partial<CodexClientSettings>) {
   let nextDraft: CodexClientSettings | null = null;
+  let planDirty = false;
   codexClientView.update((current) => {
     if (!current.settingsDraft) {
       return current;
     }
     nextDraft = { ...current.settingsDraft, ...patchValue };
     const unchanged = lastSavedSettingsKey === settingsKey(nextDraft);
+    const changedPlanField = current.loaded
+      && !unchanged
+      && planAffectingSettingsChanged(current.settingsDraft, nextDraft);
+    planDirty = current.loaded
+      && !unchanged
+      && (lastSavedSettings
+        ? planAffectingSettingsChanged(lastSavedSettings, nextDraft)
+        : changedPlanField);
     return {
       ...current,
       settingsDraft: nextDraft,
+      planRefreshing: current.loading ? current.planRefreshing : planDirty,
+      planStale: planDirty,
+      stageReport: changedPlanField ? null : current.stageReport,
+      operationResult: changedPlanField ? null : current.operationResult,
       settingsSaveStatus: unchanged ? "saved" : "dirty"
     };
   });
@@ -353,16 +385,25 @@ async function flushCodexClientSettingsDraft() {
 
   const revision = settingsSaveRevision;
   const draftKey = settingsKey(draft);
+  const planNeedsRefresh = lastSavedSettings
+    ? planAffectingSettingsChanged(lastSavedSettings, draft)
+    : Boolean(snapshot.state?.plan);
   if (draftKey === lastSavedSettingsKey) {
-    patch({ settingsSaveStatus: "saved" });
+    patch({ settingsSaveStatus: "saved", planRefreshing: false, planStale: false });
     return;
   }
 
   settingsSaveInFlight = true;
-  patch({ settingsSaveStatus: "saving", error: null });
+  patch({
+    settingsSaveStatus: "saving",
+    error: null,
+    planRefreshing: planNeedsRefresh,
+    planStale: planNeedsRefresh
+  });
   try {
     const settings = await updateCodexClientSettings(draft);
     lastSavedSettingsKey = settingsKey(settings);
+    lastSavedSettings = { ...settings };
     const nextState = await planCodexClientUpdate();
     if (settingsSaveRevision === revision) {
       applyState(nextState);
@@ -373,6 +414,7 @@ async function flushCodexClientSettingsDraft() {
   } catch (err) {
     patch({
       settingsSaveStatus: "error",
+      planRefreshing: false,
       error: err instanceof Error ? err.message : String(err)
     });
   } finally {

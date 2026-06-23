@@ -39,6 +39,11 @@
   $: installed = state?.installed ?? null;
   $: plan = state?.plan ?? null;
   $: release = state?.release ?? null;
+  $: planRefreshing = view.planRefreshing;
+  $: planUnavailable = planRefreshing || view.planStale;
+  $: planUnavailableText = planRefreshing ? $t("codexClient.planRefreshing") : $t("codexClient.planStale");
+  $: effectivePlan = planUnavailable ? null : plan;
+  $: effectiveRelease = planUnavailable ? null : release;
   $: isWindows = state?.platform === "windows";
   $: installKinds = view.installKinds;
   $: selectedKind = view.selectedKind;
@@ -47,7 +52,7 @@
   $: isMacos = state?.platform === "macos";
   $: statusLabel = installed ? $t("common.installed") : $t("common.missing");
   $: statusTone = (installed ? "ok" : "warning") as Severity;
-  $: canStage = Boolean(plan && !plan.upToDate && plan.route !== "unsupported");
+  $: canStage = Boolean(effectivePlan && !effectivePlan.upToDate && effectivePlan.route !== "unsupported");
   $: canInstall = canStage;
   $: isRunning = state?.running ?? false;
   $: canLaunch = Boolean(installed);
@@ -234,13 +239,13 @@
       </div>
       <div>
         <span>{$t("codexClient.latestVersion")}</span>
-        <strong>{release?.version ?? $t("common.unknown")}</strong>
-        <small>{release?.packageMoniker ?? $t("codexClient.planNotLoaded")}</small>
+        <strong>{effectiveRelease?.version ?? $t("common.unknown")}</strong>
+        <small>{planUnavailable ? planUnavailableText : effectiveRelease?.packageMoniker ?? $t("codexClient.planNotLoaded")}</small>
       </div>
       <div>
         <span>{$t("codexClient.packageSize")}</span>
-        <strong>{formatBytes(plan?.downloadSize ?? release?.contentLength)}</strong>
-        <small>{release?.sha256 ? `${release.sha256.slice(0, 12)}...` : $t("common.unknown")}</small>
+        <strong>{formatBytes(effectivePlan?.downloadSize ?? effectiveRelease?.contentLength)}</strong>
+        <small>{effectiveRelease?.sha256 ? `${effectiveRelease.sha256.slice(0, 12)}...` : $t("common.unknown")}</small>
       </div>
     </div>
     <div class="gateway-actions codex-client-actions">
@@ -285,27 +290,34 @@
     <div class="section-heading">
       <div>
         <h2>{$t("codexClient.planTitle")}</h2>
-        <p>{release?.manifestUrl ?? $t("codexClient.planNotLoaded")}</p>
+        <p>{planUnavailable ? planUnavailableText : effectiveRelease?.manifestUrl ?? $t("codexClient.planNotLoaded")}</p>
       </div>
       <div class="section-actions">
-        {#if plan}
-          <StatusPill status={plan.upToDate ? "ok" : "warning"} label={plan.upToDate ? $t("codexClient.upToDate") : $t("codexClient.updateAvailable")} />
+        {#if planUnavailable}
+          <StatusPill status="info" label={planUnavailableText} />
+        {:else if effectivePlan}
+          <StatusPill status={effectivePlan.upToDate ? "ok" : "warning"} label={effectivePlan.upToDate ? $t("codexClient.upToDate") : $t("codexClient.updateAvailable")} />
         {/if}
       </div>
     </div>
     <div class="preview-list codex-client-list">
-      {#if plan}
+      {#if planUnavailable}
+        <div class="empty-row">
+          <AppIcon name={planRefreshing ? "loading" : "info"} class={planRefreshing ? "spin" : ""} size={18} />
+          {planUnavailableText}
+        </div>
+      {:else if effectivePlan}
         <div>
           <strong>{$t("codexClient.downloadUrl")}</strong>
-          <span>{plan.packageUrl}</span>
+          <span>{effectivePlan.packageUrl}</span>
         </div>
         <div>
           <strong>SHA-256</strong>
-          <span>{plan.sha256}</span>
+          <span>{effectivePlan.sha256}</span>
         </div>
         <div>
           <strong>{$t("codexClient.installRoot")}</strong>
-          <span>{plan.installRoot ?? $t("common.none")}</span>
+          <span>{effectivePlan.installRoot ?? $t("common.none")}</span>
         </div>
         {#if stageReport}
           <div>
@@ -322,7 +334,7 @@
             <span>{operationResult.action} / {operationResult.notes.join(" ")}</span>
           </div>
         {/if}
-        {#each plan.warnings as warning}
+        {#each effectivePlan.warnings as warning}
           <div class="warning-row">
             <strong>{$t("status.warning")}</strong>
             <span>{warning}</span>
@@ -342,17 +354,24 @@
       </div>
     </div>
     <div class="doctor-list">
-      {#each plan?.capabilities ?? [] as capability}
-        <div class="doctor-row">
-          <StatusPill status={capability.status} label={$t(`status.${capability.status}` as Parameters<typeof $t>[0])} />
-          <div>
-            <h3>{capability.label}</h3>
-            <p>{capability.detail}</p>
-          </div>
+      {#if planUnavailable}
+        <div class="empty-row">
+          <AppIcon name={planRefreshing ? "loading" : "info"} class={planRefreshing ? "spin" : ""} size={18} />
+          {planUnavailableText}
         </div>
       {:else}
-        <div class="empty-row">{$t("codexClient.capabilityEmpty")}</div>
-      {/each}
+        {#each effectivePlan?.capabilities ?? [] as capability}
+          <div class="doctor-row">
+            <StatusPill status={capability.status} label={$t(`status.${capability.status}` as Parameters<typeof $t>[0])} />
+            <div>
+              <h3>{capability.label}</h3>
+              <p>{capability.detail}</p>
+            </div>
+          </div>
+        {:else}
+          <div class="empty-row">{$t("codexClient.capabilityEmpty")}</div>
+        {/each}
+      {/if}
     </div>
   </section>
 

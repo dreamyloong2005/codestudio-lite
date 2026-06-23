@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>CodeStudio Lite needs to automate Claude and System Events to enable Claude Desktop's Main Process Debugger for localization launch.</string>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>CodeStudio Lite needs Accessibility access to select Claude's Developer menu when launching Claude Desktop with localization.</string>
+</dict>
+</plist>

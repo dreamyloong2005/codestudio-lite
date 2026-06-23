@@ -337,20 +337,28 @@ pub fn spawn_external_terminal(
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = shell_id;
         let mut script = String::new();
         if let Some(directory) = working_directory {
-            script.push_str(&format!("cd '{}'
-", directory.display()));
+            script.push_str(&format!(
+                "cd '{}'
+",
+                directory.display()
+            ));
         }
         for (key, value) in env {
             let escaped = value.replace("'", "'\\''");
-            script.push_str(&format!("export {key}='{escaped}'
-"));
+            script.push_str(&format!(
+                "export {key}='{escaped}'
+"
+            ));
         }
         script.push_str(command);
-        script.push_str("
+        script.push_str(
+            "
 exec $SHELL
-");
+",
+        );
         let dir = std::env::temp_dir();
         let script_path = dir.join(format!("csl-external-{}.sh", std::process::id()));
         std::fs::write(&script_path, &script)?;
@@ -465,13 +473,27 @@ mod tests {
 
     #[test]
     fn shell_arguments_keep_install_commands_short_lived_and_launch_commands_open() {
-        assert_eq!(
-            shell_arguments("cmd", "codex", false),
-            vec!["/S".to_string(), "/C".to_string(), "codex".to_string()]
-        );
-        assert_eq!(
-            shell_arguments("cmd", "codex", true),
-            vec!["/S".to_string(), "/K".to_string(), "codex".to_string()]
-        );
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                shell_arguments("cmd", "codex", false),
+                vec!["/S".to_string(), "/C".to_string(), "codex".to_string()]
+            );
+            assert_eq!(
+                shell_arguments("cmd", "codex", true),
+                vec!["/S".to_string(), "/K".to_string(), "codex".to_string()]
+            );
+        } else {
+            assert_eq!(
+                shell_arguments("zsh", "codex", false),
+                vec!["-lc".to_string(), "codex".to_string()]
+            );
+            assert_eq!(
+                shell_arguments("zsh", "codex", true),
+                vec![
+                    "-lc".to_string(),
+                    "codex; printf '\\n'; exec $SHELL".to_string()
+                ]
+            );
+        }
     }
 }

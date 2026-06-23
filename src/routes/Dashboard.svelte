@@ -117,7 +117,8 @@
   }
 
   function isInstallingTool(tool: ToolStatus) {
-    return planningToolId === tool.id || installingToolId === tool.id;
+    const installToolId = installPlanToolFor(tool).id;
+    return planningToolId === installToolId || installingToolId === installToolId;
   }
 
   function isUpdatingTool(tool: ToolStatus) {
@@ -138,6 +139,18 @@
 
   function isManagedDesktopClient(tool: ToolStatus) {
     return tool.id === "codex-app" || tool.id === "claude-desktop";
+  }
+
+  function installPlanToolFor(tool: ToolStatus) {
+    if (tool.id !== "npm") {
+      return tool;
+    }
+    return snapshot?.system.find((candidate) => candidate.id === "node") ?? {
+      ...tool,
+      id: "node",
+      name: "Node.js",
+      command: "node"
+    };
   }
 
   function envClearMessage(success: boolean) {
@@ -526,7 +539,8 @@
       return;
     }
 
-    pendingInstallTool = tool;
+    const planTool = mode === "install" ? installPlanToolFor(tool) : tool;
+    pendingInstallTool = planTool;
     installMode = mode;
     installPlan = null;
     installResult = null;
@@ -536,9 +550,9 @@
     clearInstallProgressLogs();
     toolActionMessage = null;
     toolActionError = null;
-    planningToolId = tool.id;
+    planningToolId = planTool.id;
     try {
-      const plan = installMode === "update" ? planToolUpdate(tool.id) : planToolInstall(tool.id);
+      const plan = installMode === "update" ? planToolUpdate(planTool.id) : planToolInstall(planTool.id);
       installPlan = await plan;
     } catch (err) {
       installError = err instanceof Error ? err.message : String(err);
@@ -1066,12 +1080,12 @@
                 disabled={isToolActionBusy(tool)}
                 on:click={() => openInstallPlan(tool)}
               >
-                {#if planningToolId === tool.id || installingToolId === tool.id}
+                {#if isInstallingTool(tool)}
                   <AppIcon name="loading" size={16} class="spin" />
                 {:else}
                   <AppIcon name="install" size={16} />
                 {/if}
-                {planningToolId === tool.id || installingToolId === tool.id ? $t("tool.installing") : $t("common.install")}
+                {isInstallingTool(tool) ? $t("tool.installing") : $t("common.install")}
               </button>
             {:else if tool.updateAvailable}
               <button

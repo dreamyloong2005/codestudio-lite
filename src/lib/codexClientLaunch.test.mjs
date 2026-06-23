@@ -66,3 +66,50 @@ test("Codex client notices are localized and dismiss with an icon", () => {
     assert.match(dictionary, /"codexClient\.progressInstallPreparing"/);
   }
 });
+
+test("Codex client hides stale update plan while settings are being replanned", () => {
+  const route = read("src/routes/CodexClient.svelte");
+  const store = read("src/lib/codexClientStore.ts");
+  const zhCN = read("src/lib/locales/zh-CN.ts");
+  const zhTW = read("src/lib/locales/zh-TW.ts");
+  const enUS = read("src/lib/locales/en-US.ts");
+
+  assert.match(store, /planRefreshing:\s*boolean/);
+  assert.match(store, /planStale:\s*boolean/);
+  assert.match(store, /function planAffectingSettingsChanged/);
+  assert.match(store, /planAffectingSettingsChanged\(lastSavedSettings,\s*nextDraft\)/);
+  assert.match(route, /planUnavailable\s*=\s*planRefreshing\s*\|\|\s*view\.planStale/);
+  assert.match(route, /effectivePlan\s*=\s*planUnavailable\s*\?\s*null\s*:\s*plan/);
+  assert.match(route, /effectiveRelease\s*=\s*planUnavailable\s*\?\s*null\s*:\s*release/);
+  assert.match(route, /\{#if planUnavailable\}/);
+  assert.match(route, /codexClient\.planStale/);
+
+  for (const dictionary of [zhCN, zhTW, enUS]) {
+    assert.match(dictionary, /"codexClient\.planRefreshing"/);
+    assert.match(dictionary, /"codexClient\.planStale"/);
+  }
+});
+
+test("Codex client does not expose a Windows official update-source choice", () => {
+  const route = read("src/routes/CodexClient.svelte");
+  const core = read("src-tauri/src/core/codex_client.rs");
+  const zhCN = read("src/lib/locales/zh-CN.ts");
+  const zhTW = read("src/lib/locales/zh-TW.ts");
+  const enUS = read("src/lib/locales/en-US.ts");
+
+  assert.match(
+    route,
+    /\{#if isMacos\}[\s\S]*\{\$t\("codexClient\.source"\)\}[\s\S]*<select[\s\S]*value=\{settingsDraft\.source\}[\s\S]*<option value="official">[\s\S]*\{\/if\}/
+  );
+  assert.doesNotMatch(route, /windowsOfficial|Microsoft Store installer|get\.microsoft\.com\/installer\/download|winget install Codex/);
+  assert.match(core, /"official" if cfg!\(target_os = "macos"\) => "official"/);
+  assert.doesNotMatch(core, /"official" if cfg!\(target_os = "windows"\)/);
+
+  for (const dictionary of [zhCN, zhTW, enUS]) {
+    assert.doesNotMatch(dictionary, /windowsOfficial/);
+    assert.doesNotMatch(dictionary, /继续使用镜像|繼續使用映像|continues to use the mirror/);
+  }
+  assert.match(zhCN, /Windows 只能使用镜像源/);
+  assert.match(zhTW, /Windows 只能使用映像來源/);
+  assert.match(enUS, /Windows can only use the mirror source/);
+});

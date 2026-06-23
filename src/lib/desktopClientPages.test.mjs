@@ -36,25 +36,53 @@ test("dashboard desktop client actions run in place instead of navigating to cli
   assert.doesNotMatch(dashboard, /if \(tool\.id === "codex-app"\) \{\s*onOpenCodexClient\(\)/);
 });
 
+test("route switches refresh the active CodeStudio Lite page", () => {
+  const app = read("src/App.svelte");
+
+  assert.match(app, /import \{ refreshClaudeDesktop \} from "\.\/lib\/claudeDesktopStore"/);
+  assert.match(app, /import \{ refreshCodexClient \} from "\.\/lib\/codexClientStore"/);
+  assert.match(app, /let lastRouteRefreshRoute: Route = route/);
+  assert.match(app, /route !== lastRouteRefreshRoute[\s\S]*refreshCurrentRouteAfterSwitch\(route\)/);
+  assert.match(app, /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: false \}\)/);
+  assert.match(app, /currentRoute === "codexClient"[\s\S]*refreshCodexClient\(\)/);
+  assert.match(app, /currentRoute === "claudeDesktop"[\s\S]*refreshClaudeDesktop\(\)/);
+  assert.match(app, /currentRoute === "profiles" \|\| currentRoute === "gateway"[\s\S]*refreshAfterProfileChange\(\)/);
+  assert.match(app, /currentRoute === "settings"[\s\S]*refreshSettings\(\)/);
+});
+
 test("Claude Desktop page supports install update and uninstall through the shared tool installer", () => {
   const route = read("src/routes/ClaudeDesktop.svelte");
   const store = read("src/lib/claudeDesktopStore.ts");
   const api = read("src/lib/api.ts");
   const commands = read("src-tauri/src/commands/tool_installer.rs");
+  const claudeCommands = read("src-tauri/src/commands/claude_desktop.rs");
+  const coreInstaller = read("src-tauri/src/core/tool_installer.rs");
   const lib = read("src-tauri/src/lib.rs");
 
   assert.match(route, /claudeDesktopView/);
   assert.match(route, /installOrUpdateClaudeDesktop/);
   assert.match(route, /removeClaudeDesktop/);
+  assert.match(route, /openClaudeDesktopStagingPath/);
+  assert.match(route, /claudeDesktop\.openStagingPath/);
   assert.match(store, /const CLAUDE_DESKTOP_TOOL_ID = "claude-desktop"/);
   assert.match(store, /planToolInstall\(CLAUDE_DESKTOP_TOOL_ID\)/);
   assert.match(store, /planToolUpdate\(CLAUDE_DESKTOP_TOOL_ID\)/);
   assert.match(store, /installTool\(/);
   assert.match(store, /updateTool\(/);
   assert.match(store, /uninstallTool\(/);
+  assert.match(store, /refreshClaudeDesktop\(true\)/);
+  assert.match(store, /openClaudeDesktopPath\("staging"\)/);
   assert.match(api, /export async function uninstallTool/);
+  assert.match(api, /export async function openClaudeDesktopPath/);
+  assert.match(api, /invoke\("open_claude_desktop_path", \{ kind \}\)/);
   assert.match(commands, /pub async fn uninstall_tool/);
+  assert.match(coreInstaller, /pub fn open_claude_desktop_path/);
+  assert.match(coreInstaller, /cleanup_claude_desktop_download_cache/);
+  assert.match(coreInstaller, /Removed Claude Desktop downloaded installer cache/);
+  assert.match(claudeCommands, /pub fn open_claude_desktop_path/);
+  assert.match(claudeCommands, /tool_installer::open_claude_desktop_path/);
   assert.match(lib, /commands::tool_installer::uninstall_tool/);
+  assert.match(lib, /commands::claude_desktop::open_claude_desktop_path/);
 });
 
 test("Claude Desktop page launches like a desktop client without the shared tool modal", () => {
@@ -125,7 +153,8 @@ test("Claude Desktop launch can enable localization patching", () => {
   assert.match(route, /claudeDesktop\.localizeLaunch/);
   assert.match(route, /localize: localizeClaudeLaunch/);
   assert.match(api, /invoke\("launch_claude_desktop", \{ localize: request\.localize \}\)/);
-  assert.match(command, /claude_desktop_patch::launch\(localize\)/);
+  assert.match(command, /app: tauri::AppHandle/);
+  assert.match(command, /claude_desktop_patch::launch_with_app\(localize, Some\(app\)\)/);
   assert.match(coreMod, /pub mod claude_desktop_patch;/);
   assert.match(patch, /TRANSLATION_RUNTIME/);
   assert.match(patch, /Page\.addScriptToEvaluateOnNewDocument/);
@@ -225,6 +254,51 @@ test("Claude Desktop terminal localization command uses the localized Windows la
   );
   assert.match(windowsBranch, /launch-claude-zh\.ps1/);
   assert.doesNotMatch(windowsBranch, /launch-claude\.ps1"\)\)/);
+});
+
+test("Claude Desktop external terminal localization starts the injector", () => {
+  const terminalCommand = read("src-tauri/src/commands/install_terminal.rs");
+  const startTerminalFunction = terminalCommand.slice(
+    terminalCommand.indexOf("fn start_terminal_session"),
+    terminalCommand.indexOf("fn normalized_working_directory")
+  );
+  const launchExternalFunction = terminalCommand.slice(
+    terminalCommand.indexOf("pub async fn launch_tool_external"),
+    terminalCommand.length
+  );
+
+  assert.match(startTerminalFunction, /ensure_localized_launch_prerequisites\(\)\?/);
+  assert.match(launchExternalFunction, /ensure_localized_launch_prerequisites\(\)\?/);
+  assert.ok(
+    launchExternalFunction.indexOf("ensure_localized_launch_prerequisites()?") <
+      launchExternalFunction.indexOf("patched_launch_command"),
+    "external terminal localized launch should preflight permissions before building the command"
+  );
+  assert.match(launchExternalFunction, /spawn_external_terminal/);
+  assert.match(launchExternalFunction, /localize && request\.tool_id == "claude-desktop"/);
+  assert.match(launchExternalFunction, /spawn_silent_localization_injector\(\)/);
+});
+
+test("macOS app bundle is signed as a bundle for stable Accessibility trust", () => {
+  const tauriConfig = JSON.parse(read("src-tauri/tauri.conf.json"));
+  const packageJson = JSON.parse(read("package.json"));
+  const signScript = read("scripts/sign-macos-bundle.sh");
+  const dmgScript = read("scripts/build-macos-dmg.sh");
+
+  assert.equal(tauriConfig.bundle?.macOS?.signingIdentity, "-");
+  assert.equal(tauriConfig.bundle?.macOS?.infoPlist, "Info.plist");
+  assert.equal(packageJson.scripts?.["tauri:build:dmg"], "scripts/build-macos-dmg.sh");
+  assert.equal(packageJson.scripts?.["tauri:sign:macos"], "scripts/sign-macos-bundle.sh");
+  assert.match(signScript, /--requirements/);
+  assert.match(signScript, /designated => identifier/);
+  assert.match(signScript, /com\.codestudio\.lite/);
+  assert.match(signScript, /codesign -dr -/);
+  assert.match(dmgScript, /scripts\/sign-macos-bundle\.sh/);
+  assert.match(dmgScript, /--no-sign/);
+  assert.match(dmgScript, /Warn --no-sign flag detected/);
+  assert.match(dmgScript, /Warn Skipping signing due to --no-sign flag/);
+  assert.match(dmgScript, /hdiutil create/);
+  assert.doesNotMatch(dmgScript, /tauri build --bundles dmg/);
 });
 
 test("Claude Desktop Windows launch repairs stale MSIX registration before activation", () => {

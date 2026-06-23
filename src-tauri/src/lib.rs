@@ -26,6 +26,7 @@ pub fn run() {
             commands::backup::list_backups,
             commands::backup::restore_backup,
             commands::claude_desktop::launch_claude_desktop,
+            commands::claude_desktop::open_claude_desktop_path,
             commands::codex_client::inspect_codex_client,
             commands::codex_client::install_codex_client,
             commands::codex_client::load_cached_codex_client_state,
@@ -87,6 +88,9 @@ pub fn run() {
             // hides it to the tray instead of quitting the app. The tray's
             // "Quit" entry performs the real shutdown (including the gateway).
             crate::core::tray::setup(app.handle());
+            crate::core::claude_desktop_patch::resume_pending_macos_localized_launch(
+                app.handle().clone(),
+            );
             Ok(())
         })
         .on_window_event(|window, event| {

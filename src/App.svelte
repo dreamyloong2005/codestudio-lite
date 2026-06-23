@@ -16,6 +16,8 @@
     updateGatewaySettings
   } from "./lib/api";
   import { appUpdateState, checkForAppUpdate } from "./lib/appUpdateStore";
+  import { refreshClaudeDesktop } from "./lib/claudeDesktopStore";
+  import { refreshCodexClient } from "./lib/codexClientStore";
   import { setLocale, t } from "./lib/i18n";
   import { applyTheme } from "./lib/theme";
 import { disposeTerminalSession } from "./lib/terminalSessionStore";
@@ -50,6 +52,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
   let backgroundDetectionInterval: number | null = null;
   let dashboardRefreshRunId = 0;
   let visibleRefreshRunId: number | null = null;
+  let lastRouteRefreshRoute: Route = route;
 
   // detect_environment now returns local detection immediately and kicks off
   // update checks in the background (npm outdated / winget / claude.ai release).
@@ -73,6 +76,10 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
   $: visibleNavItems = navItems.filter((item) => !["codexClient", "claudeDesktop"].includes(item.id) || desktopClientPagesAvailable);
   $: if (["codexClient", "claudeDesktop"].includes(route) && !desktopClientPagesAvailable) {
     route = "dashboard";
+  }
+  $: if (route !== lastRouteRefreshRoute) {
+    lastRouteRefreshRoute = route;
+    void refreshCurrentRouteAfterSwitch(route);
   }
 
   async function copyGatewayUrl() {
@@ -229,6 +236,23 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     // Supersede with a full scan in the background (quiet, no loading bar) so
     // the dashboard's tool/env state stays current without stalling the action.
     void refreshDashboard({ quiet: true, scheduleFollowup: false });
+  }
+
+  async function refreshCurrentRouteAfterSwitch(currentRoute: Route) {
+    if (currentRoute === "dashboard") {
+      await refreshDashboard({ quiet: true, scheduleFollowup: false });
+    } else if (currentRoute === "codexClient") {
+      await refreshCodexClient();
+    } else if (currentRoute === "claudeDesktop") {
+      await refreshClaudeDesktop();
+    } else if (currentRoute === "profiles" || currentRoute === "gateway") {
+      await refreshAfterProfileChange();
+    } else if (currentRoute === "settings") {
+      await refreshSettings();
+      if ($appUpdateState.status === "idle") {
+        await checkForAppUpdate();
+      }
+    }
   }
 
   function mergeToolStatus(status: ToolStatus) {

@@ -5,16 +5,25 @@ use crate::core::detector::{
     claude_desktop_windows_package_identities, claude_desktop_windows_stale_msix_manifest,
 };
 use crate::core::platform::{hidden_command, package};
+#[cfg(not(target_os = "macos"))]
 use crate::core::process_control;
+use crate::core::profile;
 use crate::core::types::InstallTerminalOutput;
 #[cfg(test)]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use std::env;
+#[cfg(target_os = "macos")]
+use std::ffi::{c_void, CString};
 use std::fs;
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 use tungstenite::{connect, Message};
 
@@ -26,7 +35,13 @@ const CLAUDE_FUSE_MARKER: &[u8] = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
 const CLAUDE_FUSE_INTEGRITY_INDEX: usize = 4;
 const CLAUDE_ZH_INJECTION_RETRY_COUNT: usize = 30;
 const CLAUDE_ZH_INJECTION_RETRY_MS: u64 = 500;
+const MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+const MACOS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
+const MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
+const MACOS_ACCESSIBILITY_PREFLIGHT_RETRY_MS: u64 = 500;
 const INSTALL_TERMINAL_OUTPUT_EVENT: &str = "install-terminal://output";
+#[cfg(target_os = "macos")]
+static MACOS_ACCESSIBILITY_PROMPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Per-message read timeout for CDP eval round-trips over the Node inspector.
 /// Guards against a stalled inspector response hanging the injection thread
 /// forever (the read loop otherwise blocks indefinitely).
@@ -34,6 +49,8 @@ const CLAUDE_INSPECTOR_EVAL_TIMEOUT: Duration = Duration::from_secs(15);
 const CLAUDE_SHELL_ZH_LOCALE_FILE: &str = "zh-CN.json";
 const CLAUDE_ION_ZH_LOCALE_RELATIVE_PATH: &str = "ion-dist/i18n/zh-CN.json";
 const CLAUDE_LOCALIZED_LAUNCH_MARKER: &str = "localized-launch.flag";
+const CLAUDE_MACOS_ACCESSIBILITY_RESTART_MARKER: &str =
+    "resume-localized-launch-after-accessibility-restart.flag";
 const CLAUDE_SHELL_ZH_LOCALE: &str = include_str!("../../resources/claude-desktop/i18n/zh-CN.json");
 const CLAUDE_ION_ZH_LOCALE: &str =
     include_str!("../../resources/claude-desktop/i18n/ion-dist/i18n/zh-CN.json");
@@ -41,13 +58,24 @@ const CLAUDE_ION_DYNAMIC_ZH_LOCALE_RELATIVE_PATH: &str = "ion-dist/i18n/dynamic/
 const CLAUDE_ION_DYNAMIC_ZH_LOCALE: &str =
     include_str!("../../resources/claude-desktop/i18n/ion-dist/i18n/dynamic/zh-CN.json");
 
+enum MacosAccessibilityPreflight {
+    Trusted,
+    NeedsProcessRestart,
+}
+
 pub fn launch(localize: bool) -> Result<(), String> {
+    launch_with_app(localize, None)
+}
+
+pub fn launch_with_app(localize: bool, app: Option<tauri::AppHandle>) -> Result<(), String> {
     if !cfg!(any(target_os = "windows", target_os = "macos")) {
         return Err("Claude Desktop launch is only supported on Windows and macOS.".to_string());
     }
 
     if cfg!(target_os = "windows") {
         launch_windows_claude_desktop(localize)?;
+    } else if localize {
+        launch_macos_claude_desktop_localized(app.as_ref(), true)?;
     } else {
         let mut command = hidden_command("open");
         command.args(["-a", "Claude"]);
@@ -57,11 +85,41 @@ pub fn launch(localize: bool) -> Result<(), String> {
             .map_err(|err| format!("Failed to launch Claude Desktop: {err}"))?;
     }
 
-    if localize {
+    if localize && cfg!(target_os = "windows") {
         spawn_silent_localization_injector();
     }
 
     Ok(())
+}
+
+pub fn resume_pending_macos_localized_launch(app: tauri::AppHandle) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    if !take_macos_accessibility_restart_marker() {
+        return;
+    }
+
+    append_macos_debugger_log(
+        "Resuming Claude localized launch after CodeStudio Lite Accessibility restart",
+    );
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(1_000));
+        match launch_macos_claude_desktop_localized(Some(&app), false) {
+            Ok(()) => {
+                append_macos_debugger_log(
+                    "Resumed Claude localized launch after Accessibility restart",
+                );
+                let _ = app.emit("claude-desktop://localized-launch-resumed", ());
+            }
+            Err(err) => {
+                append_macos_debugger_log(format!(
+                    "FAILED: resume Claude localized launch after Accessibility restart: {err}"
+                ));
+                let _ = app.emit("claude-desktop://localized-launch-resume-failed", err);
+            }
+        }
+    });
 }
 
 pub fn base_launch_command(tool_id: &str, fallback: &str) -> String {
@@ -93,27 +151,62 @@ pub fn patched_launch_command(
             &patch_dir.join("launch-claude-zh.ps1"),
         ))
     } else {
-        Ok("open -a Claude".to_string())
+        let patch_dir = ensure_patch_files()?;
+        write_localized_launch_marker()?;
+        Ok(sh_file_command(
+            &patch_dir.join("launch-claude-macos-zh.sh"),
+        ))
     }
 }
 
-/// Ensure the in-place Claude Desktop localization patch (app.asar entry
-/// shim + asar-integrity fuse) is applied. Idempotent: a no-op when the
-/// patch is already in place. Performs an elevated write (UAC prompt) only
-/// when the installed app is not yet patched or the patch was rolled back
-/// by an MSIX update/repair. Call this before launching a localized Claude
-/// Desktop so the main process opens the Node inspector itself.
+/// Prepare Claude Desktop localization launch support. Windows applies the
+/// in-place app.asar/fuse patch; macOS never modifies Claude.app and only
+/// prepares the script plus Developer Mode setting used by Claude's official
+/// "Enable Main Process Debugger" menu.
 pub fn ensure_localization_patch() -> Result<(), String> {
-    apply_localization_patch()
+    if cfg!(target_os = "windows") {
+        apply_localization_patch()
+    } else if cfg!(target_os = "macos") {
+        ensure_patch_files()?;
+        ensure_macos_claude_desktop_developer_mode()
+    } else {
+        Err(
+            "Claude Desktop localization patching is only supported on Windows and macOS."
+                .to_string(),
+        )
+    }
+}
+
+pub fn ensure_localized_launch_prerequisites() -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        ensure_macos_accessibility_trusted_for_localized_launch()?;
+    }
+    Ok(())
 }
 
 pub fn spawn_localization_injector(app: tauri::AppHandle, session_id: String) {
     thread::spawn(move || {
-        emit_terminal(
-            &app,
-            &session_id,
-            "[claude-zh] waiting for Claude DevTools endpoint...\r\n",
-        );
+        if cfg!(target_os = "macos") {
+            emit_terminal(
+                &app,
+                &session_id,
+                "[claude-zh] ensuring Claude main process debugger is enabled...\r\n",
+            );
+            if let Err(err) = enable_macos_claude_main_process_debugger() {
+                emit_terminal(
+                    &app,
+                    &session_id,
+                    &format!("[claude-zh] debugger was not ready: {err}\r\n"),
+                );
+                return;
+            }
+        } else {
+            emit_terminal(
+                &app,
+                &session_id,
+                "[claude-zh] waiting for Claude DevTools endpoint...\r\n",
+            );
+        }
         match retry_inject_localization() {
             Ok(count) => emit_terminal(
                 &app,
@@ -129,8 +222,11 @@ pub fn spawn_localization_injector(app: tauri::AppHandle, session_id: String) {
     });
 }
 
-fn spawn_silent_localization_injector() {
+pub fn spawn_silent_localization_injector() {
     thread::spawn(move || {
+        if cfg!(target_os = "macos") {
+            let _ = enable_macos_claude_main_process_debugger();
+        }
         let _ = retry_inject_localization();
     });
 }
@@ -153,6 +249,12 @@ fn ensure_patch_files() -> Result<PathBuf, String> {
         &patch_dir.join("launch-claude-zh.ps1"),
         &windows_launch_script(true),
     )?;
+    if cfg!(target_os = "macos") {
+        write_if_changed(
+            &patch_dir.join("launch-claude-macos-zh.sh"),
+            &macos_localized_launch_script(),
+        )?;
+    }
     Ok(patch_dir)
 }
 
@@ -162,6 +264,49 @@ fn localized_launch_marker_path() -> Result<PathBuf, String> {
         .config_dir
         .join("claude-desktop-patch")
         .join(CLAUDE_LOCALIZED_LAUNCH_MARKER))
+}
+
+fn macos_accessibility_restart_marker_path() -> Result<PathBuf, String> {
+    let paths = app_paths().map_err(|err| err.to_string())?;
+    Ok(paths
+        .config_dir
+        .join("claude-desktop-patch")
+        .join(CLAUDE_MACOS_ACCESSIBILITY_RESTART_MARKER))
+}
+
+fn write_macos_accessibility_restart_marker(reason: &str) -> Result<(), String> {
+    let path = macos_accessibility_restart_marker_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create {}: {err}", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        format!(
+            "reason={reason}\ncreated_at={}\n",
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        ),
+    )
+    .map_err(|err| format!("Failed to write {}: {err}", path.display()))
+}
+
+fn take_macos_accessibility_restart_marker() -> bool {
+    let Ok(path) = macos_accessibility_restart_marker_path() else {
+        return false;
+    };
+    if !path.exists() {
+        return false;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(err) => {
+            append_macos_debugger_log(format!(
+                "WARN: failed to remove Accessibility restart marker {}: {err}",
+                path.display()
+            ));
+            false
+        }
+    }
 }
 
 fn write_localized_launch_marker() -> Result<(), String> {
@@ -188,6 +333,10 @@ fn powershell_file_command(path: &Path) -> String {
         "powershell.exe -NoProfile -ExecutionPolicy Bypass -File {}",
         windows_shell_quote(&path.to_string_lossy())
     )
+}
+
+fn sh_file_command(path: &Path) -> String {
+    format!("sh {}", sh_single_quote(&path.to_string_lossy()))
 }
 
 fn launch_windows_claude_desktop(localize: bool) -> Result<Option<u32>, String> {
@@ -258,6 +407,7 @@ fn launch_windows_claude_exe(exe: PathBuf, args: &[String]) -> Result<Option<u32
         .map_err(|err| format!("Failed to launch Claude Desktop executable: {err}"))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn close_existing_claude_for_localized_launch() -> Result<(), String> {
     process_control::close_processes("Claude Desktop", &["Claude"], &[], None, 3)
         .map(|_| ())
@@ -267,6 +417,62 @@ fn close_existing_claude_for_localized_launch() -> Result<(), String> {
                 "localized launch was not continued",
             )
         })
+}
+
+#[cfg(target_os = "macos")]
+fn close_existing_claude_for_localized_launch() -> Result<(), String> {
+    let pids = macos_claude_process_ids()?;
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    for pid in &pids {
+        let _ = hidden_command("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+    }
+    wait_for_macos_pids_to_exit(&pids, Duration::from_secs(3));
+
+    let remaining_after_term = pids
+        .iter()
+        .copied()
+        .filter(|pid| macos_pid_alive(*pid))
+        .collect::<Vec<_>>();
+    for pid in &remaining_after_term {
+        hidden_command("kill")
+            .args(["-KILL", &pid.to_string()])
+            .output()
+            .map_err(|err| format!("Failed to force-close Claude Desktop: {err}"))?;
+    }
+    wait_for_macos_pids_to_exit(&remaining_after_term, Duration::from_millis(500));
+
+    if pids.iter().any(|pid| macos_pid_alive(*pid)) {
+        return Err(
+            "Claude Desktop is still running; localized launch was not continued.".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_macos_pids_to_exit(pids: &[u32], timeout: Duration) {
+    let started_at = Instant::now();
+    while started_at.elapsed() < timeout {
+        if pids.iter().all(|pid| !macos_pid_alive(*pid)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pid_alive(pid: u32) -> bool {
+    hidden_command("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn claude_launch_args(_localize: bool) -> Vec<String> {
@@ -612,6 +818,7 @@ fn build_inspector_shim_with_payloads(
   }}
   var localizedLaunchDefaultZh = consumeLocalizedLaunchMarker();
   var currentLocale = localizedLaunchDefaultZh ? "zh-CN" : "en-US";
+  var CSL_WANTED_LOCALE_KEY = "__cslWantedLocale";
   function activeLocaleLaunchFlag() {{ return currentLocale === "zh-CN"; }}
   function runtimeLaunchZhFlag() {{ return activeLocaleLaunchFlag() ? "!0" : "!1"; }}
   function forceInitialLocale() {{
@@ -703,7 +910,7 @@ fn build_inspector_shim_with_payloads(
   try {{
     await contents.debugger.sendCommand("Page.enable", {{}});
     await contents.debugger.sendCommand("Fetch.enable", {{ patterns: PATTERNS }});
-    await contents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {{ source: "var __CSL_LL=" + runtimeLaunchZhFlag() + ";if(__CSL_LL&&!sessionStorage.getItem('__CSL_LL_DONE'))try{{localStorage.removeItem('spa:locale');sessionStorage.setItem('__CSL_LL_DONE','1')}}catch(e){{}};" + RUNTIME }});
+    await contents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {{ source: "var __CSL_LL=" + runtimeLaunchZhFlag() + ";if(__CSL_LL&&!sessionStorage.getItem('__CSL_LL_DONE'))try{{localStorage.setItem('__cslWantedLocale','zh-CN');localStorage.removeItem('spa:locale');sessionStorage.setItem('__CSL_LL_DONE','1')}}catch(e){{}};" + RUNTIME }});
     // The reload is essential: it forces the page to re-request its locale
     // JSON through the Fetch interceptor (which fulfills it with zh-CN) and
     // re-runs the runtime script registered above. Without it the page stays
@@ -762,7 +969,52 @@ fn build_inspector_shim_with_payloads(
     return lower.indexOf("http://") === 0 || lower.indexOf("https://") === 0 || lower.indexOf("app://") === 0 || lower.indexOf("file://") === 0 || lower.indexOf("about:blank") === 0;
   }}
   function localLocalePage(lower) {{
-    return lower.indexOf("app://") === 0 || lower.indexOf("/settings") >= 0 || lower.indexOf("setup") >= 0 || lower.indexOf("third-party") >= 0 || lower.indexOf("inference") >= 0 || lower.indexOf("developer") >= 0;
+    return lower.indexOf("app://") === 0 || lower.indexOf("/settings") >= 0 || lower.indexOf("setup") >= 0 || lower.indexOf("third-party") >= 0 || lower.indexOf("inference") >= 0 || lower.indexOf("developer") >= 0 || lower.indexOf("about_window") >= 0;
+  }}
+  var localWindowHotSwitchSync = true;
+  function devToolsPage(lower) {{
+    return lower.indexOf("devtools://") === 0;
+  }}
+  var aboutClaudeWindowFallback = true;
+  function aboutClaudeTitle(target) {{
+    return target === "zh-CN" ? "\u5173\u4e8eClaude" : "About Claude";
+  }}
+  function aboutClaudePage(lower) {{
+    return lower.indexOf("about_window") >= 0;
+  }}
+  function aboutClaudeTitleActive(title) {{
+    var t = String(title || "").trim();
+    return t === "About Claude" || t === "\u5173\u4e8eClaude" || t === "\u5173\u4e8e Claude";
+  }}
+  function localTitleForUrl(lower, target) {{
+    if (aboutClaudePage(lower)) return aboutClaudeTitle(target);
+    if (lower.indexOf("setup-desktop-3p") >= 0) return target === "zh-CN" ? "\u914d\u7f6e\u7b2c\u4e09\u65b9\u0041\u0050\u0049" : "Configure Third-Party Inference\u2026";
+    if (devToolsPage(lower)) return target === "zh-CN" ? "\u5f00\u53d1\u8005\u5de5\u5177" : "DevTools";
+    return "";
+  }}
+  function localTitleForWindow(lower, target, currentTitle) {{
+    if (aboutClaudePage(lower) || aboutClaudeTitleActive(currentTitle)) return aboutClaudeTitle(target);
+    return localTitleForUrl(lower, target);
+  }}
+  function applyLocalWindowTitle(contents, target, lower) {{
+    try {{
+      var electronLT = require('electron');
+      var win = electronLT.BrowserWindow && electronLT.BrowserWindow.fromWebContents ? electronLT.BrowserWindow.fromWebContents(contents) : null;
+      var currentTitle = "";
+      try {{
+        if (win && typeof win.getTitle === "function") currentTitle = win.getTitle();
+        else if (contents && typeof contents.getTitle === "function") currentTitle = contents.getTitle();
+      }} catch (e) {{}}
+      var title = localTitleForWindow(lower, target, currentTitle);
+      if (!title) return;
+      try {{
+        if (win && typeof win.getTitle === "function" && typeof win.setTitle === "function" && win.getTitle() !== title) win.setTitle(title);
+      }} catch (e) {{}}
+      if (devToolsPage(lower) || aboutClaudePage(lower)) {{
+        var q = JSON.stringify(title);
+        contents.executeJavaScript('try{{if(document.title!==' + q + ')document.title=' + q + '}}catch(e){{}}', true).catch(function () {{}});
+      }}
+    }} catch (e) {{}}
   }}
   function syncOneWindowLocale(contents, target) {{
     try {{
@@ -770,6 +1022,8 @@ fn build_inspector_shim_with_payloads(
       var url = "";
       try {{ url = contents.getURL(); }} catch (e) {{}}
       var lower = String(url || "").toLowerCase();
+      applyLocalWindowTitle(contents, target, lower);
+      if (devToolsPage(lower)) return;
       if (!isSyncableUrl(lower)) return;
       var localPage = localLocalePage(lower);
       var localLike = localPage || lower.indexOf("file://") === 0 || lower.indexOf("about:blank") === 0;
@@ -777,7 +1031,7 @@ fn build_inspector_shim_with_payloads(
       if (remoteClaude && !localPage) return;
       var loc = localLike ? safeLocaleForLocalWindow(target) : target;
       var q = JSON.stringify(loc);
-      var js = 'try{{localStorage.setItem("spa:locale",' + q + ');document.documentElement&&document.documentElement.setAttribute("lang",' + q + ');window.dispatchEvent(new StorageEvent("storage",{{key:"spa:locale",newValue:' + q + '}}));window.dispatchEvent(new CustomEvent("claude-locale-change",{{detail:' + q + '}}));true}}catch(e){{false}}';
+      var js = 'try{{localStorage.setItem("__cslWantedLocale",' + q + ');localStorage.setItem("spa:locale",' + q + ');document.documentElement&&document.documentElement.setAttribute("lang",' + q + ');window.dispatchEvent(new StorageEvent("storage",{{key:"spa:locale",newValue:' + q + '}}));window.dispatchEvent(new CustomEvent("claude-locale-change",{{detail:' + q + '}}));true}}catch(e){{false}}';
       contents.executeJavaScript(js, true).catch(function () {{}});
       if (localPage && contents.__cslLocaleReloaded !== loc) {{
         contents.__cslLocaleReloaded = loc;
@@ -819,16 +1073,22 @@ fn build_inspector_shim_with_payloads(
     try {{
       var electronPL = require('electron');
       var all = electronPL.webContents.getAllWebContents();
+      var fallback = "";
       for (var i = 0; i < all.length; i++) {{
         var wc = all[i];
         var u = "";
         try {{ u = wc.getURL(); }} catch (e) {{}}
+        var lower = String(u || "").toLowerCase();
+        if (!u || !isSyncableUrl(lower)) continue;
+        var loc = await wc.executeJavaScript('localStorage.getItem("__cslWantedLocale")||localStorage.getItem("spa:locale")', true);
+        if (typeof loc !== "string" || !loc) continue;
         if (u && u.toLowerCase().indexOf("https://claude.ai") === 0) {{
-          var loc = await wc.executeJavaScript('localStorage.getItem("spa:locale")', true);
           if (typeof loc === "string" && loc && loc !== currentLocale) {{ currentLocale = loc; fireLocaleChange(loc); }}
-          break;
+          return;
         }}
+        if (!fallback) fallback = loc;
       }}
+      if (fallback && fallback !== currentLocale) {{ currentLocale = fallback; fireLocaleChange(fallback); }}
     }} catch (e) {{}}
   }}
   setInterval(function () {{ pollLocale(); }}, 2000);
@@ -943,8 +1203,8 @@ fn build_inspector_shim_with_payloads(
         setTimeout(function () {{ try {{ syncOneWindowLocale(window.webContents, currentLocale); attach(window.webContents); }} catch (e) {{}} }}, 50);
         try {{
           var wc = window.webContents;
-          var SETUP_TITLES = {{ "setup-desktop-3p": "\u914d\u7f6e\u7b2c\u4e09\u65b9\u0041\u0050\u0049", "devtools://devtools": "\u5f00\u53d1\u8005\u5de5\u5177" }};
-          var SETUP_TITLES_EN = {{ "setup-desktop-3p": "Configure Third-Party Inference\u2026", "devtools://devtools": "DevTools" }};
+          var SETUP_TITLES = {{ "setup-desktop-3p": "\u914d\u7f6e\u7b2c\u4e09\u65b9\u0041\u0050\u0049", "devtools://devtools": "\u5f00\u53d1\u8005\u5de5\u5177", "about_window": "\u5173\u4e8eClaude" }};
+          var SETUP_TITLES_EN = {{ "setup-desktop-3p": "Configure Third-Party Inference\u2026", "devtools://devtools": "DevTools", "about_window": "About Claude" }};
           function applySetupTitle() {{ try {{ var u = wc.getURL(); for (var k in SETUP_TITLES) {{ if (u.indexOf(k) >= 0) {{ var want = zhActive() ? SETUP_TITLES[k] : (SETUP_TITLES_EN[k] || SETUP_TITLES[k]); if (window.getTitle() !== want) window.setTitle(want); return; }} }} }} catch (e) {{}} }}
           function applySetupWindowState() {{ try {{ syncOneWindowLocale(wc, currentLocale); }} catch (e) {{}} applySetupTitle(); }}
           wc.on("did-finish-load", applySetupWindowState);
@@ -1123,6 +1383,11 @@ fn asar_shim_needs_update(asar_bytes: &[u8]) -> bool {
         || !text.contains("Set.prototype")
         || !text.contains("isZhSet")
         || !text.contains("skipReload")
+        || !text.contains("reversibleTextFallback")
+        || !text.contains("localeRequestBodySync")
+        || !text.contains("localWindowHotSwitchSync")
+        || !text.contains("aboutClaudeWindowFallback")
+        || !text.contains("__cslWantedLocale")
 }
 
 fn asar_contains_file(asar_bytes: &[u8], path: &str) -> bool {
@@ -1170,6 +1435,24 @@ fn recover_original_main(pkg_text: &str, read_main: String, asar_bytes: &[u8]) -
         }
     }
     read_main
+}
+
+fn build_patched_claude_asar(asar_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let (original_pkg_text, read_main) =
+        crate::core::asar_archive::read_package_json(asar_bytes)
+            .map_err(|err| format!("Failed to read Claude app.asar: {err}"))?;
+    // If the asar was already patched, package.json main is our shim; recover
+    // Claude's true original main so the shim does not require() itself.
+    let original_main = recover_original_main(&original_pkg_text, read_main, asar_bytes);
+    let new_pkg = build_patched_package_json(&original_pkg_text, &original_main)?;
+    let shim = build_inspector_shim(&original_main);
+    crate::core::asar_archive::build_patched_asar(
+        asar_bytes,
+        new_pkg.as_bytes(),
+        CLAUDE_INSPECTOR_SHIM_NAME,
+        shim.as_bytes(),
+    )
+    .map_err(|err| format!("Failed to build patched app.asar: {err}"))
 }
 
 /// Build the body of the elevated PowerShell script that patches the
@@ -1316,6 +1599,988 @@ fn try_direct_patch_write(
     Ok(())
 }
 
+fn launch_macos_claude_desktop_localized(
+    app: Option<&tauri::AppHandle>,
+    allow_accessibility_restart: bool,
+) -> Result<(), String> {
+    ensure_patch_files()?;
+    ensure_macos_claude_desktop_developer_mode()?;
+    if allow_accessibility_restart {
+        match ensure_macos_accessibility_trusted_or_restart_needed()? {
+            MacosAccessibilityPreflight::Trusted => {}
+            MacosAccessibilityPreflight::NeedsProcessRestart => {
+                if let Some(app) = app {
+                    schedule_macos_accessibility_restart(app)?;
+                    return Ok(());
+                }
+                return Err(macos_accessibility_not_trusted_error());
+            }
+        }
+    } else {
+        ensure_macos_accessibility_trusted_for_localized_launch()?;
+    }
+    write_localized_launch_marker()?;
+    close_existing_claude_for_localized_launch()?;
+    hidden_command("open")
+        .args(["-a", "Claude"])
+        .status()
+        .map_err(|err| format!("Failed to launch Claude Desktop: {err}"))
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Failed to launch Claude Desktop.".to_string())
+            }
+        })?;
+    enable_macos_claude_main_process_debugger()?;
+    retry_inject_localization().map(|_| ()).map_err(|err| {
+        format!("Claude macOS localization inspector opened, but injection failed: {err}")
+    })?;
+    Ok(())
+}
+
+fn schedule_macos_accessibility_restart(app: &tauri::AppHandle) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "CodeStudio Lite Accessibility restart is only supported on macOS.".to_string(),
+        );
+    }
+
+    write_macos_accessibility_restart_marker("localized launch accessibility preflight")?;
+    append_macos_debugger_log(format!(
+        "Accessibility preflight still reports untrusted after prompting; restarting CodeStudio Lite once so macOS TCC refreshes trust. {}",
+        macos_accessibility_identity_summary()
+    ));
+    app.request_restart();
+    Ok(())
+}
+
+fn ensure_macos_claude_desktop_developer_mode() -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    profile::ensure_claude_desktop_developer_mode()
+        .map(|_| ())
+        .map_err(|err| format!("Failed to enable Claude Desktop developer mode: {err}"))
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_accessibility_trusted_for_localized_launch() -> Result<(), String> {
+    match macos_accessibility_preflight(None)? {
+        MacosAccessibilityPreflight::Trusted => Ok(()),
+        MacosAccessibilityPreflight::NeedsProcessRestart => {
+            Err(macos_accessibility_not_trusted_error())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_macos_accessibility_trusted_or_restart_needed(
+) -> Result<MacosAccessibilityPreflight, String> {
+    macos_accessibility_preflight(Some(MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_accessibility_preflight(
+    restart_after_prompt: Option<Duration>,
+) -> Result<MacosAccessibilityPreflight, String> {
+    let started = Instant::now();
+    let mut prompt_started_at = None;
+    let mut attempt = 0usize;
+    append_macos_debugger_log(format!(
+        "Accessibility preflight started; {}",
+        macos_accessibility_identity_summary()
+    ));
+    while started.elapsed() < MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT {
+        attempt += 1;
+        if macos_accessibility_is_trusted_raw() {
+            append_macos_debugger_log(format!(
+                "Accessibility preflight check #{attempt}: AXIsProcessTrusted=true"
+            ));
+            return Ok(MacosAccessibilityPreflight::Trusted);
+        }
+        if attempt == 1 || attempt % 10 == 0 {
+            append_macos_debugger_log(format!(
+                "Accessibility preflight check #{attempt}: AXIsProcessTrusted=false; waiting for macOS TCC to update"
+            ));
+        }
+        if attempt == 1 {
+            prompt_started_at = Some(Instant::now());
+            if request_macos_accessibility_prompt("localized launch preflight") {
+                append_macos_debugger_log(
+                    "Accessibility preflight prompt returned trusted immediately",
+                );
+                return Ok(MacosAccessibilityPreflight::Trusted);
+            }
+        }
+        if let (Some(prompt_started_at), Some(restart_after_prompt)) =
+            (prompt_started_at, restart_after_prompt)
+        {
+            if prompt_started_at.elapsed() >= restart_after_prompt {
+                append_macos_debugger_log(format!(
+                    "Accessibility preflight still false {} seconds after prompting; CodeStudio Lite process restart is required for macOS TCC to refresh",
+                    restart_after_prompt.as_secs()
+                ));
+                return Ok(MacosAccessibilityPreflight::NeedsProcessRestart);
+            }
+        }
+        thread::sleep(Duration::from_millis(
+            MACOS_ACCESSIBILITY_PREFLIGHT_RETRY_MS,
+        ));
+    }
+
+    Err(macos_accessibility_not_trusted_error())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_accessibility_trusted_for_localized_launch() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_accessibility_trusted_or_restart_needed(
+) -> Result<MacosAccessibilityPreflight, String> {
+    Ok(MacosAccessibilityPreflight::Trusted)
+}
+
+fn enable_macos_claude_main_process_debugger() -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    let started = Instant::now();
+    let mut last_error = "Claude Node inspector endpoint was not available.".to_string();
+    let mut request_count = 0usize;
+    while started.elapsed() < MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT {
+        if claude_node_inspector_available() {
+            return Ok(());
+        }
+
+        request_count += 1;
+        match request_macos_claude_main_process_debugger_once() {
+            Ok(()) => {
+                if wait_for_claude_node_inspector() {
+                    return Ok(());
+                }
+                last_error = format!(
+                    "Claude main process debugger menu request #{request_count} completed, but no Claude Node inspector endpoint opened yet."
+                );
+            }
+            Err(err) => {
+                if err.contains("ACCESSIBILITY_NOT_TRUSTED") {
+                    return Err(format!(
+                        "{err} After granting Accessibility access, quit and reopen CodeStudio Lite if macOS still reports it as not trusted, then retry localized launch."
+                    ));
+                }
+                last_error = err;
+            }
+        }
+        thread::sleep(Duration::from_millis(MACOS_MAIN_PROCESS_DEBUGGER_RETRY_MS));
+    }
+
+    Err(format!(
+        "Timed out waiting for Claude main process debugger. Grant CodeStudio Lite Accessibility permission in System Settings, keep Claude open, then try again. Last error: {last_error}. Debug log: {}",
+        macos_debugger_log_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "~/.codestudio-lite/claude-desktop-patch/macos-main-debugger.log".to_string())
+    ))
+}
+
+fn request_macos_claude_main_process_debugger_once() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        match request_macos_claude_main_process_debugger_native() {
+            Ok(()) => {
+                append_macos_debugger_log("native Accessibility request succeeded");
+                Ok(())
+            }
+            Err(err) => {
+                append_macos_debugger_log(format!("native Accessibility request failed: {err}"));
+                Err(err)
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
+}
+
+fn macos_debugger_log_path() -> Option<PathBuf> {
+    app_paths().ok().map(|paths| {
+        paths
+            .config_dir
+            .join("claude-desktop-patch")
+            .join("macos-main-debugger.log")
+    })
+}
+
+fn append_macos_debugger_log(message: impl AsRef<str>) {
+    let Some(path) = macos_debugger_log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(
+            file,
+            "[{}] {}",
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            message.as_ref()
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+type CFTypeRef = *const c_void;
+#[cfg(target_os = "macos")]
+type CFStringRef = *const c_void;
+#[cfg(target_os = "macos")]
+type CFArrayRef = *const c_void;
+#[cfg(target_os = "macos")]
+type CFDictionaryRef = *const c_void;
+#[cfg(target_os = "macos")]
+type AXUIElementRef = *const c_void;
+
+#[cfg(target_os = "macos")]
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+#[cfg(target_os = "macos")]
+const AX_ERROR_SUCCESS: i32 = 0;
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> u8;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
+    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> i32;
+    fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    static kCFBooleanTrue: CFTypeRef;
+    fn CFStringCreateWithCString(
+        alloc: CFTypeRef,
+        c_str: *const c_char,
+        encoding: u32,
+    ) -> CFStringRef;
+    fn CFStringGetCString(
+        the_string: CFStringRef,
+        buffer: *mut c_char,
+        buffer_size: isize,
+        encoding: u32,
+    ) -> u8;
+    fn CFRelease(cf: CFTypeRef);
+    fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFArrayGetTypeID() -> usize;
+    fn CFStringGetTypeID() -> usize;
+    fn CFArrayGetCount(array: CFArrayRef) -> isize;
+    fn CFArrayGetValueAtIndex(array: CFArrayRef, idx: isize) -> CFTypeRef;
+    fn CFDictionaryCreate(
+        allocator: CFTypeRef,
+        keys: *const CFTypeRef,
+        values: *const CFTypeRef,
+        num_values: isize,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> CFDictionaryRef;
+}
+
+#[cfg(target_os = "macos")]
+struct OwnedCf(CFTypeRef);
+
+#[cfg(target_os = "macos")]
+impl OwnedCf {
+    fn new(value: CFTypeRef) -> Option<Self> {
+        (!value.is_null()).then_some(Self(value))
+    }
+
+    fn as_ptr(&self) -> CFTypeRef {
+        self.0
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for OwnedCf {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { CFRelease(self.0) };
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_claude_main_process_debugger_native() -> Result<(), String> {
+    if claude_node_inspector_available() {
+        return Ok(());
+    }
+    if !macos_accessibility_trusted_or_prompt() {
+        return Err(macos_accessibility_not_trusted_error());
+    }
+
+    let pids = macos_claude_process_ids()?;
+    if pids.is_empty() {
+        return Err("Claude process was not found after launch.".to_string());
+    }
+
+    let mut errors = Vec::new();
+    for pid in pids {
+        if claude_node_inspector_available() {
+            return Ok(());
+        }
+        match request_macos_claude_main_process_debugger_native_for_pid(pid) {
+            Ok(()) => return Ok(()),
+            Err(err) => errors.push(format!("pid {pid}: {err}")),
+        }
+    }
+    Err(format!(
+        "Native Accessibility click did not enable Claude main process debugger. {}",
+        errors.join(" | ")
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_accessibility_is_trusted_raw() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+fn macos_accessibility_not_trusted_error() -> String {
+    let log_path = macos_debugger_log_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| {
+            "~/.codestudio-lite/claude-desktop-patch/macos-main-debugger.log".to_string()
+        });
+
+    format!(
+        "ACCESSIBILITY_NOT_TRUSTED: CodeStudio Lite is not trusted for macOS Accessibility yet. Enable the exact running CodeStudio Lite app in System Settings > Privacy & Security > Accessibility, then retry the localized launch. {}. If it is already enabled, remove the old CodeStudio Lite entry from Accessibility, add this exact app again, then quit and reopen CodeStudio Lite. Debug log: {log_path}",
+        macos_accessibility_identity_summary()
+    )
+}
+
+fn macos_accessibility_identity_summary() -> String {
+    let current_exe = env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|err| format!("unavailable ({err})"));
+    let app_bundle = env::current_exe()
+        .ok()
+        .and_then(|path| macos_app_bundle_for_executable(&path))
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    format!("Current app bundle: {app_bundle}. Current executable: {current_exe}")
+}
+
+fn macos_app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
+    for ancestor in executable.ancestors() {
+        if ancestor
+            .extension()
+            .is_some_and(|extension| extension == "app")
+        {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_accessibility_trusted_or_prompt() -> bool {
+    if macos_accessibility_is_trusted_raw() {
+        append_macos_debugger_log(
+            "Accessibility debugger check: AXIsProcessTrusted=true before prompt",
+        );
+        return true;
+    }
+
+    append_macos_debugger_log(
+        "Accessibility debugger check: AXIsProcessTrusted=false before prompt",
+    );
+    let prompt_result = request_macos_accessibility_prompt("debugger menu request");
+    let trusted_after_prompt = macos_accessibility_is_trusted_raw();
+    append_macos_debugger_log(format!(
+        "Accessibility debugger check after prompt: AXIsProcessTrusted={trusted_after_prompt}"
+    ));
+    prompt_result || trusted_after_prompt
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_accessibility_prompt(reason: &str) -> bool {
+    if MACOS_ACCESSIBILITY_PROMPT_REQUESTED.swap(true, Ordering::SeqCst) {
+        append_macos_debugger_log(format!(
+            "Accessibility prompt already requested; reason={reason}"
+        ));
+        return false;
+    }
+
+    append_macos_debugger_log(format!(
+        "requesting CodeStudio Lite Accessibility permission prompt from macOS; reason={reason}; {}",
+        macos_accessibility_identity_summary()
+    ));
+    let prompt_result = macos_request_accessibility_prompt_raw();
+    append_macos_debugger_log(format!(
+        "AXIsProcessTrustedWithOptions(prompt=true) returned {prompt_result}; reason={reason}"
+    ));
+    prompt_result
+}
+
+#[cfg(target_os = "macos")]
+fn macos_request_accessibility_prompt_raw() -> bool {
+    let keys = [unsafe { kAXTrustedCheckOptionPrompt as CFTypeRef }];
+    let values = [unsafe { kCFBooleanTrue }];
+    let options = unsafe {
+        CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if options.is_null() {
+        return false;
+    }
+    let trusted = unsafe { AXIsProcessTrustedWithOptions(options) != 0 };
+    unsafe { CFRelease(options) };
+    trusted
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_claude_main_process_debugger_native_for_pid(pid: u32) -> Result<(), String> {
+    let app = unsafe { AXUIElementCreateApplication(pid as i32) };
+    let app = OwnedCf::new(app)
+        .ok_or_else(|| format!("AXUIElementCreateApplication({pid}) returned null"))?;
+    ax_set_frontmost(app.as_ptr());
+
+    let mut observed_titles = Vec::new();
+    for attempt in 1..=20 {
+        if claude_node_inspector_available() {
+            return Ok(());
+        }
+        if click_macos_claude_debugger_confirmation(app.as_ptr()) {
+            append_macos_debugger_log(format!(
+                "native Accessibility accepted existing confirmation for pid {pid}"
+            ));
+        }
+        match click_macos_claude_main_process_debugger_menu(app.as_ptr(), &mut observed_titles) {
+            Ok(true) => {
+                append_macos_debugger_log(format!(
+                    "native Accessibility clicked Claude debugger menu for pid {pid} on attempt {attempt}"
+                ));
+                for _ in 0..30 {
+                    if click_macos_claude_debugger_confirmation(app.as_ptr()) {
+                        append_macos_debugger_log(format!(
+                            "native Accessibility accepted Claude debugger confirmation for pid {pid}"
+                        ));
+                    }
+                    if claude_node_inspector_available() {
+                        return Ok(());
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                return Ok(());
+            }
+            Ok(false) => {
+                thread::sleep(Duration::from_millis(250));
+            }
+            Err(err) => {
+                return Err(err);
+            }
+        }
+    }
+
+    observed_titles.sort();
+    observed_titles.dedup();
+    if observed_titles.len() > 30 {
+        observed_titles.truncate(30);
+    }
+    Err(format!(
+        "Enable Main Process Debugger menu item was not found. Observed menu titles: {}",
+        observed_titles.join(", ")
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_claude_process_ids() -> Result<Vec<u32>, String> {
+    let output = hidden_command("pgrep")
+        .args(["-x", "Claude"])
+        .output()
+        .map_err(|err| format!("Failed to find Claude process: {err}"))?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let mut preferred = Vec::new();
+    let mut fallback = Vec::new();
+    for pid in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+    {
+        let command = macos_process_command_for_pid(pid);
+        if command
+            .as_deref()
+            .map(|value| value.contains("Claude.app/Contents/MacOS/Claude"))
+            .unwrap_or(false)
+        {
+            preferred.push(pid);
+        } else {
+            fallback.push(pid);
+        }
+    }
+    preferred.extend(fallback);
+    Ok(preferred)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_command_for_pid(pid: u32) -> Option<String> {
+    let pid = pid.to_string();
+    let output = hidden_command("ps")
+        .args(["-p", &pid, "-o", "command="])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn click_macos_claude_main_process_debugger_menu(
+    app: AXUIElementRef,
+    observed_titles: &mut Vec<String>,
+) -> Result<bool, String> {
+    let Some(menu_bar) = ax_copy_attribute(app, "AXMenuBar")? else {
+        return Err("Claude AX menu bar was not available.".to_string());
+    };
+    let children = ax_children(menu_bar.as_ptr());
+    for child in children {
+        if let Some(title) = ax_title(child) {
+            if !title.is_empty() {
+                observed_titles.push(title.clone());
+            }
+            if macos_developer_menu_title_matches(&title) {
+                ax_press(child)?;
+                thread::sleep(Duration::from_millis(150));
+                if ax_find_and_press_debugger_menu_item(child, 6, observed_titles)? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    for child in ax_children(menu_bar.as_ptr()) {
+        ax_press(child)?;
+        thread::sleep(Duration::from_millis(80));
+        if ax_find_and_press_debugger_menu_item(child, 6, observed_titles)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn click_macos_claude_debugger_confirmation(app: AXUIElementRef) -> bool {
+    ax_find_and_press_matching(app, 6, &mut Vec::new(), |title| {
+        macos_debugger_confirmation_title_matches(title)
+    })
+    .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn ax_find_and_press_debugger_menu_item(
+    element: AXUIElementRef,
+    depth: usize,
+    observed_titles: &mut Vec<String>,
+) -> Result<bool, String> {
+    ax_find_and_press_matching(element, depth, observed_titles, |title| {
+        macos_main_process_debugger_menu_title_matches(title)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn ax_find_and_press_matching(
+    element: AXUIElementRef,
+    depth: usize,
+    observed_titles: &mut Vec<String>,
+    matches: impl Copy + Fn(&str) -> bool,
+) -> Result<bool, String> {
+    if depth == 0 || element.is_null() {
+        return Ok(false);
+    }
+    if let Some(title) = ax_title(element) {
+        if !title.is_empty() {
+            observed_titles.push(title.clone());
+        }
+        if matches(&title) {
+            ax_press(element)?;
+            return Ok(true);
+        }
+    }
+    for child in ax_children(element) {
+        if ax_find_and_press_matching(child, depth - 1, observed_titles, matches)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn macos_developer_menu_title_matches(title: &str) -> bool {
+    let normalized = normalized_menu_title(title);
+    if normalized.is_empty() {
+        return false;
+    }
+
+    normalized_title_equals_any(
+        &normalized,
+        &[
+            "Developer",
+            "开发者",
+            "開發者",
+            "Entwickler",
+            "Desarrollador",
+            "Développeur",
+            "Developpeur",
+            "डेवलपर",
+            "Pengembang",
+            "Sviluppatore",
+            "開発",
+            "開発者",
+            "개발자",
+            "Desenvolvedor",
+        ],
+    )
+}
+
+fn macos_main_process_debugger_menu_title_matches(title: &str) -> bool {
+    let normalized = normalized_menu_title(title);
+    if normalized.is_empty() {
+        return false;
+    }
+
+    normalized_title_contains_any(&normalized, macos_main_process_debugger_menu_titles())
+}
+
+fn macos_debugger_confirmation_title_matches(title: &str) -> bool {
+    let normalized = normalized_menu_title(title);
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized_title_contains_any(&normalized, macos_main_process_debugger_menu_titles()) {
+        return true;
+    }
+
+    normalized_title_equals_any(
+        &normalized,
+        &[
+            "Enable",
+            "启用",
+            "啟用",
+            "Continue",
+            "继续",
+            "繼續",
+            "Allow",
+            "允许",
+            "允許",
+            "Open",
+            "打开",
+            "打開",
+            "OK",
+            "好",
+            "确定",
+            "確認",
+            "Activer",
+            "Continuer",
+            "Autoriser",
+            "Ouvrir",
+            "Aktivieren",
+            "Fortfahren",
+            "Erlauben",
+            "Öffnen",
+            "Offnen",
+            "Activar",
+            "Habilitar",
+            "Continuar",
+            "Permitir",
+            "Abrir",
+            "Aceptar",
+            "Ativar",
+            "Aceitar",
+            "Abilita",
+            "Attiva",
+            "Continua",
+            "Consenti",
+            "Apri",
+            "有効にする",
+            "続ける",
+            "許可",
+            "開く",
+            "はい",
+            "활성화",
+            "계속",
+            "허용",
+            "열기",
+            "확인",
+            "सक्षम करें",
+            "जारी रखें",
+            "अनुमति दें",
+            "खोलें",
+            "ठीक",
+            "Aktifkan",
+            "Lanjutkan",
+            "Izinkan",
+            "Buka",
+        ],
+    )
+}
+
+fn macos_main_process_debugger_menu_titles() -> &'static [&'static str] {
+    const TITLES: &[&str] = &[
+        "Enable Main Process Debugger",
+        "Main Process Debugger",
+        "启用主进程调试器",
+        "主进程调试器",
+        "啟用主進程偵錯器",
+        "主進程偵錯器",
+        "啟用主行程偵錯器",
+        "主行程偵錯器",
+        "啟用主程序偵錯器",
+        "主程序偵錯器",
+        "Activer le débogueur du processus principal",
+        "Débogueur du processus principal",
+        "Activer le debogueur du processus principal",
+        "Debogueur du processus principal",
+        "Hauptprozess-Debugger aktivieren",
+        "Hauptprozess-Debugger",
+        "Depurador del proceso principal",
+        "Activar depurador del proceso principal",
+        "Habilitar depurador del proceso principal",
+        "Depurador do processo principal",
+        "Ativar depurador do processo principal",
+        "Debugger processo principale",
+        "Abilita debugger processo principale",
+        "Attiva debugger processo principale",
+        "メインプロセスデバッガーを有効にする",
+        "メインプロセスデバッガー",
+        "メインプロセスデバッガ",
+        "메인 프로세스 디버거 활성화",
+        "메인 프로세스 디버거",
+        "मुख्य प्रक्रिया डिबगर सक्षम करें",
+        "मुख्य प्रक्रिया डिबगर",
+        "Aktifkan debugger proses utama",
+        "Debugger proses utama",
+    ];
+    TITLES
+}
+
+fn normalized_title_contains_any(normalized_title: &str, candidates: &[&str]) -> bool {
+    candidates.iter().any(|candidate| {
+        let normalized_candidate = normalized_menu_title(candidate);
+        !normalized_candidate.is_empty() && normalized_title.contains(&normalized_candidate)
+    })
+}
+
+fn normalized_title_equals_any(normalized_title: &str, candidates: &[&str]) -> bool {
+    candidates.iter().any(|candidate| {
+        let normalized_candidate = normalized_menu_title(candidate);
+        !normalized_candidate.is_empty() && normalized_title == normalized_candidate
+    })
+}
+
+fn normalized_menu_title(title: &str) -> String {
+    title
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|ch| ch.is_alphanumeric() || is_cjk_char(*ch))
+        .collect()
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&ch)
+}
+
+#[cfg(target_os = "macos")]
+fn ax_copy_attribute(element: AXUIElementRef, attribute: &str) -> Result<Option<OwnedCf>, String> {
+    if element.is_null() {
+        return Ok(None);
+    }
+    with_cf_string(attribute, |attribute_ref| {
+        let mut value: CFTypeRef = std::ptr::null();
+        let error = unsafe { AXUIElementCopyAttributeValue(element, attribute_ref, &mut value) };
+        if error == AX_ERROR_SUCCESS {
+            Ok(OwnedCf::new(value))
+        } else {
+            Ok(None)
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn ax_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
+    let Ok(Some(children)) = ax_copy_attribute(element, "AXChildren") else {
+        return Vec::new();
+    };
+    if !cf_is_array(children.as_ptr()) {
+        return Vec::new();
+    }
+    let count = unsafe { CFArrayGetCount(children.as_ptr() as CFArrayRef) };
+    let mut result = Vec::new();
+    for index in 0..count {
+        let child = unsafe { CFArrayGetValueAtIndex(children.as_ptr() as CFArrayRef, index) };
+        if !child.is_null() {
+            result.push(child as AXUIElementRef);
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn ax_title(element: AXUIElementRef) -> Option<String> {
+    let Ok(Some(title)) = ax_copy_attribute(element, "AXTitle") else {
+        return None;
+    };
+    cf_string_to_string(title.as_ptr())
+}
+
+#[cfg(target_os = "macos")]
+fn ax_set_frontmost(element: AXUIElementRef) {
+    with_cf_string("AXFrontmost", |attribute| {
+        let _ = unsafe { AXUIElementSetAttributeValue(element, attribute, kCFBooleanTrue) };
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn ax_press(element: AXUIElementRef) -> Result<(), String> {
+    with_cf_string("AXPress", |action| {
+        let error = unsafe { AXUIElementPerformAction(element, action) };
+        if error == AX_ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(format!("AXPress failed with error {error}"))
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn with_cf_string<T>(value: &str, f: impl FnOnce(CFStringRef) -> T) -> T {
+    let c_string = CString::new(value).expect("AX constant should not contain NUL");
+    let cf_string = unsafe {
+        CFStringCreateWithCString(
+            std::ptr::null(),
+            c_string.as_ptr(),
+            K_CF_STRING_ENCODING_UTF8,
+        )
+    };
+    let result = f(cf_string);
+    if !cf_string.is_null() {
+        unsafe { CFRelease(cf_string) };
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn cf_is_array(value: CFTypeRef) -> bool {
+    !value.is_null() && unsafe { CFGetTypeID(value) == CFArrayGetTypeID() }
+}
+
+#[cfg(target_os = "macos")]
+fn cf_is_string(value: CFTypeRef) -> bool {
+    !value.is_null() && unsafe { CFGetTypeID(value) == CFStringGetTypeID() }
+}
+
+#[cfg(target_os = "macos")]
+fn cf_string_to_string(value: CFTypeRef) -> Option<String> {
+    if !cf_is_string(value) {
+        return None;
+    }
+    let mut buffer = vec![0 as c_char; 4096];
+    let ok = unsafe {
+        CFStringGetCString(
+            value as CFStringRef,
+            buffer.as_mut_ptr(),
+            buffer.len() as isize,
+            K_CF_STRING_ENCODING_UTF8,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let bytes = buffer
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8(bytes).ok()
+}
+
+fn macos_localized_launch_script() -> String {
+    r#"#!/bin/sh
+set -eu
+mkdir -p "$HOME/.codestudio-lite/claude-desktop-patch"
+printf 'zh-CN' > "$HOME/.codestudio-lite/claude-desktop-patch/__CLAUDE_LOCALIZED_LAUNCH_MARKER__"
+if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
+  /usr/bin/pkill -TERM -x Claude >/dev/null 2>&1 || true
+fi
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  /usr/bin/pgrep -x Claude >/dev/null 2>&1 || break
+  /bin/sleep 0.25
+done
+if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
+  /usr/bin/pkill -KILL -x Claude >/dev/null 2>&1 || true
+  /bin/sleep 0.5
+fi
+/usr/bin/open -a Claude
+/bin/sleep 2
+deadline=$(( $(/bin/date +%s) + 90 ))
+debugger_attempts=0
+claude_debugger_open() {
+  for port in $(/usr/bin/seq 9229 9300); do
+    /usr/bin/curl -fsS --max-time 1 "http://127.0.0.1:${port}/json" 2>/dev/null | /usr/bin/grep -E '"webSocketDebuggerUrl"[[:space:]]*:[[:space:]]*"ws://127\.0\.0\.1:' >/dev/null || continue
+    pids=$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+    for pid in $pids; do
+      args=$(/bin/ps -p "$pid" -o args= 2>/dev/null || true)
+      case "$args" in
+        *"Claude.app/Contents/MacOS/Claude"*) return 0 ;;
+      esac
+    done
+  done
+  return 1
+}
+while ! claude_debugger_open; do
+  if [ "$(/bin/date +%s)" -ge "$deadline" ]; then
+    echo "[claude-zh] Timed out waiting for Claude main process debugger. Grant CodeStudio Lite Accessibility permission in System Settings, then retry." >&2
+    exit 1
+  fi
+  debugger_attempts=$((debugger_attempts + 1))
+  echo "[claude-zh] Waiting for CodeStudio Lite to enable Claude main process debugger via Accessibility (#$debugger_attempts)..." >&2
+  for _ in 1 2 3 4 5; do
+    claude_debugger_open && break 2
+    /bin/sleep 1
+  done
+done
+echo "[claude-zh] Claude main process debugger is ready." >&2
+"#
+    .replace(
+        "__CLAUDE_LOCALIZED_LAUNCH_MARKER__",
+        CLAUDE_LOCALIZED_LAUNCH_MARKER,
+    )
+}
+
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn apply_localization_patch() -> Result<(), String> {
     if !cfg!(target_os = "windows") {
         return Err(
@@ -1352,20 +2617,7 @@ fn apply_localization_patch() -> Result<(), String> {
     // Prepare patched asar bytes in memory (surgeon-style append: original
     // file content stays at its offsets; a new package.json and the inspector
     // shim are appended).
-    let (original_pkg_text, read_main) = crate::core::asar_archive::read_package_json(&asar_bytes)
-        .map_err(|err| format!("Failed to read Claude app.asar: {err}"))?;
-    // If the asar was already patched, package.json main is our shim; recover
-    // Claude's true original main so the shim does not require() itself.
-    let original_main = recover_original_main(&original_pkg_text, read_main, &asar_bytes);
-    let new_pkg = build_patched_package_json(&original_pkg_text, &original_main)?;
-    let shim = build_inspector_shim(&original_main);
-    let patched_asar = crate::core::asar_archive::build_patched_asar(
-        &asar_bytes,
-        new_pkg.as_bytes(),
-        CLAUDE_INSPECTOR_SHIM_NAME,
-        shim.as_bytes(),
-    )
-    .map_err(|err| format!("Failed to build patched app.asar: {err}"))?;
+    let patched_asar = build_patched_claude_asar(&asar_bytes)?;
 
     // Prepare patched exe bytes (flip the one fuse byte).
     let mut patched_exe = exe_bytes.clone();
@@ -1699,7 +2951,8 @@ fn build_main_process_injection_source_for_paths(
         serde_json::to_string(&dynamic_locale_path.to_string_lossy()).unwrap();
     format!(
         r##"(async () => {{
-  if (globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__) {{
+  const CSL_INJECTION_VERSION = 8;
+  if (globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__?.version === CSL_INJECTION_VERSION) {{
     const summary = await globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__.refresh();
     return {{ ok: true, reused: true, ...summary }};
   }}
@@ -1715,6 +2968,37 @@ fn build_main_process_injection_source_for_paths(
   const ionLocale = fs.readFileSync({ion_locale_path}, "utf8");
   const dynamicLocale = fs.readFileSync({dynamic_locale_path}, "utf8");
   const attached = new Set();
+  const localizedLaunchMarkerPath = () => {{
+    try {{ return requireFromMain("path").join(requireFromMain("os").homedir(), ".codestudio-lite", "claude-desktop-patch", "localized-launch.flag"); }} catch (_) {{ return ""; }}
+  }};
+  const consumeLocalizedLaunchMarker = () => {{
+    try {{
+      const marker = localizedLaunchMarkerPath();
+      if (!marker) return false;
+      let text = "";
+      try {{ text = fs.readFileSync(marker, "utf8"); }} catch (_) {{ return false; }}
+      try {{ fs.unlinkSync(marker); }} catch (_) {{}}
+      return String(text || "").trim() === "zh-CN";
+    }} catch (_) {{
+      return false;
+    }}
+  }};
+  let localizedLaunchDefaultZh = consumeLocalizedLaunchMarker();
+  let currentLocale = localizedLaunchDefaultZh ? "zh-CN" : "en-US";
+  const CSL_WANTED_LOCALE_KEY = "__cslWantedLocale";
+  const localeChangeListeners = [];
+  const fireLocaleChange = (loc) => {{
+    for (const listener of localeChangeListeners) {{
+      try {{ listener(loc); }} catch (_) {{}}
+    }}
+  }};
+  const setCurrentLocale = (loc) => {{
+    if (typeof loc !== "string" || !loc || loc === currentLocale) return;
+    currentLocale = loc;
+    fireLocaleChange(loc);
+  }};
+  const zhActive = () => currentLocale === "zh-CN";
+  const runtimeLaunchPrefix = () => "var __CSL_LL=" + (currentLocale === "zh-CN" ? "!0" : "!1") + ";if(__CSL_LL&&!sessionStorage.getItem('__CSL_LL_DONE'))try{{localStorage.setItem('__cslWantedLocale','zh-CN');localStorage.setItem('spa:locale','zh-CN');document.documentElement&&document.documentElement.setAttribute('lang','zh-CN');sessionStorage.setItem('__CSL_LL_DONE','1')}}catch(e){{}};";
   const patterns = [
     {{ urlPattern: "*ion-dist/i18n/zh-CN.json*" }},
     {{ urlPattern: "*ion-dist/i18n/en-US.json*" }},
@@ -1729,16 +3013,25 @@ fn build_main_process_injection_source_for_paths(
     const isZh = bare.endsWith("/zh-cn.json");
     const isEn = bare.endsWith("/en-us.json");
     const localLike = bare.startsWith("app://") || bare.startsWith("file://");
-    if (!isZh && !(isEn && localLike)) return null;
+    if (!isZh && !(currentLocale === "zh-CN" && isEn && localLike)) return null;
     if (bare.includes("/dynamic/")) return dynamicLocale;
     if (bare.includes("/ion-dist/i18n/") || bare.includes("/i18n/")) return ionLocale;
     return shellLocale;
   }};
 
   const attach = async (contents) => {{
-    if (!contents || contents.isDestroyed?.() || attached.has(contents)) return false;
+    if (!contents || contents.isDestroyed?.()) return false;
+    if (attached.has(contents)) return true;
     const url = contents.getURL?.() ?? "";
     if (!url || (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("app://") && !url.startsWith("file://"))) return false;
+    const previousVersion = contents.__cslZhAttachedVersion || (contents.__cslZhAttached ? 1 : 0);
+    let debuggerWasAttached = false;
+    try {{ debuggerWasAttached = contents.debugger.isAttached(); }} catch (_) {{}}
+    if (previousVersion !== CSL_INJECTION_VERSION && (previousVersion || debuggerWasAttached)) {{
+      try {{ contents.debugger.removeAllListeners("message"); }} catch (_) {{}}
+      try {{ if (contents.debugger.isAttached()) contents.debugger.detach(); }} catch (_) {{}}
+      try {{ contents.__cslZhAttached = false; contents.__cslZhAttachedVersion = 0; }} catch (_) {{}}
+    }}
     try {{
       if (!contents.debugger.isAttached()) {{
         contents.debugger.attach("1.3");
@@ -1770,7 +3063,7 @@ fn build_main_process_injection_source_for_paths(
     try {{
       await contents.debugger.sendCommand("Page.enable", {{}});
       await contents.debugger.sendCommand("Fetch.enable", {{ patterns }});
-      await contents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {{ source: "if(typeof __CSL_LL==='undefined')var __CSL_LL=!1;" + runtime }});
+      await contents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {{ source: runtimeLaunchPrefix() + runtime }});
       // Reload so the runtime registered via addScriptToEvaluateOnNewDocument
       // runs before the page's own scripts and rewrites locale fetches. Do
       // not `await contents.executeJavaScript(runtime)` here: the reload that
@@ -1783,6 +3076,8 @@ fn build_main_process_injection_source_for_paths(
         new Promise((resolve) => setTimeout(() => resolve(undefined), ms)),
       ]);
       await withTimeout(contents.debugger.sendCommand("Page.reload", {{ ignoreCache: true }}), 2000);
+      contents.__cslZhAttached = true;
+      contents.__cslZhAttachedVersion = CSL_INJECTION_VERSION;
       attached.add(contents);
       return true;
     }} catch (_) {{
@@ -1798,10 +3093,320 @@ fn build_main_process_injection_source_for_paths(
     return Array.from(new Set([...fromWindows, ...fromWebContents]));
   }};
 
+  const safeLocaleForLocalWindow = (loc) => {{
+    if (typeof loc !== "string" || !loc) return "en-US";
+    if (loc === "zh-CN") return loc;
+    try {{
+      const path = requireFromMain("path");
+      if (fs.existsSync(path.join(process.resourcesPath, loc + ".json"))) return loc;
+      if (fs.existsSync(path.join(process.resourcesPath, "ion-dist", "i18n", loc + ".json"))) return loc;
+    }} catch (_) {{}}
+    return "en-US";
+  }};
+
+  const isSyncableUrl = (lower) =>
+    lower.startsWith("http://") ||
+    lower.startsWith("https://") ||
+    lower.startsWith("app://") ||
+    lower.startsWith("file://") ||
+    lower.startsWith("about:blank") ||
+    lower.startsWith("devtools://");
+
+  const localLocalePage = (lower) =>
+    lower.startsWith("app://") ||
+    lower.includes("/settings") ||
+    lower.includes("setup") ||
+    lower.includes("third-party") ||
+    lower.includes("inference") ||
+    lower.includes("developer") ||
+    lower.includes("about_window");
+
+  const localWindowHotSwitchSync = true;
+  const devToolsPage = (lower) => lower.startsWith("devtools://");
+  const aboutClaudeWindowFallback = true;
+  const aboutClaudeTitle = (target) => target === "zh-CN" ? "\u5173\u4e8eClaude" : "About Claude";
+  const aboutClaudePage = (lower) => lower.includes("about_window");
+  const aboutClaudeTitleActive = (title) => {{
+    const t = String(title || "").trim();
+    return t === "About Claude" || t === "\u5173\u4e8eClaude" || t === "\u5173\u4e8e Claude";
+  }};
+  const localTitleForUrl = (lower, target) => {{
+    if (aboutClaudePage(lower)) return aboutClaudeTitle(target);
+    if (lower.includes("setup-desktop-3p")) return target === "zh-CN" ? "\u914d\u7f6e\u7b2c\u4e09\u65b9\u0041\u0050\u0049" : "Configure Third-Party Inference\u2026";
+    if (devToolsPage(lower)) return target === "zh-CN" ? "\u5f00\u53d1\u8005\u5de5\u5177" : "DevTools";
+    return "";
+  }};
+  const localTitleForWindow = (lower, target, currentTitle) => {{
+    if (aboutClaudePage(lower) || aboutClaudeTitleActive(currentTitle)) return aboutClaudeTitle(target);
+    return localTitleForUrl(lower, target);
+  }};
+  const applyLocalWindowTitle = (contents, target, lower) => {{
+    try {{
+      let win = null;
+      try {{
+        win = BrowserWindow.fromWebContents?.(contents);
+      }} catch (_) {{}}
+      let currentTitle = "";
+      try {{
+        if (win && typeof win.getTitle === "function") currentTitle = win.getTitle();
+        else if (typeof contents?.getTitle === "function") currentTitle = contents.getTitle();
+      }} catch (_) {{}}
+      const title = localTitleForWindow(lower, target, currentTitle);
+      if (!title) return;
+      try {{
+        if (win && typeof win.getTitle === "function" && typeof win.setTitle === "function" && win.getTitle() !== title) win.setTitle(title);
+      }} catch (_) {{}}
+      if (devToolsPage(lower) || aboutClaudePage(lower)) {{
+        const quotedTitle = JSON.stringify(title);
+        contents.executeJavaScript('try{{if(document.title!==' + quotedTitle + ')document.title=' + quotedTitle + '}}catch(e){{}}', true).catch(() => {{}});
+      }}
+    }} catch (_) {{}}
+  }};
+
+  const syncOneWindowLocale = (contents, target) => {{
+    try {{
+      if (!contents || contents.isDestroyed?.()) return;
+      const url = contents.getURL?.() ?? "";
+      const lower = String(url || "").toLowerCase();
+      applyLocalWindowTitle(contents, target, lower);
+      if (devToolsPage(lower)) return;
+      if (!isSyncableUrl(lower)) return;
+      const localPage = localLocalePage(lower);
+      const localLike = localPage || lower.startsWith("file://") || lower.startsWith("about:blank");
+      const remoteClaude = lower.startsWith("https://claude.ai") || lower.startsWith("http://claude.ai");
+      if (remoteClaude && !localPage) return;
+      const loc = localLike ? safeLocaleForLocalWindow(target) : target;
+      const quoted = JSON.stringify(loc);
+      const js = 'try{{localStorage.setItem("__cslWantedLocale",' + quoted + ');localStorage.setItem("spa:locale",' + quoted + ');document.documentElement&&document.documentElement.setAttribute("lang",' + quoted + ');window.dispatchEvent(new StorageEvent("storage",{{key:"spa:locale",newValue:' + quoted + '}}));window.dispatchEvent(new CustomEvent("claude-locale-change",{{detail:' + quoted + '}}));true}}catch(e){{false}}';
+      contents.executeJavaScript(js, true).catch(() => {{}});
+      if (localPage && contents.__cslLocaleReloaded !== loc) {{
+        contents.__cslLocaleReloaded = loc;
+        setTimeout(() => {{
+          try {{
+            if (contents.isDestroyed?.()) return;
+            if (typeof contents.reloadIgnoringCache === "function") contents.reloadIgnoringCache();
+            else contents.reload();
+          }} catch (_) {{}}
+        }}, 80);
+      }}
+    }} catch (_) {{}}
+  }};
+
+  const syncOpenWindowsLocale = (target) => {{
+    try {{
+      for (const contents of allContents()) syncOneWindowLocale(contents, target);
+    }} catch (_) {{}}
+  }};
+  localeChangeListeners.push(syncOpenWindowsLocale);
+
+  const macosMenuBarLocalization = true;
+  const menuHardcodedZh = {{
+    "Enable Main Process Debugger": "\u542f\u7528\u4e3b\u8fdb\u7a0b\u8c03\u8bd5\u5668",
+    "Record Performance Trace": "\u5f55\u5236\u6027\u80fd\u8ddf\u8e2a",
+    "Write Main Process Heap Snapshot": "\u5199\u5165\u4e3b\u8fdb\u7a0b\u5806\u5feb\u7167",
+    "Record Memory Trace (auto-stop)": "\u5f55\u5236\u5185\u5b58\u8ddf\u8e2a\uff08\u81ea\u52a8\u505c\u6b62\uff09",
+    "Paste and Match Style": "\u7c98\u8d34\u5e76\u5339\u914d\u6837\u5f0f",
+    "Zoom In (numpad)": "\u653e\u5927\uff08\u5c0f\u952e\u76d8\uff09",
+    "Zoom Out (numpad)": "\u7f29\u5c0f\uff08\u5c0f\u952e\u76d8\uff09",
+    "Actual Size (numpad)": "\u5b9e\u9645\u5927\u5c0f\uff08\u5c0f\u952e\u76d8\uff09",
+    "Hide Claude": "\u9690\u85cf Claude",
+    "Hide Others": "\u9690\u85cf\u5176\u4ed6",
+    "Show All": "\u5168\u90e8\u663e\u793a",
+    "Services": "\u670d\u52a1",
+    "Quit Claude": "\u9000\u51fa Claude",
+    "Minimize": "\u6700\u5c0f\u5316",
+    "Bring All to Front": "\u5168\u90e8\u7f6e\u4e8e\u9876\u5c42",
+    "Enter Full Screen": "\u8fdb\u5165\u5168\u5c4f",
+    "Toggle Developer Tools": "\u5207\u6362\u5f00\u53d1\u8005\u5de5\u5177",
+    "Force Reload": "\u5f3a\u5236\u91cd\u65b0\u52a0\u8f7d",
+    "Check for Updates\u2026": "\u68c0\u67e5\u66f4\u65b0\u2026"
+  }};
+  const installMacosMenuLocalization = () => {{
+    try {{
+      if (process.platform !== "darwin") return;
+      const Menu = electron.Menu;
+      if (!Menu || Menu.__cslMenuBarLocalizationInstalled) return;
+      let zhHardcodedToEn = {{}};
+      for (const key in menuHardcodedZh) zhHardcodedToEn[menuHardcodedZh[key]] = key;
+      const menuRoleZh = {{
+        about: "\u5173\u4e8eClaude",
+        services: "\u670d\u52a1",
+        hide: "\u9690\u85cf Claude",
+        hideothers: "\u9690\u85cf\u5176\u4ed6",
+        unhide: "\u5168\u90e8\u663e\u793a",
+        quit: "\u9000\u51fa Claude",
+        undo: "\u64a4\u9500",
+        redo: "\u91cd\u505a",
+        cut: "\u526a\u5207",
+        copy: "\u590d\u5236",
+        paste: "\u7c98\u8d34",
+        pasteandmatchstyle: "\u7c98\u8d34\u5e76\u5339\u914d\u6837\u5f0f",
+        delete: "\u5220\u9664",
+        selectall: "\u5168\u9009",
+        reload: "\u91cd\u65b0\u52a0\u8f7d",
+        forcereload: "\u5f3a\u5236\u91cd\u65b0\u52a0\u8f7d",
+        toggledevtools: "\u5207\u6362\u5f00\u53d1\u8005\u5de5\u5177",
+        resetzoom: "\u5b9e\u9645\u5927\u5c0f",
+        zoomin: "\u653e\u5927",
+        zoomout: "\u7f29\u5c0f",
+        togglefullscreen: "\u8fdb\u5165\u5168\u5c4f",
+        minimize: "\u6700\u5c0f\u5316",
+        close: "\u5173\u95ed",
+        front: "\u5168\u90e8\u7f6e\u4e8e\u9876\u5c42",
+        startspeaking: "\u5f00\u59cb\u8bb2\u8bdd",
+        stopspeaking: "\u505c\u6b62\u8bb2\u8bdd"
+      }};
+      let enToZh = {{}};
+      let labelToId = {{}};
+      let zhValToId = {{}};
+      let zhLocaleObj = {{}};
+      const rememberCatalog = (catalog) => {{
+        try {{
+          for (const key in catalog) {{
+            const value = catalog[key];
+            if (typeof value === "string" && value && !(value in labelToId)) labelToId[value] = key;
+          }}
+        }} catch (_) {{}}
+      }};
+      try {{
+        const path = requireFromMain("path");
+        const enObj = JSON.parse(fs.readFileSync(path.join(process.resourcesPath, "en-US.json"), "utf8"));
+        const zhObj = JSON.parse(shellLocale);
+        zhLocaleObj = zhObj;
+        for (const key in enObj) if (zhObj[key]) enToZh[enObj[key]] = zhObj[key];
+        for (const key in zhObj) if (typeof zhObj[key] === "string" && !(zhObj[key] in zhValToId)) zhValToId[zhObj[key]] = key;
+        rememberCatalog(enObj);
+        rememberCatalog(zhObj);
+        try {{
+          for (const name of fs.readdirSync(process.resourcesPath)) {{
+            if (!/^[a-z]{{2}}(?:-[A-Z0-9]{{2,4}})?\\.json$/.test(name)) continue;
+            if (name === "en-US.json" || name === "zh-CN.json") continue;
+            try {{ rememberCatalog(JSON.parse(fs.readFileSync(path.join(process.resourcesPath, name), "utf8"))); }} catch (_) {{}}
+          }}
+        }} catch (_) {{}}
+      }} catch (_) {{}}
+      const labelMessageId = (label) => {{
+        if (typeof label !== "string" || !label) return "";
+        return labelToId[label] || zhValToId[label] || "";
+      }};
+      const roleKey = (item) => {{
+        try {{ return String(item?.role || "").replace(/[^a-z0-9]/gi, "").toLowerCase(); }} catch (_) {{ return ""; }}
+      }};
+      const loadLocaleCatalog = (target) => {{
+        const idToVal = {{}};
+        try {{
+          if (!target || target === "zh-CN") return idToVal;
+          const path = requireFromMain("path");
+          const tobj = JSON.parse(fs.readFileSync(path.join(process.resourcesPath, target + ".json"), "utf8"));
+          rememberCatalog(tobj);
+          for (const key in tobj) if (tobj[key]) idToVal[key] = tobj[key];
+        }} catch (_) {{}}
+        return idToVal;
+      }};
+      const translateLabel = (label, id, role) => {{
+        if (typeof label !== "string" || !label) return label;
+        if (role && menuRoleZh[role]) return menuRoleZh[role];
+        if (id && enToZh[label]) return enToZh[label];
+        if (id && zhLocaleObj[id]) return zhLocaleObj[id];
+        if (menuHardcodedZh[label]) return menuHardcodedZh[label];
+        if (enToZh[label]) return enToZh[label];
+        return label;
+      }};
+      const translateMenuItems = (menu) => {{
+        if (!menu || !menu.items) return menu;
+        if (!zhActive()) return menu;
+        for (const item of menu.items) {{
+          try {{
+            if (typeof item.label === "string") {{
+              if (item.__cslOrig === undefined) item.__cslOrig = item.label;
+              if (item.__cslMessageId === undefined) item.__cslMessageId = labelMessageId(item.__cslOrig) || labelMessageId(item.label);
+              item.label = translateLabel(item.__cslOrig, item.__cslMessageId, roleKey(item));
+            }}
+            if (item.submenu) translateMenuItems(item.submenu);
+          }} catch (_) {{}}
+        }}
+        return menu;
+      }};
+      const relabelMenuItems = (menu, target, idToVal) => {{
+        if (!menu || !menu.items) return;
+        for (const item of menu.items) {{
+          try {{
+            const orig = typeof item.__cslOrig === "string" ? item.__cslOrig : (typeof item.label === "string" ? item.label : "");
+            if (typeof item.label === "string" && item.__cslOrig === undefined) item.__cslOrig = orig;
+            if (typeof item.label === "string" && item.__cslMessageId === undefined) item.__cslMessageId = labelMessageId(orig) || labelMessageId(item.label);
+            if (orig) {{
+              if (target === "zh-CN") item.label = translateLabel(orig, item.__cslMessageId, roleKey(item));
+              else {{
+                const id = item.__cslMessageId || labelMessageId(orig);
+                item.label = id && idToVal[id] ? idToVal[id] : (zhHardcodedToEn[orig] || orig);
+              }}
+            }}
+            if (item.submenu) relabelMenuItems(item.submenu, target, idToVal);
+          }} catch (_) {{}}
+        }}
+      }};
+      const origSetAppMenu = Menu.setApplicationMenu.bind(Menu);
+      Menu.__cslOrigSetApplicationMenu = origSetAppMenu;
+      Menu.__cslMenuBarLocalizationInstalled = true;
+      Menu.setApplicationMenu = (menu) => {{
+        try {{
+          if (menu && menu.items) {{
+            relabelMenuItems(menu, currentLocale, loadLocaleCatalog(currentLocale));
+            translateMenuItems(menu);
+            Menu.__cslLastApplicationMenu = menu;
+          }}
+        }} catch (_) {{}}
+        return origSetAppMenu(menu);
+      }};
+      const retranslateMenuBar = (target) => {{
+        try {{
+          const menu = Menu.__cslLastApplicationMenu || (typeof Menu.getApplicationMenu === "function" ? Menu.getApplicationMenu() : null);
+          if (!menu || !menu.items) return;
+          const idToVal = loadLocaleCatalog(target);
+          relabelMenuItems(menu, target, idToVal);
+          origSetAppMenu(menu);
+          Menu.__cslLastApplicationMenu = menu;
+        }} catch (_) {{}}
+      }};
+      localeChangeListeners.push(retranslateMenuBar);
+      const currentMenu = typeof Menu.getApplicationMenu === "function" ? Menu.getApplicationMenu() : null;
+      if (currentMenu) Menu.setApplicationMenu(currentMenu);
+    }} catch (_) {{}}
+  }};
+  installMacosMenuLocalization();
+
+  const pollLocale = async () => {{
+    try {{
+      const contents = allContents();
+      let fallback = "";
+      for (const item of contents) {{
+        try {{
+          const url = item.getURL?.() ?? "";
+          const lower = String(url || "").toLowerCase();
+          if (!isSyncableUrl(lower)) continue;
+          const loc = await item.executeJavaScript('localStorage.getItem("__cslWantedLocale")||localStorage.getItem("spa:locale")', true);
+          if (typeof loc !== "string" || !loc) continue;
+          if (lower.startsWith("https://claude.ai") || lower.startsWith("http://claude.ai")) {{
+            setCurrentLocale(loc);
+            return;
+          }}
+          if (!fallback) fallback = loc;
+        }} catch (_) {{}}
+      }}
+      if (fallback) setCurrentLocale(fallback);
+    }} catch (_) {{}}
+  }};
+
   const refresh = async () => {{
+    if (!localizedLaunchDefaultZh && consumeLocalizedLaunchMarker()) {{
+      localizedLaunchDefaultZh = true;
+      setCurrentLocale("zh-CN");
+    }}
     const contents = allContents();
-    const results = await Promise.all(contents.map((item) => attach(item).catch(() => false)));
-    return {{
+	    const results = await Promise.all(contents.map((item) => attach(item).catch(() => false)));
+	    syncOpenWindowsLocale(currentLocale);
+	    fireLocaleChange(currentLocale);
+	    return {{
       attached: results.filter(Boolean).length,
       contents: contents.length,
       windows: BrowserWindow.getAllWindows().length
@@ -1809,11 +3414,16 @@ fn build_main_process_injection_source_for_paths(
   }};
 
   app.on("browser-window-created", (_event, window) => {{
-    setTimeout(() => attach(window.webContents).catch(() => {{}}), 50);
+    setTimeout(() => {{
+      try {{ syncOneWindowLocale(window.webContents, currentLocale); }} catch (_) {{}}
+      attach(window.webContents).catch(() => {{}});
+    }}, 50);
   }});
   const timer = setInterval(refresh, 2000);
   timer.unref?.();
-  globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__ = {{ refresh }};
+  const localeTimer = setInterval(pollLocale, 1000);
+  localeTimer.unref?.();
+  globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__ = {{ version: CSL_INJECTION_VERSION, refresh }};
   const summary = await refresh();
   return {{ ok: true, reused: false, ...summary }};
 }})()"##
@@ -1951,6 +3561,7 @@ fn run_elevated_powershell_script_windows(_script_path: &Path) -> Result<(), Str
     Err("Elevated PowerShell is only supported on Windows.".to_string())
 }
 
+#[cfg(windows)]
 fn read_patch_log_tail(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     let lines: Vec<&str> = text
@@ -2043,6 +3654,26 @@ fn read_node_inspector_targets_from_port(port: u16) -> Result<Vec<serde_json::Va
         .map_err(|err| {
             format!("Failed to parse Claude Node inspector targets on port {port}: {err}")
         })
+}
+
+fn claude_node_inspector_available() -> bool {
+    let Ok(targets) = read_node_inspector_targets() else {
+        return false;
+    };
+    targets
+        .iter()
+        .filter_map(|target| target.get("webSocketDebuggerUrl").and_then(Value::as_str))
+        .any(|ws_url| is_claude_node_inspector(ws_url).unwrap_or(false))
+}
+
+fn wait_for_claude_node_inspector() -> bool {
+    for _ in 0..20 {
+        if claude_node_inspector_available() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    false
 }
 
 fn evaluate_node_inspector_expression(ws_url: &str, expression: &str) -> Result<usize, String> {
@@ -2204,12 +3835,13 @@ fn node_inspector_identity_is_claude(value: &Value) -> bool {
     let app_name = value.get("appName").and_then(Value::as_str).unwrap_or("");
     let exec_path = value.get("execPath").and_then(Value::as_str).unwrap_or("");
     let exec_base = exec_path.rsplit(['/', '\\']).next().unwrap_or(exec_path);
-    app_name.eq_ignore_ascii_case("Claude") || exec_base.eq_ignore_ascii_case("Claude.exe")
+    app_name.eq_ignore_ascii_case("Claude")
+        || exec_base.eq_ignore_ascii_case("Claude")
+        || exec_base.eq_ignore_ascii_case("Claude.exe")
 }
 
 /// Apply a read timeout to the underlying TCP stream of an inspector
 /// WebSocket so a stalled CDP response cannot block the read loop forever.
-#[cfg(windows)]
 fn set_inspector_read_timeout(
     socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
     timeout: Duration,
@@ -2226,13 +3858,6 @@ fn set_inspector_read_timeout(
         let _ = tcp.set_read_timeout(Some(timeout));
         let _ = tcp.set_write_timeout(Some(timeout));
     }
-}
-
-#[cfg(not(windows))]
-fn set_inspector_read_timeout(
-    _socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-    _timeout: Duration,
-) {
 }
 
 fn send_cdp_message(
@@ -2346,7 +3971,35 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
 
   const debug = localStorage.getItem("claude-zh-debug") === "1";
   const log = (...args) => debug && console.debug("[claude-zh]", ...args);
-  const zhOn = () => { try { var sl = localStorage.getItem("spa:locale"); if (sl) return sl === "zh-CN"; if (__CSL_LL) return !0; return /claude\.ai$/i.test(location.hostname) && String(navigator.language || "").toLowerCase().indexOf("zh") === 0; } catch (_) { return false; } };
+  const CSL_WANTED_LOCALE_KEY = "__cslWantedLocale";
+  const getActiveLocale = () => {
+    try {
+      var wl = localStorage.getItem(CSL_WANTED_LOCALE_KEY);
+      if (wl) return wl;
+      var sl = localStorage.getItem("spa:locale");
+      if (sl) return sl;
+      if (typeof __CSL_LL !== "undefined" && __CSL_LL) return "zh-CN";
+      if (/claude\.ai$/i.test(location.hostname) && String(navigator.language || "").toLowerCase().indexOf("zh") === 0) return "zh-CN";
+    } catch (_) {}
+    return "";
+  };
+  const zhOn = () => getActiveLocale() === "zh-CN";
+  const refreshLocaleUiSoon = () => setTimeout(() => {
+    try { if (document.body) walkText(document.body); } catch (_) {}
+    try { fixLanguageRadio(); } catch (_) {}
+    try { fixTitle(); } catch (_) {}
+  }, 0);
+  const rememberLocale = (loc) => {
+    if (typeof loc !== "string" || !loc) return;
+    try {
+      localStorage.setItem(CSL_WANTED_LOCALE_KEY, loc);
+      localStorage.setItem("spa:locale", loc);
+      if (document.documentElement) document.documentElement.setAttribute("lang", loc);
+      try { window.dispatchEvent(new StorageEvent("storage", { key: "spa:locale", newValue: loc })); } catch (_) {}
+      try { window.dispatchEvent(new CustomEvent("claude-locale-change", { detail: loc })); } catch (_) {}
+    } catch (_) {}
+    refreshLocaleUiSoon();
+  };
 
   const installLocaleWhitelist = () => {
     try {
@@ -2401,15 +4054,35 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
           return new Response(JSON.stringify(obj), { status: resp.status, headers: { "content-type": ct } });
         } catch (_) { return resp; }
       }).catch(() => resp);
+      const localeRequestBodySync = true;
+      const readLocaleBody = (body) => {
+        if (!body || (typeof body !== "string" && !(body instanceof String))) return null;
+        const text = String(body);
+        if (text.indexOf("locale") < 0) return null;
+        try {
+          const obj = JSON.parse(text);
+          if (obj && typeof obj.locale === "string" && obj.locale) return { obj, locale: obj.locale };
+        } catch (_) {}
+        return null;
+      };
       globalThis.fetch = (input, init) => {
         const url = typeof input === "string" ? input : (input && input.url) || "";
         const ap = url.indexOf("/api/account_profile") >= 0;
-        if (zhOn() && init && init.body && /PUT|POST/i.test(String(init.method || "")) && String(init.body).indexOf("zh-CN") >= 0) {
-          try { const obj = JSON.parse(String(init.body)); if (obj && obj.locale === "zh-CN") { obj.locale = "en-US"; return rf(input, Object.assign({}, init, { body: JSON.stringify(obj) })); } } catch (_) {}
+        let nextInit = init;
+        const method = String((init && init.method) || (input && input.method) || "");
+        if (init && init.body && /PUT|POST|PATCH/i.test(method)) {
+          const parsed = readLocaleBody(init.body);
+          if (parsed) {
+            rememberLocale(parsed.locale);
+            if (parsed.locale === "zh-CN") {
+              parsed.obj.locale = "en-US";
+              nextInit = Object.assign({}, init, { body: JSON.stringify(parsed.obj) });
+            }
+          }
         }
-        if (url.indexOf("overrides.json") >= 0 && zhOn()) { return rf(input, init).then((resp) => { const ct = (resp.headers.get("content-type") || "").toLowerCase(); if (ct.indexOf("json") < 0) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } }); return resp; }).catch(() => rf(input, init)); }
-        if ((!ap && url.indexOf("/bootstrap") < 0 && url.indexOf("/app_start") < 0) || !zhOn()) return rf(input, init);
-        return rf(input, init).then((resp) => { if (!resp || !resp.ok) return resp; return withZh(resp); }).catch(() => rf(input, init));
+        if (url.indexOf("overrides.json") >= 0 && zhOn()) { return rf(input, nextInit).then((resp) => { const ct = (resp.headers.get("content-type") || "").toLowerCase(); if (ct.indexOf("json") < 0) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } }); return resp; }).catch(() => rf(input, nextInit)); }
+        if ((!ap && url.indexOf("/bootstrap") < 0 && url.indexOf("/app_start") < 0) || !zhOn()) return rf(input, nextInit);
+        return rf(input, nextInit).then((resp) => { if (!resp || !resp.ok) return resp; return withZh(resp); }).catch(() => rf(input, nextInit));
       };
     } catch (_) {}
   };
@@ -2425,6 +4098,7 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "Presentation \u00b7 PPTX": "\u6f14\u793a\u6587\u7a3f \u00b7 PPTX",
     "Document \u00b7 DOCX": "\u6587\u6863 \u00b7 DOCX",
     "Cowork": "\u534f\u4f5c",
+    "Chat": "\u804a\u5929",
     "Code": "\u4ee3\u7801",
     "Currently unavailable": "\u5f53\u524d\u4e0d\u53ef\u7528",
     "For more complex tasks": "\u66f4\u590d\u6742\u4efb\u52a1",
@@ -2433,6 +4107,10 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "Adaptive": "\u81ea\u9002\u5e94",
     "Extended": "\u6269\u5c55",
     "skill-creator": "\u6280\u80fd\u521b\u5efa\u5668",
+    "About Claude": "\u5173\u4e8eClaude",
+    "Help": "\u5e2e\u52a9",
+    "Get support": "\u83b7\u53d6\u652f\u6301",
+    "Copied version to clipboard": "\u7248\u672c\u5df2\u590d\u5236\u5230\u526a\u8d34\u677f",
   };
   const FULL_ZH = {
     "Create new skills, modify and improve existing skills": "\u521b\u5efa\u65b0\u6280\u80fd\uff0c\u4fee\u6539\u5e76\u6539\u8fdb\u73b0\u6709\u6280\u80fd\uff0c\u5e76\u8861\u91cf\u6280\u80fd\u8868\u73b0\u3002\u5f53\u7528\u6237\u60f3\u8981\u4ece\u96f6\u5f00\u59cb\u521b\u5efa\u6280\u80fd\u3001\u7f16\u8f91\u6216\u4f18\u5316\u73b0\u6709\u6280\u80fd\u3001\u8fd0\u884c\u8bc4\u4f30\u6765\u6d4b\u8bd5\u6280\u80fd\u3001\u901a\u8fc7\u65b9\u5dee\u5206\u6790\u5bf9\u6280\u80fd\u8868\u73b0\u8fdb\u884c\u57fa\u51c6\u6d4b\u8bd5\uff0c\u6216\u4f18\u5316\u6280\u80fd\u63cf\u8ff0\u4ee5\u63d0\u5347\u89e6\u53d1\u51c6\u786e\u6027\u65f6\u4f7f\u7528\u3002",
@@ -2442,29 +4120,61 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   // is currently unavailable." -> model name + 当前不可用。).
   const gatewayProviderSubstringFallback = true;
   const codeUiLabelFallback = true;
+  const reversibleTextFallback = true;
   const SUBSTR_ZH = {
     "GATEWAY": "\u7f51\u5173",
     "Gateway": "\u7f51\u5173",
+    "Version ": "\u7248\u672c",
     "is currently unavailable.": "\u5f53\u524d\u4e0d\u53ef\u7528\u3002",
   };
-  const translateTextNode = (node) => {
-    if (!node || node.nodeType !== 3 || !zhOn()) return;
+  const CSL_ORIG_TEXT = "__cslOrigText";
+  const CSL_TRANSLATED_TEXT = "__cslTranslatedText";
+  const TEXT_EN = {};
+  try { for (var rek in TEXT_ZH) if (TEXT_ZH[rek] && TEXT_EN[TEXT_ZH[rek]] === undefined) TEXT_EN[TEXT_ZH[rek]] = rek; } catch (_) {}
+  const shouldSkipTextNode = (node) => {
     // Skip text inside thinking blocks and code/pre elements: these contain
     // Claude's reasoning/output and must not be prefix-translated, or the
     // thinking output may be corrupted and fail to render after completion.
     if (node.parentElement) {
       var el = node.parentElement;
-      if (el.closest && el.closest('[data-thinking], [class*="thinking"], [class*="thought"], pre, code, [contenteditable]')) return;
+      if (el.closest && el.closest('[data-thinking], [class*="thinking"], [class*="thought"], pre, code, [contenteditable]')) return true;
     }
-    const v = node.nodeValue;
-    if (!v) return;
+    return false;
+  };
+  const likelyUiTextNode = (node) => {
+    try {
+      const el = node && node.parentElement;
+      return !!(el && el.closest && el.closest('button, a, nav, aside, header, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="tab"], [role="option"], [aria-label], [data-testid*="nav"], [data-testid*="menu"], [data-testid*="sidebar"]'));
+    } catch (_) { return false; }
+  };
+  const clearTextState = (node) => { try { delete node[CSL_ORIG_TEXT]; delete node[CSL_TRANSLATED_TEXT]; } catch (_) {} };
+  const restoreTextNode = (node) => {
+    try {
+      const orig = node[CSL_ORIG_TEXT];
+      const translated = node[CSL_TRANSLATED_TEXT];
+      if (typeof orig !== "string") {
+        if (!likelyUiTextNode(node)) return;
+        const v = node.nodeValue || "";
+        const trimmed = v.trim();
+        const en = TEXT_EN[trimmed];
+        if (!en) return;
+        const lead = v.length - v.trimStart().length;
+        node.nodeValue = v.slice(0, lead) + en + v.slice(lead + trimmed.length);
+        return;
+      }
+      if (node.nodeValue === translated || node.nodeValue === orig) node.nodeValue = orig;
+      clearTextState(node);
+    } catch (_) {}
+  };
+  const translatedTextValue = (v) => {
+    if (!v) return v;
     const trimmed = v.trim();
-    if (!trimmed) return;
+    if (!trimmed) return v;
     const lead = v.length - v.trimStart().length;
     var zh = TEXT_ZH[trimmed];
-    if (zh) { node.nodeValue = v.slice(0, lead) + zh + v.slice(lead + trimmed.length); return; }
-    for (var fk in FULL_ZH) if (fk.length > 15 && trimmed.indexOf(fk) === 0) { node.nodeValue = v.slice(0, lead) + FULL_ZH[fk]; return; }
-    for (var k in TEXT_ZH) if (k.length > 15 && trimmed.indexOf(k) === 0) { node.nodeValue = v.slice(0, lead) + TEXT_ZH[k] + v.slice(lead + k.length); return; }
+    if (zh) return v.slice(0, lead) + zh + v.slice(lead + trimmed.length);
+    for (var fk in FULL_ZH) if (fk.length > 15 && trimmed.indexOf(fk) === 0) return v.slice(0, lead) + FULL_ZH[fk];
+    for (var k in TEXT_ZH) if (k.length > 15 && trimmed.indexOf(k) === 0) return v.slice(0, lead) + TEXT_ZH[k] + v.slice(lead + k.length);
     // Substring replacement: translate a fragment anywhere in the text,
     // preserving the surrounding (e.g. model-name) prefix/suffix.
     var nv = v;
@@ -2472,7 +4182,21 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
       var pos = nv.indexOf(sk);
       if (pos >= 0) nv = nv.slice(0, pos) + SUBSTR_ZH[sk] + nv.slice(pos + sk.length);
     }
-    if (nv !== v) node.nodeValue = nv;
+    return nv;
+  };
+  const translateTextNode = (node) => {
+    if (!node || node.nodeType !== 3) return;
+    if (shouldSkipTextNode(node)) return;
+    if (!zhOn()) { restoreTextNode(node); return; }
+    let base = typeof node[CSL_ORIG_TEXT] === "string" ? node[CSL_ORIG_TEXT] : node.nodeValue;
+    if (typeof node[CSL_ORIG_TEXT] === "string" && node.nodeValue !== node[CSL_TRANSLATED_TEXT] && node.nodeValue !== node[CSL_ORIG_TEXT]) {
+      clearTextState(node);
+      base = node.nodeValue;
+    }
+    const nv = translatedTextValue(base);
+    if (!nv || nv === base) { clearTextState(node); return; }
+    try { node[CSL_ORIG_TEXT] = base; node[CSL_TRANSLATED_TEXT] = nv; } catch (_) {}
+    if (node.nodeValue !== nv) node.nodeValue = nv;
   };
   const walkText = (root) => {
     if (!root) return;
@@ -2484,9 +4208,10 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   };
   const fixLanguageRadio = () => {
     try {
-      if (localStorage.getItem("spa:locale") !== "zh-CN") return;
+      const loc = getActiveLocale();
+      if (!loc) return;
       document.querySelectorAll('[role=menuitemradio][lang]').forEach((el) => {
-        const want = el.getAttribute("lang") === "zh-CN" ? "true" : "false";
+        const want = el.getAttribute("lang") === loc ? "true" : "false";
         if (el.getAttribute("aria-checked") !== want) el.setAttribute("aria-checked", want);
       });
     } catch (_) {}
@@ -2517,7 +4242,13 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     startTextPatch();
   }
   const TITLE_ZH = { "Sign in - Claude": "\u767b\u5f55 - Claude" };
-  const fixTitle = () => { try { if (!zhOn()) return; if (TITLE_ZH[document.title]) document.title = TITLE_ZH[document.title]; } catch (_) {} };
+  const TITLE_EN = { "\u767b\u5f55 - Claude": "Sign in - Claude" };
+  const fixTitle = () => {
+    try {
+      if (zhOn()) { if (TITLE_ZH[document.title]) document.title = TITLE_ZH[document.title]; }
+      else if (TITLE_EN[document.title]) document.title = TITLE_EN[document.title];
+    } catch (_) {}
+  };
   fixTitle();
   setInterval(fixTitle, 1500);
 })();
@@ -2537,14 +4268,161 @@ mod tests {
 
     #[test]
     fn localized_windows_command_uses_inspector_launcher_without_cdp_auth() {
-        let command = patched_launch_command("claude-desktop", "Claude", true).unwrap();
         if cfg!(target_os = "windows") {
+            let command = patched_launch_command("claude-desktop", "Claude", true).unwrap();
             assert!(command.contains("launch-claude-zh.ps1"));
+            assert!(!command.contains("--inspect"));
+            assert!(!command.contains("remote-debugging-port"));
         } else {
-            assert_eq!(command, "open -a Claude");
+            let command = patched_launch_command("claude-desktop", "Claude", true).unwrap();
+            assert!(command.contains("launch-claude-macos-zh.sh"));
+            assert!(!command.contains("--inspect"));
+            assert!(!command.contains("remote-debugging-port"));
         }
-        assert!(!command.contains("--inspect"));
-        assert!(!command.contains("remote-debugging-port"));
+    }
+
+    #[test]
+    fn macos_localization_uses_official_main_process_debugger_menu() {
+        let source = include_str!("claude_desktop_patch.rs");
+        assert!(source.contains("launch_macos_claude_desktop_localized"));
+        assert!(source.contains("enable_macos_claude_main_process_debugger"));
+        assert!(source.contains("request_macos_claude_main_process_debugger_once"));
+        assert!(source.contains("enable_macos_claude_main_process_debugger"));
+        assert!(source.contains("MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT"));
+        assert!(source.contains("request_macos_claude_main_process_debugger_native"));
+        assert!(source.contains("AXIsProcessTrusted"));
+        assert!(source.contains("AXUIElementCreateApplication"));
+        assert!(source.contains("macos-main-debugger.log"));
+        assert!(source.contains("Enable Main Process Debugger"));
+        assert!(source.contains("Grant CodeStudio Lite Accessibility permission"));
+        assert!(source.contains("ensure_localized_launch_prerequisites"));
+        assert!(source.contains("ensure_macos_accessibility_trusted_for_localized_launch"));
+        assert!(source.contains("Current app bundle"));
+        assert!(source.contains("Current executable"));
+        assert!(source.contains("env::current_exe()"));
+        assert!(source.contains("Accessibility preflight check #{attempt}: AXIsProcessTrusted"));
+        assert!(source.contains("AXIsProcessTrustedWithOptions(prompt=true) returned"));
+        assert!(source.contains("MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT"));
+        assert!(source.contains("MacosAccessibilityPreflight::NeedsProcessRestart"));
+        assert!(source.contains("schedule_macos_accessibility_restart"));
+        assert!(source.contains("CLAUDE_MACOS_ACCESSIBILITY_RESTART_MARKER"));
+        assert!(source.contains("resume_pending_macos_localized_launch"));
+        assert!(source.contains("request_restart()"));
+        assert!(source.contains("macos_accessibility_is_trusted_raw()"));
+        assert!(source.contains("request_macos_accessibility_prompt"));
+        assert!(source.contains("launch-claude-macos-zh.sh"));
+        assert!(source.contains("macos_localized_launch_script"));
+        assert!(source.contains("write_localized_launch_marker()?"));
+        assert!(source.contains("claude_node_inspector_available()"));
+        assert!(source.contains("wait_for_claude_node_inspector()"));
+        assert!(source.contains("启用主进程调试器"));
+        assert!(source.contains("click_macos_claude_main_process_debugger_menu"));
+        assert!(source.contains("ax_find_and_press_debugger_menu_item"));
+        for removed_symbol in [
+            concat!("apply_", "macos_localization_patch"),
+            concat!("resolve_", "macos_claude_install_for_patch"),
+            concat!("Macos", "ClaudePatchPaths"),
+            concat!("Macos", "PatchPayloads"),
+            concat!("ElectronAsarIntegrity", ":Resources/app.asar:hash"),
+            concat!("update_", "macos_asar_integrity_hash"),
+            concat!("ad_hoc_", "codesign_macos_app"),
+            concat!("with administrator", " privileges"),
+            concat!("apply-claude-", "macos-patch.log"),
+            concat!("Privacy_", "Accessibility"),
+            concat!("open_macos_", "accessibility_settings"),
+            concat!("run_", "macos_main_process_debugger_", "apple", "script"),
+            concat!("macos_enable_main_process_debugger_", "apple", "script"),
+        ] {
+            assert!(!source.contains(removed_symbol));
+        }
+
+        let ensure_body = source
+            .split("pub fn ensure_localization_patch()")
+            .nth(1)
+            .and_then(|tail| tail.split("pub fn spawn_localization_injector").next())
+            .expect("ensure_localization_patch body should exist");
+        assert!(ensure_body.contains("apply_localization_patch()"));
+        assert!(!ensure_body.contains(concat!("apply_", "macos_localization_patch()")));
+        assert!(ensure_body.contains("ensure_patch_files()?"));
+        assert!(ensure_body.contains("ensure_macos_claude_desktop_developer_mode()"));
+
+        let macos_launch_body = source
+            .split("fn launch_macos_claude_desktop_localized(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn enable_macos_claude_main_process_debugger")
+                    .next()
+            })
+            .expect("macOS launch body should exist");
+        assert!(macos_launch_body.contains("ensure_patch_files()?"));
+        assert!(macos_launch_body.contains("ensure_macos_claude_desktop_developer_mode()?"));
+        assert!(macos_launch_body.contains("allow_accessibility_restart"));
+        assert!(
+            macos_launch_body.contains("ensure_macos_accessibility_trusted_or_restart_needed()?")
+        );
+        assert!(macos_launch_body.contains("schedule_macos_accessibility_restart(app)?"));
+        assert!(macos_launch_body.contains("return Ok(())"));
+        assert!(
+            macos_launch_body
+                .find("ensure_macos_accessibility_trusted")
+                .expect("Accessibility preflight should run before launching Claude")
+                < macos_launch_body
+                    .find("write_localized_launch_marker()?")
+                    .expect("localized launch marker should be written after preflight")
+        );
+        assert!(
+            macos_launch_body
+                .find("ensure_macos_accessibility_trusted_for_localized_launch()?")
+                .expect("Accessibility preflight should run before launching Claude")
+                < macos_launch_body
+                    .find("close_existing_claude_for_localized_launch()?")
+                    .expect("Claude should only be closed after preflight")
+        );
+        assert!(
+            macos_launch_body
+                .find("ensure_macos_accessibility_trusted_for_localized_launch()?")
+                .expect("Accessibility preflight should run before launching Claude")
+                < macos_launch_body
+                    .find("hidden_command(\"open\")")
+                    .expect("Claude should only be opened after preflight")
+        );
+        assert!(macos_launch_body.contains("write_localized_launch_marker()?"));
+        assert!(macos_launch_body.contains("close_existing_claude_for_localized_launch()?"));
+        assert!(macos_launch_body.contains("hidden_command(\"open\")"));
+        assert!(macos_launch_body.contains("enable_macos_claude_main_process_debugger()"));
+        assert!(macos_launch_body.contains("retry_inject_localization()"));
+        assert!(!macos_launch_body.contains("localization injection also failed"));
+        assert!(macos_launch_body.contains("localization inspector opened, but injection failed"));
+        assert!(!macos_launch_body.contains(concat!("apply_", "macos_localization_patch()?")));
+
+        let script = macos_localized_launch_script();
+        assert!(!script.contains("developer_settings.json"));
+        assert!(!script.contains("allowDevTools"));
+        assert!(!script.contains("osascript"));
+        assert!(!script.contains("tell application"));
+        assert!(!script.contains("/usr/bin/plutil"));
+        assert!(script.contains("/usr/bin/pgrep -x Claude"));
+        assert!(script.contains("/usr/bin/pkill -TERM -x Claude"));
+        assert!(script.contains("/usr/bin/pkill -KILL -x Claude"));
+        assert!(script.contains("/usr/bin/open -a Claude"));
+        assert!(script.contains("claude_debugger_open()"));
+        assert!(script.contains("lsof -nP -iTCP"));
+        assert!(script.contains("/usr/bin/curl -fsS --max-time 1"));
+        assert!(script.contains("\"webSocketDebuggerUrl\""));
+        assert!(script.contains("Claude.app/Contents/MacOS/Claude"));
+        assert!(script.contains("while ! claude_debugger_open; do"));
+        assert!(script.contains("deadline=$(( $(/bin/date +%s) + 90 ))"));
+        assert!(script.contains("debugger_attempts=0"));
+        assert!(script.contains("debugger_attempts=$((debugger_attempts + 1))"));
+        assert!(script.contains(
+            "Waiting for CodeStudio Lite to enable Claude main process debugger via Accessibility"
+        ));
+        assert!(script.contains("Timed out waiting for Claude main process debugger"));
+        assert!(!script.contains("APPLESCRIPT"));
+        assert!(!script.contains("JXA"));
+        assert!(!script.contains("clickDebuggerConfirmation"));
+        assert!(!script.contains("clickedDebuggerMenu"));
+        assert!(script.contains("localized-launch.flag"));
     }
 
     #[test]
@@ -2605,34 +4483,37 @@ mod tests {
         // Squirrel layout: detected image is <root>/app-<version>/Claude.exe.
         // patch_exe is the image itself, resources next to it, launcher the
         // root claude.exe.
-        let detected =
-            PathBuf::from(r"C:\Users\A\AppData\Local\AnthropicClaude\app-1.14271.0\Claude.exe");
+        let root = PathBuf::from("C")
+            .join("Users")
+            .join("A")
+            .join("AppData")
+            .join("Local")
+            .join("AnthropicClaude");
+        let app_dir = root.join("app-1.14271.0");
+        let detected = app_dir.join("Claude.exe");
         let (patch_exe, launcher, resources) =
             resolve_patch_paths_from_detected(&detected).expect("should resolve paths");
         assert_eq!(patch_exe, detected);
-        assert_eq!(
-            launcher,
-            PathBuf::from(r"C:\Users\A\AppData\Local\AnthropicClaude\claude.exe")
-        );
-        assert_eq!(
-            resources,
-            PathBuf::from(r"C:\Users\A\AppData\Local\AnthropicClaude\app-1.14271.0\resources")
-        );
+        assert_eq!(launcher, root.join("claude.exe"));
+        assert_eq!(resources, app_dir.join("resources"));
     }
 
     #[test]
     fn resolve_patch_paths_from_detected_handles_bare_launcher() {
         // Bare layout: detected is <root>/Claude.exe with no app-<version>
         // parent. patch_exe and launcher are both the image; resources next to it.
-        let detected = PathBuf::from(r"C:\Users\A\AppData\Local\Claude\Claude.exe");
+        let root = PathBuf::from("C")
+            .join("Users")
+            .join("A")
+            .join("AppData")
+            .join("Local")
+            .join("Claude");
+        let detected = root.join("Claude.exe");
         let (patch_exe, launcher, resources) =
             resolve_patch_paths_from_detected(&detected).expect("should resolve paths");
         assert_eq!(patch_exe, detected);
         assert_eq!(launcher, detected);
-        assert_eq!(
-            resources,
-            PathBuf::from(r"C:\Users\A\AppData\Local\Claude\resources")
-        );
+        assert_eq!(resources, root.join("resources"));
     }
 
     #[test]
@@ -2777,9 +4658,22 @@ mod tests {
         // Existing local/setup windows must follow language changes too.
         assert!(shim.contains("syncOpenWindowsLocale"));
         assert!(shim.contains("webContents.getAllWebContents"));
+        assert!(shim.contains("CSL_WANTED_LOCALE_KEY"));
+        assert!(shim.contains(
+            "localStorage.getItem(\"__cslWantedLocale\")||localStorage.getItem(\"spa:locale\")"
+        ));
+        assert!(shim.contains("localStorage.setItem(\"__cslWantedLocale\""));
         assert!(shim.contains("localStorage.setItem(\"spa:locale\""));
         assert!(shim.contains("__cslLocaleReloaded"));
         assert!(shim.contains("localeChangeListeners.push(syncOpenWindowsLocale"));
+        assert!(shim.contains("localWindowHotSwitchSync"));
+        assert!(shim.contains("devtools://"));
+        assert!(shim.contains("applyLocalWindowTitle"));
+        assert!(shim.contains("setup-desktop-3p"));
+        assert!(shim.contains("Configure Third-Party Inference"));
+        assert!(shim.contains("aboutClaudeWindowFallback"));
+        assert!(shim.contains("About Claude"));
+        assert!(shim.contains("about_window"));
         // The zh-CN payloads are embedded so the shim is self-contained.
         assert!(shim.contains("SHELL_LOCALE"));
         assert!(shim.contains("ION_LOCALE"));
@@ -2822,6 +4716,9 @@ mod tests {
         assert!(source.contains("BrowserWindow.getAllWindows"));
         assert!(source.contains("process.getBuiltinModule(\"module\").createRequire"));
         assert!(source.contains("contents.debugger.attach"));
+        assert!(source.contains("__cslZhAttachedVersion"));
+        assert!(source.contains("debuggerWasAttached"));
+        assert!(source.contains("contents.debugger.detach()"));
         assert!(source.contains("Fetch.enable"));
         assert!(source.contains("Page.addScriptToEvaluateOnNewDocument"));
         // The runtime is delivered via addScriptToEvaluateOnNewDocument so it
@@ -2831,11 +4728,325 @@ mod tests {
         assert!(source.contains("Page.reload"));
         assert!(source.contains("withTimeout"));
         assert!(source.contains("__CODESTUDIO_CLAUDE_ZH_MAIN__"));
+        assert!(source.contains("CSL_INJECTION_VERSION"));
         assert!(source.contains("translation-runtime.js"));
         assert!(source.contains("localePayloadForUrl"));
         assert!(source.contains("ion-dist/i18n/en-US.json"));
-        assert!(source.contains("isEn && localLike"));
+        assert!(source.contains("currentLocale === \"zh-CN\" && isEn && localLike"));
         assert!(source.contains("webContents.getAllWebContents"));
+        assert!(source.contains("localWindowHotSwitchSync"));
+        assert!(source.contains("lower.startsWith(\"devtools://\")"));
+        assert!(source.contains("applyLocalWindowTitle"));
+        assert!(source.contains("setup-desktop-3p"));
+        assert!(source.contains("Configure Third-Party Inference"));
+        assert!(source.contains("aboutClaudeWindowFallback"));
+        assert!(source.contains("About Claude"));
+        assert!(source.contains("about_window"));
+    }
+
+    #[test]
+    fn node_inspector_injection_syncs_locale_after_language_menu_changes() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("CSL_INJECTION_VERSION = 8"));
+        assert!(source.contains("let currentLocale"));
+        assert!(source.contains("setCurrentLocale"));
+        assert!(source.contains("zhActive"));
+        assert!(source.contains("pollLocale"));
+        assert!(source.contains("syncOpenWindowsLocale"));
+        assert!(source.contains("syncOneWindowLocale"));
+        assert!(source.contains("CSL_WANTED_LOCALE_KEY"));
+        assert!(source.contains(
+            "localStorage.getItem(\"__cslWantedLocale\")||localStorage.getItem(\"spa:locale\")"
+        ));
+        assert!(source.contains("localStorage.getItem(\"spa:locale\")"));
+        assert!(source.contains("localStorage.setItem(\"__cslWantedLocale\""));
+        assert!(source.contains("localStorage.setItem(\"spa:locale\""));
+        assert!(source.contains("claude-locale-change"));
+        assert!(source.contains("localeChangeListeners.push(syncOpenWindowsLocale)"));
+        assert!(source.contains("syncOpenWindowsLocale(currentLocale)"));
+        assert!(source.contains("fireLocaleChange(currentLocale)"));
+        assert!(source.contains("fallback"));
+        assert!(source.contains("setCurrentLocale(fallback)"));
+    }
+
+    #[test]
+    fn node_inspector_injection_localizes_macos_menu_bar() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("macosMenuBarLocalization"));
+        assert!(source.contains("process.platform !== \"darwin\""));
+        assert!(source.contains("Menu.setApplicationMenu"));
+        assert!(source.contains("Menu.getApplicationMenu"));
+        assert!(source.contains("__cslMenuBarLocalizationInstalled"));
+        assert!(source.contains("__cslLastApplicationMenu"));
+        assert!(source.contains("localeChangeListeners.push(retranslateMenuBar)"));
+        assert!(source.contains("en-US.json"));
+        assert!(source.contains("shellLocale"));
+        assert!(source.contains("labelToId"));
+        assert!(source.contains("rememberCatalog"));
+        assert!(source.contains("process.resourcesPath"));
+        assert!(source.contains("__cslMessageId"));
+        assert!(source.contains("labelMessageId"));
+        assert!(source.contains("menuHardcodedZh"));
+        assert!(source.contains("menuRoleZh"));
+        assert!(source.contains("roleKey(item)"));
+        assert!(source.contains("Hide Claude"));
+        assert!(source.contains("Enable Main Process Debugger"));
+        assert!(source.contains("\\u542f\\u7528\\u4e3b\\u8fdb\\u7a0b\\u8c03\\u8bd5\\u5668"));
+    }
+
+    #[test]
+    fn macos_menu_bar_can_return_to_chinese_from_other_locales() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("rememberCatalog(enObj)"));
+        assert!(source.contains("rememberCatalog(zhObj)"));
+        assert!(source.contains("fs.readdirSync(process.resourcesPath)"));
+        assert!(source.contains("loadLocaleCatalog(target)"));
+        assert!(source
+            .contains("item.__cslMessageId = labelMessageId(orig) || labelMessageId(item.label)"));
+        assert!(source.contains("translateLabel(orig, item.__cslMessageId, roleKey(item))"));
+        assert!(source.contains("const id = item.__cslMessageId || labelMessageId(orig)"));
+        assert!(source.contains("id && idToVal[id] ? idToVal[id]"));
+        assert!(source.contains("about: \"\\u5173\\u4e8eClaude\""));
+        assert!(source.contains("quit: \"\\u9000\\u51fa Claude\""));
+    }
+
+    #[test]
+    fn macos_debugger_menu_is_not_clicked_when_inspector_is_already_open() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let enable_body = source
+            .split("fn enable_macos_claude_main_process_debugger()")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn request_macos_claude_main_process_debugger_once")
+                    .next()
+            })
+            .expect("enable_macos_claude_main_process_debugger body should exist");
+        assert!(
+            enable_body
+                .find("claude_node_inspector_available()")
+                .expect("should check for an existing inspector first")
+                < enable_body
+                    .find("request_macos_claude_main_process_debugger_once()")
+                    .expect("should request the debugger only after the guard")
+        );
+        assert!(enable_body.contains("wait_for_claude_node_inspector()"));
+        assert!(enable_body.contains("request_count += 1"));
+        assert!(enable_body.contains("request_macos_claude_main_process_debugger_once()"));
+        assert!(enable_body.contains("macos_debugger_log_path()"));
+        assert!(enable_body.contains("After granting Accessibility access"));
+        assert!(
+            enable_body
+                .find("ACCESSIBILITY_NOT_TRUSTED")
+                .expect("Accessibility denial should be handled")
+                < enable_body
+                    .find("last_error = err")
+                    .expect("non-permission errors should keep retrying")
+        );
+        assert!(
+            enable_body
+                .find("request_count += 1")
+                .expect("should count debugger requests")
+                < enable_body
+                    .find("request_macos_claude_main_process_debugger_once()")
+                    .expect("should request the debugger inside the retry loop")
+        );
+        let request_body = source
+            .split("fn request_macos_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("fn macos_debugger_log_path").next())
+            .expect("request_macos_claude_main_process_debugger_once body should exist");
+        assert!(request_body.contains("request_macos_claude_main_process_debugger_native"));
+        assert!(request_body.contains("append_macos_debugger_log"));
+        assert!(!request_body.contains(".output()"));
+        assert!(!request_body.contains("osascript"));
+        assert!(!request_body.contains(&concat!(
+            "run_",
+            "macos_main_process_debugger_",
+            "apple",
+            "script"
+        )));
+        let preflight_body = source
+            .split("#[cfg(target_os = \"macos\")]\nfn ensure_macos_accessibility_trusted_for_localized_launch()")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn ensure_macos_accessibility_trusted_for_localized_launch()")
+                    .next()
+            })
+            .expect("ensure_macos_accessibility_trusted_for_localized_launch body should exist");
+        assert!(preflight_body.contains("macos_accessibility_is_trusted_raw()"));
+        assert!(preflight_body.contains("AXIsProcessTrusted=true"));
+        assert!(preflight_body.contains("AXIsProcessTrusted=false"));
+        assert!(
+            preflight_body
+                .find("macos_accessibility_is_trusted_raw()")
+                .expect("preflight should check the current Accessibility state")
+                < preflight_body
+                    .find("request_macos_accessibility_prompt")
+                    .expect("preflight should request permission only after checking state")
+        );
+        assert!(!preflight_body.contains(concat!("Privacy_", "Accessibility")));
+
+        let native_permission_body = source
+            .split("fn macos_accessibility_trusted_or_prompt()")
+            .nth(1)
+            .and_then(|tail| tail.split("fn request_macos_accessibility_prompt").next())
+            .expect("macos_accessibility_trusted_or_prompt body should exist");
+        assert!(native_permission_body.contains("macos_accessibility_is_trusted_raw()"));
+        assert!(native_permission_body.contains("AXIsProcessTrusted=true before prompt"));
+        assert!(native_permission_body.contains("AXIsProcessTrusted=false before prompt"));
+        assert!(
+            native_permission_body
+                .find("macos_accessibility_is_trusted_raw()")
+                .expect("debugger check should read Accessibility state first")
+                < native_permission_body
+                    .find("request_macos_accessibility_prompt")
+                    .expect("debugger check should prompt only after reading state")
+        );
+        assert!(!native_permission_body.contains(concat!("Privacy_", "Accessibility")));
+
+        let spawn_body = source
+            .split("pub fn spawn_localization_injector")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn spawn_silent_localization_injector")
+                    .next()
+            })
+            .expect("spawn_localization_injector body should exist");
+        assert!(spawn_body.contains("enable_macos_claude_main_process_debugger()"));
+        assert!(!spawn_body.contains("wait_for_macos_claude_main_process_debugger()"));
+        let silent_body = source
+            .split("pub fn spawn_silent_localization_injector")
+            .nth(1)
+            .and_then(|tail| tail.split("fn ensure_patch_files").next())
+            .expect("spawn_silent_localization_injector body should exist");
+        assert!(silent_body.contains("enable_macos_claude_main_process_debugger()"));
+        assert!(!silent_body.contains("wait_for_macos_claude_main_process_debugger()"));
+
+        assert!(source.contains("ax_find_and_press_debugger_menu_item"));
+        assert!(source.contains("macos_main_process_debugger_menu_title_matches"));
+        assert!(source.contains("macos_developer_menu_title_matches"));
+        assert!(source.contains("normalized_menu_title"));
+        for title in [
+            "Developer",
+            "开发者",
+            "開發者",
+            "Entwickler",
+            "Desarrollador",
+            "Développeur",
+            "डेवलपर",
+            "Pengembang",
+            "Sviluppatore",
+            "開発",
+            "開発者",
+            "개발자",
+            "Desenvolvedor",
+        ] {
+            assert!(
+                macos_developer_menu_title_matches(title),
+                "developer menu title should match {title}"
+            );
+        }
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "Enable Main Process Debugger"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "启用主进程调试器"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "Main Process Debugger"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "啟用主進程偵錯器"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "Activer le débogueur du processus principal"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "Hauptprozess-Debugger aktivieren"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "Activar depurador del proceso principal"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "Ativar depurador do processo principal"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "メインプロセスデバッガーを有効にする"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "메인 프로세스 디버거 활성화"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "मुख्य प्रक्रिया डिबगर सक्षम करें"
+        ));
+        assert!(macos_main_process_debugger_menu_title_matches(
+            "Aktifkan debugger proses utama"
+        ));
+        assert!(macos_debugger_confirmation_title_matches("Continue"));
+        assert!(macos_debugger_confirmation_title_matches("允许"));
+        assert!(macos_debugger_confirmation_title_matches("继续"));
+        assert!(macos_debugger_confirmation_title_matches("繼續"));
+        assert!(macos_debugger_confirmation_title_matches("Continuer"));
+        assert!(macos_debugger_confirmation_title_matches("Fortfahren"));
+        assert!(macos_debugger_confirmation_title_matches("Continuar"));
+        assert!(macos_debugger_confirmation_title_matches("Permitir"));
+        assert!(macos_debugger_confirmation_title_matches("Apri"));
+        assert!(macos_debugger_confirmation_title_matches("開く"));
+        assert!(macos_debugger_confirmation_title_matches("계속"));
+        assert!(macos_debugger_confirmation_title_matches("जारी रखें"));
+        assert!(macos_debugger_confirmation_title_matches("Lanjutkan"));
+
+        let script = macos_localized_launch_script();
+        assert!(
+            script
+                .find("while ! claude_debugger_open; do")
+                .expect("script should wait until the debugger endpoint exists")
+                < script
+                    .find("debugger_attempts=$((debugger_attempts + 1))")
+                    .expect("script should count debugger wait attempts")
+        );
+        assert!(script.contains("debugger_attempts=$((debugger_attempts + 1))"));
+        assert!(!script.contains("osascript"));
+        assert!(!script.contains("APPLESCRIPT"));
+        assert!(!script.contains("JXA"));
+        assert!(!script.contains("clickDebuggerConfirmation"));
+    }
+
+    #[test]
+    fn node_inspector_injection_consumes_localized_launch_marker() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("localized-launch.flag"));
+        assert!(source.contains("consumeLocalizedLaunchMarker"));
+        assert!(source.contains("fs.unlinkSync(marker)"));
+        assert!(source.contains("localizedLaunchDefaultZh"));
+        assert!(source.contains("var __CSL_LL="));
+        assert!(source.contains("__CSL_LL_DONE"));
+        assert!(source.contains("localStorage.setItem('spa:locale','zh-CN')"));
+        assert!(!source.contains("if(typeof __CSL_LL==='undefined')var __CSL_LL=!1;"));
     }
 
     #[test]
@@ -2849,6 +5060,7 @@ mod tests {
 
         assert!(source.contains("await globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__.refresh()"));
         assert!(source.contains("const results = await Promise.all"));
+        assert!(source.contains("if (attached.has(contents)) return true;"));
         assert!(source.contains("attached.add(contents);"));
         assert!(source.contains("return { ok: true, reused: false, ...summary };"));
         let patch = include_str!("claude_desktop_patch.rs");
@@ -2992,6 +5204,21 @@ mod tests {
         assert!(TRANSLATION_RUNTIME.contains("account_profile"));
         assert!(TRANSLATION_RUNTIME.contains("withZh"));
         assert!(TRANSLATION_RUNTIME.contains("fixLanguageRadio"));
+        assert!(TRANSLATION_RUNTIME.contains("__cslWantedLocale"));
+        assert!(
+            TRANSLATION_RUNTIME
+                .find("localStorage.getItem(CSL_WANTED_LOCALE_KEY)")
+                .expect("wanted locale should be read")
+                < TRANSLATION_RUNTIME
+                    .find("localStorage.getItem(\"spa:locale\")")
+                    .expect("spa locale should be a fallback")
+        );
+        assert!(TRANSLATION_RUNTIME.contains("rememberLocale"));
+        assert!(TRANSLATION_RUNTIME.contains("localeRequestBodySync"));
+        assert!(TRANSLATION_RUNTIME.contains(r#""Chat": "\u804a\u5929""#));
+        assert!(TRANSLATION_RUNTIME.contains(r#""About Claude": "\u5173\u4e8eClaude""#));
+        assert!(TRANSLATION_RUNTIME.contains(r#""Get support": "\u83b7\u53d6\u652f\u6301""#));
+        assert!(TRANSLATION_RUNTIME.contains(r#""Version ": "\u7248\u672c""#));
         assert!(TRANSLATION_RUNTIME.contains("overrides.json"));
         assert!(TRANSLATION_RUNTIME.contains("gated_messages"));
         assert!(TRANSLATION_RUNTIME.contains("fetch"));
@@ -3026,12 +5253,17 @@ mod tests {
         assert!(TRANSLATION_RUNTIME.contains("\"Code\": \"\\u4ee3\\u7801\""));
         assert!(!TRANSLATION_RUNTIME.contains("[class*=\"code\"]"));
         assert!(TRANSLATION_RUNTIME.contains("codeUiLabelFallback"));
+        assert!(TRANSLATION_RUNTIME.contains("reversibleTextFallback"));
+        assert!(TRANSLATION_RUNTIME.contains("__cslOrigText"));
+        assert!(TRANSLATION_RUNTIME.contains("__cslTranslatedText"));
+        assert!(TRANSLATION_RUNTIME.contains("restoreTextNode"));
+        assert!(TRANSLATION_RUNTIME.contains("TEXT_EN"));
     }
 
     #[test]
     fn locale_runtime_source_stays_small() {
         let source = build_locale_runtime_source();
-        assert!(source.len() < 11_000);
+        assert!(source.len() < 15_000);
         assert!(!source.contains("__CLAUDE_ZH_ION_LOCALE__"));
         assert!(!source.contains(CLAUDE_ION_ZH_LOCALE));
     }
@@ -3451,5 +5683,61 @@ mod tests {
         )
         .unwrap();
         assert!(asar_shim_needs_update(&nogateway));
+
+        // The previous runtime translated hard-coded Chat/Cowork/Code labels
+        // in one direction only. After switching away from zh-CN those text
+        // nodes stayed Chinese, and choosing zh-CN again could be ignored
+        // because the locale PUT rewrite ran before local state changed.
+        let prereversible = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
+        let np16 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
+        let noreversible = asar_archive::build_patched_asar(
+            &asar0,
+            np16.as_bytes(),
+            CLAUDE_INSPECTOR_SHIM_NAME,
+            prereversible.as_slice(),
+        )
+        .unwrap();
+        assert!(asar_shim_needs_update(&noreversible));
+
+        // The reversible-text runtime still did not hot-sync already-open local
+        // Claude windows such as third-party API setup and DevTools titles.
+        let prehotsync = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;reversibleTextFallback;localeRequestBodySync;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
+        let np17 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
+        let nohotsync = asar_archive::build_patched_asar(
+            &asar0,
+            np17.as_bytes(),
+            CLAUDE_INSPECTOR_SHIM_NAME,
+            prehotsync.as_slice(),
+        )
+        .unwrap();
+        assert!(asar_shim_needs_update(&nohotsync));
+
+        // The local-window hot-sync shim still did not cover Claude's About
+        // BrowserWindow, which uses file://about_window/about.html plus a
+        // hard-coded "About Claude" title outside the normal claude.ai page.
+        let preabout = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;reversibleTextFallback;localeRequestBodySync;localWindowHotSwitchSync;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
+        let np18 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
+        let noabout = asar_archive::build_patched_asar(
+            &asar0,
+            np18.as_bytes(),
+            CLAUDE_INSPECTOR_SHIM_NAME,
+            preabout.as_slice(),
+        )
+        .unwrap();
+        assert!(asar_shim_needs_update(&noabout));
+
+        // The About-window fallback still let Claude's own spa:locale value
+        // override the virtual zh-CN selection, so switching from another
+        // shipped locale back to Chinese could leave menus in that locale.
+        let prewantedlocale = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;reversibleTextFallback;localeRequestBodySync;localWindowHotSwitchSync;aboutClaudeWindowFallback;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
+        let np19 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
+        let nowantedlocale = asar_archive::build_patched_asar(
+            &asar0,
+            np19.as_bytes(),
+            CLAUDE_INSPECTOR_SHIM_NAME,
+            prewantedlocale.as_slice(),
+        )
+        .unwrap();
+        assert!(asar_shim_needs_update(&nowantedlocale));
     }
 }

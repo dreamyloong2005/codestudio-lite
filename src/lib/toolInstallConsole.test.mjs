@@ -54,7 +54,7 @@ test("tool updates require the same confirmation dialog as installs", () => {
   assert.match(dashboard, /async function openToolActionPlan\(tool: ToolStatus,\s*mode:\s*"install"\s*\|\s*"update"\)/);
   assert.doesNotMatch(dashboard, /on:click=\{\(\) => confirmUpdate\(tool\)\}/);
   assert.match(dashboard, /on:click=\{\(\) => openToolActionPlan\(tool,\s*"update"\)\}/);
-  assert.match(dashboard, /installMode === "update"\s*\?\s*planToolUpdate\(tool\.id\)\s*:\s*planToolInstall\(tool\.id\)/);
+  assert.match(dashboard, /installMode === "update"\s*\?\s*planToolUpdate\(planTool\.id\)\s*:\s*planToolInstall\(planTool\.id\)/);
   assert.match(dashboard, /installMode === "update"\s*\?\s*updateTool/);
   assert.match(dashboard, /installMode === "update"\s*\?\s*"toolInstall\.confirmUpdate"/);
 
@@ -76,6 +76,20 @@ test("tool updates require the same confirmation dialog as installs", () => {
     assert.match(dictionary, /"toolInstall\.confirmUpdate"/);
     assert.match(dictionary, /"toolInstall\.updateTitle"/);
   }
+});
+
+test("npm install opens the Node.js install plan", () => {
+  const dashboard = read("src/routes/Dashboard.svelte");
+  const installer = read("src-tauri/src/core/tool_installer.rs");
+  const api = read("src/lib/api.ts");
+
+  assert.match(dashboard, /function installPlanToolFor\(tool: ToolStatus\)/);
+  assert.match(dashboard, /tool\.id !== "npm"/);
+  assert.match(dashboard, /candidate\.id === "node"/);
+  assert.match(dashboard, /planToolInstall\(planTool\.id\)/);
+  assert.match(installer, /"npm" => InstallAction::ProvidedByTool\("node"\)/);
+  assert.match(installer, /provider_command_entry\(definition, &provider_definition\)/);
+  assert.match(api, /npm: \{\s*toolName: "npm",\s*manager: "winget",\s*command: "winget install --id OpenJS\.NodeJS\.LTS/s);
 });
 
 test("tool update dialog does not render backend English plan tips", () => {

@@ -1,8 +1,6 @@
 use crate::core::platform::package;
+use crate::core::types::{ClaudeDesktopInstallKinds, CodexClientInstallKinds, DetectionSnapshot};
 use crate::core::{codex_client, detector};
-use crate::core::types::{
-    ClaudeDesktopInstallKinds, CodexClientInstallKinds, DetectionSnapshot,
-};
 
 #[tauri::command]
 pub async fn detect_environment() -> Result<DetectionSnapshot, String> {
@@ -60,7 +58,8 @@ pub async fn detect_codex_install_kinds() -> Result<CodexClientInstallKinds, Str
 /// the MSIX runtime so the user can see whether the Windows App install path
 /// is available on this machine.
 #[tauri::command]
-pub async fn detect_claude_capabilities() -> Result<Vec<codex_client::CodexClientCapability>, String> {
+pub async fn detect_claude_capabilities() -> Result<Vec<codex_client::CodexClientCapability>, String>
+{
     tauri::async_runtime::spawn_blocking(|| {
         package::probe_msix_capabilities()
             .into_iter()

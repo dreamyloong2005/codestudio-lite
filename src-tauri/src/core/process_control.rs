@@ -25,7 +25,6 @@ pub fn is_process_running(name: &str) -> bool {
     }
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct ProcessTerminationReport {
     pub total: u64,

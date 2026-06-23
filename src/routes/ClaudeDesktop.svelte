@@ -14,6 +14,7 @@
     dismissClaudeDesktopSuccess,
     ensureClaudeDesktopLoaded,
     installOrUpdateClaudeDesktop,
+    openClaudeDesktopStagingPath,
     refreshClaudeDesktop,
     removeClaudeDesktop,
     setClaudeDesktopConfirmUninstall,
@@ -283,6 +284,10 @@
       <button class="primary-button" disabled={!canInstall} on:click={installClaude}>
         <AppIcon name={busyAction === "install" ? "loading" : "install"} size={16} class={busyAction === "install" ? "spin" : ""} />
         {busyAction === "install" ? $t("tool.installing") : $t("common.install")}
+      </button>
+      <button class="secondary-button" on:click={openClaudeDesktopStagingPath}>
+        <AppIcon name="folder" size={16} />
+        {$t("claudeDesktop.openStagingPath")}
       </button>
       <button class="secondary-button" disabled={!canUpdate} on:click={updateClaude}>
         <AppIcon name={busyAction === "update" ? "loading" : "update"} size={16} class={busyAction === "update" ? "spin" : ""} />

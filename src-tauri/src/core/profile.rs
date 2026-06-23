@@ -9,7 +9,6 @@ use crate::core::gateway;
 use crate::core::platform::{
     hidden_command, hidden_command_with_args, package, resolve_command, run_powershell,
 };
-use crate::core::process_control;
 use crate::core::storage;
 use crate::core::tool_registry;
 use crate::core::types::{
@@ -25,12 +24,14 @@ use crate::core::types::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AppConfig {
@@ -92,6 +93,7 @@ enum NativeConfigWriteKind {
 struct UiConfig {
     theme: String,
     language: String,
+    language_set_by_user: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -279,6 +281,7 @@ pub fn update_app_settings(request: UpdateAppSettingsRequest) -> Result<AppSetti
     }
     if let Some(language) = request.language {
         config.ui.language = normalize_language(&language)?;
+        config.ui.language_set_by_user = true;
     }
     if let Some(preserve_codex_official_auth) = request.preserve_codex_official_auth {
         config.security.preserve_codex_official_auth = preserve_codex_official_auth;
@@ -1146,7 +1149,12 @@ pub fn apply_profile(request: ApplyProfileRequest) -> Result<ApplyProfileResult,
             .all(|verified| verified)
     };
     let restart_outcome = if request.restart_after_apply {
-        restart_tool_for_profile(&profile)?
+        restart_tool_for_profile(
+            &profile,
+            RestartContext {
+                sync_claude_vs_code: request.sync_claude_vs_code,
+            },
+        )?
     } else {
         RestartOutcome {
             performed: false,
@@ -1401,8 +1409,14 @@ struct RestartProcessResult {
     paths: Vec<String>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct RestartContext {
+    sync_claude_vs_code: bool,
+}
+
 #[derive(Clone, Copy)]
 enum RestartLaunch {
+    CloseOnly,
     CodexClient,
     Command {
         command: &'static str,
@@ -1422,13 +1436,18 @@ struct RestartTarget {
     label: &'static str,
     process_names: &'static [&'static str],
     command_markers: &'static [&'static str],
+    exclude_command_markers: &'static [&'static str],
     require_window: bool,
+    reject_window: bool,
     launch: RestartLaunch,
 }
 
-fn restart_tool_for_profile(profile: &ProfileDraft) -> Result<RestartOutcome, String> {
+fn restart_tool_for_profile(
+    profile: &ProfileDraft,
+    context: RestartContext,
+) -> Result<RestartOutcome, String> {
     let app = canonical_profile_app(&profile.app);
-    let targets = restart_targets_for_app(&app);
+    let targets = restart_targets_for_app(&app, context);
     if targets.is_empty() {
         return Ok(RestartOutcome {
             performed: false,
@@ -1469,19 +1488,42 @@ fn restart_tool_for_profile(profile: &ProfileDraft) -> Result<RestartOutcome, St
             performed: false,
             message: Some(format!(
                 "{} is not running, so no restart is needed.",
-                restart_category_label(&app)
+                restart_category_label(&app, context)
             )),
         })
     }
 }
 
-fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
+fn restart_targets_for_app(app: &str, context: RestartContext) -> Vec<RestartTarget> {
     const CODEX_DESKTOP_NAMES: &[&str] = &["Codex.exe", "Codex"];
-    const CODEX_CLI_MARKERS: &[&str] = &["@openai/codex", "@openai\\codex"];
+    const CODEX_CLI_NAMES: &[&str] = &["codex.exe", "codex"];
+    const CODEX_CLI_MARKERS: &[&str] = &[
+        "@openai/codex",
+        "@openai\\codex",
+        "node_modules/@openai/codex",
+        "node_modules\\@openai\\codex",
+    ];
     const VSCODE_NAMES: &[&str] = &["Code.exe", "Code", "Code - Insiders.exe", "Code - Insiders"];
+    const CODEX_VSCODE_BACKEND_MARKERS: &[&str] = &[
+        ".vscode/extensions/openai.chatgpt",
+        ".vscode\\extensions\\openai.chatgpt",
+        "codex app-server",
+        "codex.exe app-server",
+    ];
     const CLAUDE_DESKTOP_NAMES: &[&str] = &["Claude.exe", "Claude"];
-    const CLAUDE_CLI_MARKERS: &[&str] =
-        &["@anthropic-ai/claude-code", "@anthropic-ai\\claude-code"];
+    const CLAUDE_CLI_NAMES: &[&str] = &["claude.exe", "claude"];
+    const CLAUDE_CLI_MARKERS: &[&str] = &[
+        "@anthropic-ai/claude-code",
+        "@anthropic-ai\\claude-code",
+        "node_modules/@anthropic-ai/claude-code",
+        "node_modules\\@anthropic-ai\\claude-code",
+    ];
+    const CLAUDE_VSCODE_BACKEND_MARKERS: &[&str] = &[
+        ".vscode/extensions/anthropic.claude-code",
+        ".vscode\\extensions\\anthropic.claude-code",
+        "resources/native-binary/claude",
+        "resources\\native-binary\\claude",
+    ];
     const GEMINI_CLI_NAMES: &[&str] = &["gemini.exe", "gemini"];
     const GEMINI_CLI_MARKERS: &[&str] = &["@google/gemini-cli", "@google\\gemini-cli"];
     const OPENCODE_NAMES: &[&str] = &["opencode.exe", "opencode"];
@@ -1489,31 +1531,33 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
     const OPENCLAW_NAMES: &[&str] = &["openclaw.exe", "openclaw"];
     const HERMES_NAMES: &[&str] = &["hermes.exe", "hermes", "Hermes"];
     const EMPTY: &[&str] = &[];
-
     match app {
         "codex" => vec![
             RestartTarget {
                 label: "Codex",
                 process_names: CODEX_DESKTOP_NAMES,
                 command_markers: EMPTY,
+                exclude_command_markers: EMPTY,
                 require_window: true,
+                reject_window: false,
                 launch: RestartLaunch::CodexClient,
             },
             RestartTarget {
-                label: "Codex VS Code",
-                process_names: VSCODE_NAMES,
-                command_markers: EMPTY,
-                require_window: true,
-                launch: RestartLaunch::ExistingProcessPath {
-                    fallback_command: "code",
-                    hidden: false,
-                },
+                label: "Codex VS Code extension backend",
+                process_names: EMPTY,
+                command_markers: CODEX_VSCODE_BACKEND_MARKERS,
+                exclude_command_markers: EMPTY,
+                require_window: false,
+                reject_window: false,
+                launch: RestartLaunch::CloseOnly,
             },
             RestartTarget {
                 label: "Codex CLI",
-                process_names: EMPTY,
+                process_names: CODEX_CLI_NAMES,
                 command_markers: CODEX_CLI_MARKERS,
+                exclude_command_markers: CODEX_VSCODE_BACKEND_MARKERS,
                 require_window: false,
+                reject_window: true,
                 launch: RestartLaunch::Command {
                     command: "codex",
                     hidden: true,
@@ -1524,7 +1568,9 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
             label: "Claude Desktop",
             process_names: CLAUDE_DESKTOP_NAMES,
             command_markers: EMPTY,
+            exclude_command_markers: EMPTY,
             require_window: true,
+            reject_window: false,
             launch: if cfg!(target_os = "windows") {
                 RestartLaunch::MsixPackage {
                     package_identities: detector::claude_desktop_windows_package_identities(),
@@ -1536,33 +1582,39 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
                 }
             },
         }],
-        "claude" => vec![
-            RestartTarget {
-                label: "Claude VS Code",
-                process_names: VSCODE_NAMES,
-                command_markers: EMPTY,
-                require_window: true,
-                launch: RestartLaunch::ExistingProcessPath {
-                    fallback_command: "code",
-                    hidden: false,
-                },
-            },
-            RestartTarget {
+        "claude" => {
+            let mut targets = vec![RestartTarget {
                 label: "Claude Code",
-                process_names: EMPTY,
+                process_names: CLAUDE_CLI_NAMES,
                 command_markers: CLAUDE_CLI_MARKERS,
+                exclude_command_markers: CLAUDE_VSCODE_BACKEND_MARKERS,
                 require_window: false,
+                reject_window: true,
                 launch: RestartLaunch::Command {
                     command: "claude",
                     hidden: true,
                 },
-            },
-        ],
+            }];
+            if context.sync_claude_vs_code {
+                targets.push(RestartTarget {
+                    label: "Claude VS Code extension backend",
+                    process_names: EMPTY,
+                    command_markers: CLAUDE_VSCODE_BACKEND_MARKERS,
+                    exclude_command_markers: EMPTY,
+                    require_window: false,
+                    reject_window: false,
+                    launch: RestartLaunch::CloseOnly,
+                });
+            }
+            targets
+        }
         "gemini" => vec![RestartTarget {
             label: "Gemini CLI",
             process_names: GEMINI_CLI_NAMES,
             command_markers: GEMINI_CLI_MARKERS,
+            exclude_command_markers: EMPTY,
             require_window: false,
+            reject_window: false,
             launch: RestartLaunch::Command {
                 command: "gemini",
                 hidden: true,
@@ -1572,7 +1624,9 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
             label: "Gemini Code Assist",
             process_names: VSCODE_NAMES,
             command_markers: EMPTY,
+            exclude_command_markers: EMPTY,
             require_window: true,
+            reject_window: false,
             launch: RestartLaunch::ExistingProcessPath {
                 fallback_command: "code",
                 hidden: false,
@@ -1582,7 +1636,9 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
             label: "OpenCode",
             process_names: OPENCODE_NAMES,
             command_markers: OPENCODE_MARKERS,
+            exclude_command_markers: EMPTY,
             require_window: false,
+            reject_window: false,
             launch: RestartLaunch::Command {
                 command: "opencode",
                 hidden: true,
@@ -1592,7 +1648,9 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
             label: "OpenClaw",
             process_names: OPENCLAW_NAMES,
             command_markers: EMPTY,
+            exclude_command_markers: EMPTY,
             require_window: false,
+            reject_window: false,
             launch: RestartLaunch::Command {
                 command: "openclaw",
                 hidden: true,
@@ -1602,7 +1660,9 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
             label: "Hermes",
             process_names: HERMES_NAMES,
             command_markers: EMPTY,
+            exclude_command_markers: EMPTY,
             require_window: false,
+            reject_window: false,
             launch: RestartLaunch::Command {
                 command: "hermes",
                 hidden: true,
@@ -1612,11 +1672,14 @@ fn restart_targets_for_app(app: &str) -> Vec<RestartTarget> {
     }
 }
 
-fn restart_category_label(app: &str) -> &'static str {
+fn restart_category_label(app: &str, context: RestartContext) -> &'static str {
     match app {
-        "codex" => "Codex, Codex CLI, or Codex VS Code",
+        "codex" => "Codex, Codex CLI, or Codex VS Code extension backend",
         "claude-desktop" => "Claude Desktop",
-        "claude" => "Claude Code or Claude VS Code",
+        "claude" if context.sync_claude_vs_code => {
+            "Claude Code or Claude VS Code extension backend"
+        }
+        "claude" => "Claude Code",
         "gemini" => "Gemini CLI",
         "gemini-code-assist" => "Gemini Code Assist",
         "opencode" => "OpenCode",
@@ -1627,6 +1690,16 @@ fn restart_category_label(app: &str) -> &'static str {
 }
 
 fn restart_target_message(target: RestartTarget, result: &RestartProcessResult) -> String {
+    if matches!(target.launch, RestartLaunch::CloseOnly) {
+        if result.forced > 0 {
+            return format!(
+                "Force-closed {} {} process(es); VS Code will restart the backend when needed.",
+                result.forced, target.label
+            );
+        }
+        return format!("Restarted {}.", target.label);
+    }
+
     if result.forced > 0 {
         format!(
             "Force-closed {} {} process(es) and restarted.",
@@ -1639,19 +1712,7 @@ fn restart_target_message(target: RestartTarget, result: &RestartProcessResult) 
 
 fn stop_restart_target_processes(target: RestartTarget) -> Result<RestartProcessResult, String> {
     if cfg!(target_os = "macos") {
-        let report = process_control::close_processes(
-            target.label,
-            target.process_names,
-            target.command_markers,
-            None,
-            8,
-        )?;
-        return Ok(RestartProcessResult {
-            total: report.total,
-            forced: report.forced,
-            remaining: report.remaining,
-            paths: Vec::new(),
-        });
+        return stop_restart_target_processes_macos(target);
     }
 
     if !cfg!(target_os = "windows") {
@@ -1668,7 +1729,9 @@ fn stop_restart_target_processes(target: RestartTarget) -> Result<RestartProcess
 $ErrorActionPreference = 'Stop'
 $Names = {names}
 $Markers = {markers}
+$ExcludeMarkers = {exclude_markers}
 $RequireWindow = ${require_window}
+$RejectWindow = ${reject_window}
 function Test-TargetProcess($process) {{
   $name = [string]$process.Name
   $nameMatch = $false
@@ -1688,17 +1751,31 @@ function Test-TargetProcess($process) {{
       }}
     }}
   }}
-  if (-not ($nameMatch -or $markerMatch)) {{ return $false }}
-  if ($RequireWindow) {{
-    try {{
-      $gp = Get-Process -Id $process.ProcessId -ErrorAction Stop
-      if ($gp.MainWindowHandle -eq 0) {{ return $false }}
-    }} catch {{
-      return $false
-    }}
-  }}
-  return $true
-}}
+	  if (-not ($nameMatch -or $markerMatch)) {{ return $false }}
+	  if ($ExcludeMarkers.Count -gt 0) {{
+	    $haystack = ((([string]$process.CommandLine) + "`n" + ([string]$process.ExecutablePath))).ToLowerInvariant()
+	    foreach ($marker in $ExcludeMarkers) {{
+	      if ($haystack.Contains(([string]$marker).ToLowerInvariant())) {{
+	        return $false
+	      }}
+	    }}
+	  }}
+	  if ($RequireWindow) {{
+	    try {{
+	      $gp = Get-Process -Id $process.ProcessId -ErrorAction Stop
+	      if ($gp.MainWindowHandle -eq 0) {{ return $false }}
+	    }} catch {{
+	      return $false
+	    }}
+	  }}
+	  if ($RejectWindow) {{
+	    try {{
+	      $gp = Get-Process -Id $process.ProcessId -ErrorAction Stop
+	      if ($gp.MainWindowHandle -ne 0) {{ return $false }}
+	    }} catch {{}}
+	  }}
+	  return $true
+	}}
 $procs = @(Get-CimInstance Win32_Process | Where-Object {{ Test-TargetProcess $_ }})
 $targetIds = @($procs | ForEach-Object {{ [int]$_.ProcessId }})
 $paths = @($procs | ForEach-Object {{ [string]$_.ExecutablePath }} | Where-Object {{ $_ }} | Select-Object -Unique)
@@ -1745,11 +1822,17 @@ foreach ($id in $targetIds) {{
 "#,
         names = ps_array(target.process_names),
         markers = ps_array(target.command_markers),
+        exclude_markers = ps_array(target.exclude_command_markers),
         require_window = if target.require_window {
             "true"
         } else {
             "false"
-        }
+        },
+        reject_window = if target.reject_window {
+            "true"
+        } else {
+            "false"
+        },
     );
     let json = run_powershell(&script)?;
     #[derive(Deserialize)]
@@ -1772,6 +1855,7 @@ foreach ($id in $targetIds) {{
 
 fn launch_restart_target(target: RestartTarget, paths: &[String]) -> Result<(), String> {
     match target.launch {
+        RestartLaunch::CloseOnly => Ok(()),
         RestartLaunch::CodexClient => codex_client::launch(),
         RestartLaunch::Command { command, hidden } => launch_process(command, hidden),
         RestartLaunch::ExistingProcessPath {
@@ -1795,6 +1879,189 @@ fn launch_restart_target(target: RestartTarget, paths: &[String]) -> Result<(), 
     }
 }
 
+fn stop_restart_target_processes_macos(
+    target: RestartTarget,
+) -> Result<RestartProcessResult, String> {
+    let target_ids = collect_macos_restart_target_pids(target)?;
+    if target_ids.is_empty() {
+        return Ok(RestartProcessResult {
+            total: 0,
+            forced: 0,
+            remaining: 0,
+            paths: Vec::new(),
+        });
+    }
+
+    let paths = if matches!(target.launch, RestartLaunch::ExistingProcessPath { .. }) {
+        target_ids
+            .iter()
+            .filter_map(|pid| macos_restart_process_executable_path(*pid))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    for name in target.process_names {
+        quit_macos_restart_app_by_name(name);
+    }
+    wait_for_macos_restart_process_exit(&target_ids, Duration::from_secs(8));
+
+    let remaining_after_quit = target_ids
+        .iter()
+        .copied()
+        .filter(|pid| macos_restart_pid_alive(*pid))
+        .collect::<Vec<_>>();
+    for pid in &remaining_after_quit {
+        let _ = hidden_command_with_args("kill", &["-TERM", &pid.to_string()]).output();
+    }
+    wait_for_macos_restart_process_exit(&remaining_after_quit, Duration::from_secs(2));
+
+    let remaining_after_term = remaining_after_quit
+        .iter()
+        .copied()
+        .filter(|pid| macos_restart_pid_alive(*pid))
+        .collect::<Vec<_>>();
+    let mut forced = 0;
+    for pid in &remaining_after_term {
+        let output = hidden_command_with_args("kill", &["-KILL", &pid.to_string()])
+            .output()
+            .map_err(|err| format!("Failed to force-close {}: {err}", target.label))?;
+        if output.status.success() {
+            forced += 1;
+        }
+    }
+    wait_for_macos_restart_process_exit(&remaining_after_term, Duration::from_millis(500));
+
+    let remaining = target_ids
+        .iter()
+        .copied()
+        .filter(|pid| macos_restart_pid_alive(*pid))
+        .count() as u64;
+
+    Ok(RestartProcessResult {
+        total: target_ids.len() as u64,
+        forced,
+        remaining,
+        paths,
+    })
+}
+
+fn collect_macos_restart_target_pids(target: RestartTarget) -> Result<Vec<u32>, String> {
+    let mut ids = BTreeSet::new();
+    for name in target.process_names {
+        let clean_name = macos_restart_process_name(name);
+        if clean_name.is_empty() {
+            continue;
+        }
+        for pid in pgrep_macos_for_restart(&["-x", clean_name.as_str()])? {
+            ids.insert(pid);
+        }
+    }
+    for marker in target.command_markers {
+        if marker.trim().is_empty() {
+            continue;
+        }
+        for pid in pgrep_macos_for_restart(&["-f", marker])? {
+            ids.insert(pid);
+        }
+    }
+
+    let current_pid = std::process::id();
+    Ok(ids
+        .into_iter()
+        .filter(|pid| *pid != current_pid)
+        .filter(|pid| !macos_restart_process_has_any_marker(*pid, target.exclude_command_markers))
+        .collect())
+}
+
+fn pgrep_macos_for_restart(args: &[&str]) -> Result<Vec<u32>, String> {
+    let output = hidden_command_with_args("pgrep", args)
+        .output()
+        .map_err(|err| format!("Failed to run pgrep: {err}"))?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect())
+}
+
+fn macos_restart_process_executable_path(pid: u32) -> Option<String> {
+    let pid = pid.to_string();
+    let output = hidden_command_with_args("ps", &["-p", &pid, "-o", "comm="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+fn macos_restart_process_command_line(pid: u32) -> Option<String> {
+    let pid = pid.to_string();
+    let output = hidden_command_with_args("ps", &["-p", &pid, "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn macos_restart_process_has_any_marker(pid: u32, markers: &[&str]) -> bool {
+    if markers.is_empty() {
+        return false;
+    }
+    let Some(command_line) = macos_restart_process_command_line(pid) else {
+        return false;
+    };
+    let haystack = command_line.to_ascii_lowercase();
+    markers
+        .iter()
+        .map(|marker| marker.to_ascii_lowercase())
+        .any(|marker| haystack.contains(&marker))
+}
+
+fn quit_macos_restart_app_by_name(name: &str) {
+    let clean_name = macos_restart_process_name(name);
+    if clean_name.is_empty() {
+        return;
+    }
+    let script = format!("tell application \"{clean_name}\" to quit");
+    let _ = hidden_command_with_args("osascript", &["-e", &script]).output();
+}
+
+fn wait_for_macos_restart_process_exit(pids: &[u32], timeout: Duration) {
+    let started_at = Instant::now();
+    while started_at.elapsed() < timeout {
+        if pids.iter().all(|pid| !macos_restart_pid_alive(*pid)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn macos_restart_pid_alive(pid: u32) -> bool {
+    let pid = pid.to_string();
+    hidden_command_with_args("kill", &["-0", &pid])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn macos_restart_process_name(name: &str) -> String {
+    name.trim()
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".bat")
+        .trim_end_matches(".ps1")
+        .to_string()
+}
+
 fn launch_process(program: &str, hidden: bool) -> Result<(), String> {
     if cfg!(target_os = "windows") {
         let window_style = if hidden { "Hidden" } else { "Normal" };
@@ -1810,7 +2077,13 @@ fn launch_process(program: &str, hidden: bool) -> Result<(), String> {
         let path = Path::new(program);
         if path.exists() || program == "Claude" {
             let mut command = hidden_command("open");
-            if path.exists() {
+            if let Some(app_bundle) = path
+                .exists()
+                .then(|| macos_app_bundle_for_path(path))
+                .flatten()
+            {
+                command.arg(app_bundle);
+            } else if path.exists() {
                 command.arg(program);
             } else {
                 command.args(["-a", program]);
@@ -1827,6 +2100,18 @@ fn launch_process(program: &str, hidden: bool) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("Failed to start {program}: {err}"))
+}
+
+fn macos_app_bundle_for_path(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|ancestor| {
+            ancestor
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.eq_ignore_ascii_case("app"))
+                .unwrap_or(false)
+        })
+        .map(Path::to_path_buf)
 }
 
 fn ps_array(values: &[&str]) -> String {
@@ -2562,7 +2847,7 @@ fn claude_desktop_config_matches_profile(
         None => claude_desktop_detected_model(&value).is_none(),
     };
     let token_matches = json_string_lookup(&value, &["inferenceGatewayApiKey"])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_config_token_is_present(profile, &token))
         .unwrap_or(false);
 
     json_string_lookup(&value, &["inferenceProvider"]).as_deref() == Some("gateway")
@@ -2839,7 +3124,7 @@ fn codex_direct_config_matches_profile(
         &format!("model_providers.{provider_id}.experimental_bearer_token"),
     )
     .and_then(|item| item.as_str())
-    .map(|token| profile_api_key_matches_config(profile, token))
+    .map(|token| profile_config_token_is_present(profile, token))
     .unwrap_or(false);
     let requires_openai_auth = toml_lookup(
         value,
@@ -2850,7 +3135,7 @@ fn codex_direct_config_matches_profile(
     let auth_token_matches = auth
         .filter(|_| requires_openai_auth)
         .and_then(codex_auth_api_key_from_value)
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_config_token_is_present(profile, &token))
         .unwrap_or(false);
     let token_matches = config_token_matches || auth_token_matches;
 
@@ -2971,7 +3256,7 @@ fn claude_config_matches_profile(value: &serde_json::Value, profile: &ProfileDra
         }
     };
     let token_matches = json_string_lookup(value, &["env", "ANTHROPIC_AUTH_TOKEN"])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_config_token_is_present(profile, &token))
         .unwrap_or(false);
 
     json_string_lookup(value, &["env", "ANTHROPIC_BASE_URL"]).as_deref()
@@ -3007,7 +3292,7 @@ fn gemini_env_matches_profile(env: &HashMap<String, String>, profile: &ProfileDr
     };
     let token_matches = env
         .get("GEMINI_API_KEY")
-        .map(|token| profile_api_key_matches_config(profile, token))
+        .map(|token| profile_config_token_is_present(profile, token))
         .unwrap_or(false);
 
     env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str) == Some(profile.base_url.trim())
@@ -3035,7 +3320,7 @@ fn gemini_code_assist_settings_match_profile(
     }
 
     json_string_lookup(value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_config_token_is_present(profile, &token))
         .unwrap_or(false)
 }
 
@@ -3067,7 +3352,7 @@ fn opencode_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
         None => json_string_lookup(value, &["model"]).is_none(),
     };
     let token_matches = json_string_lookup(value, &["provider", &provider_id, "options", "apiKey"])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_config_token_is_present(profile, &token))
         .unwrap_or(false);
 
     json_string_lookup(value, &["provider", &provider_id, "options", "baseURL"]).as_deref()
@@ -3103,7 +3388,7 @@ fn openclaw_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
         None => true,
     };
     let token_matches = json_string_lookup(value, &["models", "providers", &provider_id, "apiKey"])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_config_token_is_present(profile, &token))
         .unwrap_or(false);
 
     json_string_lookup(value, &["models", "providers", &provider_id, "baseUrl"]).as_deref()
@@ -3134,7 +3419,7 @@ fn hermes_config_matches_profile(value: &serde_norway::Value, profile: &ProfileD
         None => yaml_string_lookup(value, &["model", "default"]).is_none(),
     };
     let token_matches = yaml_string_lookup(value, &["model", "api_key"])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_config_token_is_present(profile, &token))
         .unwrap_or(false);
 
     yaml_string_lookup(value, &["model", "provider"]).as_deref() == Some("custom")
@@ -3175,7 +3460,18 @@ fn hermes_config_has_managed_endpoint(value: &serde_norway::Value) -> bool {
         || yaml_string_lookup(value, &["model", "api_key"]).is_some()
 }
 
-fn profile_api_key_matches_config(profile: &ProfileDraft, token: &str) -> bool {
+fn profile_config_token_is_present(profile: &ProfileDraft, token: &str) -> bool {
+    profile
+        .auth_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|auth_ref| !auth_ref.is_empty())
+        .is_some()
+        && !token.trim().is_empty()
+        && !looks_like_local_gateway_token(token)
+}
+
+fn profile_api_key_matches_config_by_reading_keychain(profile: &ProfileDraft, token: &str) -> bool {
     let Some(auth_ref) = profile.auth_ref.as_deref() else {
         return false;
     };
@@ -3484,6 +3780,7 @@ fn read_app_config() -> Result<AppConfig, String> {
         ui: UiConfig {
             theme: stored.theme,
             language: stored.language,
+            language_set_by_user: stored.language_set_by_user,
         },
         security: SecurityConfig {
             backup_before_write: stored.backup_before_write,
@@ -3500,6 +3797,7 @@ fn write_app_config(config: &AppConfig) -> Result<(), String> {
         active_profiles_by_mode: config.active_profiles_by_mode.clone(),
         theme: config.ui.theme.clone(),
         language: config.ui.language.clone(),
+        language_set_by_user: config.ui.language_set_by_user,
         backup_before_write: config.security.backup_before_write,
         redact_secrets: config.security.redact_secrets,
         confirm_install_commands: config.security.confirm_install_commands,
@@ -4743,6 +5041,26 @@ fn build_claude_desktop_developer_settings_plans(
     Ok(plans)
 }
 
+pub(crate) fn ensure_claude_desktop_developer_mode() -> Result<usize, String> {
+    let paths = app_paths().map_err(|err| err.to_string())?;
+    let desktop_paths = claude_desktop_paths(&paths)?;
+    let plans = build_claude_desktop_developer_settings_plans(&desktop_paths)?;
+    let mut written = 0usize;
+
+    for plan in plans {
+        apply_native_config_write_plan(&plan)?;
+        if !verify_claude_desktop_developer_settings(&plan.path)? {
+            return Err(format!(
+                "Claude Desktop developer settings verification failed at {}",
+                display_path(&plan.path)
+            ));
+        }
+        written += 1;
+    }
+
+    Ok(written)
+}
+
 fn read_file_if_exists(path: &Path) -> Result<String, String> {
     if path.exists() {
         fs::read_to_string(path).map_err(|err| err.to_string())
@@ -5960,7 +6278,7 @@ fn verify_claude_config(path: &Path, profile: &ProfileDraft) -> Result<bool, Str
         }
     };
     let token_matches = json_string_lookup(&value, &["env", "ANTHROPIC_AUTH_TOKEN"])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
     Ok(
@@ -5999,7 +6317,7 @@ fn verify_gemini_env_config(path: &Path, profile: &ProfileDraft) -> Result<bool,
     };
     let token_matches = env
         .get("GEMINI_API_KEY")
-        .map(|token| profile_api_key_matches_config(profile, token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, token))
         .unwrap_or(false);
 
     Ok(
@@ -6047,7 +6365,7 @@ fn verify_opencode_config(path: &Path, profile: &ProfileDraft) -> Result<bool, S
     };
     let token_matches =
         json_string_lookup(&value, &["provider", &provider_id, "options", "apiKey"])
-            .map(|token| profile_api_key_matches_config(profile, &token))
+            .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
             .unwrap_or(false);
 
     Ok(
@@ -6092,7 +6410,7 @@ fn verify_openclaw_config(path: &Path, profile: &ProfileDraft) -> Result<bool, S
     };
     let token_matches =
         json_string_lookup(&value, &["models", "providers", &provider_id, "apiKey"])
-            .map(|token| profile_api_key_matches_config(profile, &token))
+            .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
             .unwrap_or(false);
 
     Ok(
@@ -6132,7 +6450,7 @@ fn verify_hermes_config(path: &Path, profile: &ProfileDraft) -> Result<bool, Str
         None => yaml_string_lookup(&value, &["model", "default"]).is_none(),
     };
     let token_matches = yaml_string_lookup(&value, &["model", "api_key"])
-        .map(|token| profile_api_key_matches_config(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
     Ok(
@@ -8249,6 +8567,7 @@ mod tests {
             ui: UiConfig {
                 theme: "system".to_string(),
                 language: "zh-CN".to_string(),
+                language_set_by_user: false,
             },
             security: SecurityConfig {
                 backup_before_write: true,
@@ -8557,7 +8876,7 @@ requires_openai_auth = true
     }
 
     #[test]
-    fn codex_direct_profile_matches_api_key_from_auth_json() {
+    fn codex_direct_profile_matches_auth_json_without_keychain_read() {
         let value: toml::Value = toml::from_str(
             r#"
 model_provider = "custom"
@@ -8593,17 +8912,50 @@ requires_openai_auth = true
             usage_enabled: false,
             sort_order: 0,
         };
-        credentials::store_keychain_secret(
-            profile.auth_ref.as_deref().expect("auth ref"),
-            "sk-auth-json",
-        )
-        .expect("test key should store");
-
         assert!(codex_direct_config_matches_profile(
             &value,
             Some(&auth),
             &profile
         ));
+    }
+
+    #[test]
+    fn native_profile_matching_does_not_require_reading_keychain_secret() {
+        let value: toml::Value = toml::from_str(
+            r#"
+model_provider = "codestudio-openrouter"
+model = "gpt-5.5"
+
+[model_providers.codestudio-openrouter]
+name = "CodeStudio openrouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "sk-config-token"
+"#,
+        )
+        .expect("config should parse");
+        let profile = ProfileDraft {
+            id: "detected-codex".to_string(),
+            name: "Detected Codex API".to_string(),
+            icon: None,
+            remark: None,
+            app: "codex".to_string(),
+            is_builtin: false,
+            mode: ProviderApplyMode::Config,
+            provider: "openrouter".to_string(),
+            protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
+            model: "gpt-5.5".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            auth_ref: Some("keychain:test/missing-secret/api_key".to_string()),
+            created_at: None,
+            updated_at: None,
+            last_test_status: Some("detected".to_string()),
+            usage_enabled: false,
+            sort_order: 0,
+        };
+
+        assert!(codex_direct_config_matches_profile(&value, None, &profile));
     }
 
     #[test]
@@ -9468,15 +9820,70 @@ experimental_bearer_token = "provider-key"
 
     #[test]
     fn claude_desktop_restart_uses_packaged_app_fallback() {
-        let targets = restart_targets_for_app("claude-desktop");
+        let targets = restart_targets_for_app("claude-desktop", RestartContext::default());
 
         assert_eq!(targets.len(), 1);
+        if cfg!(target_os = "windows") {
+            assert!(matches!(
+                targets[0].launch,
+                RestartLaunch::MsixPackage {
+                    package_identities: &["Claude", "Anthropic.Claude"]
+                }
+            ));
+        } else {
+            assert!(matches!(
+                targets[0].launch,
+                RestartLaunch::ExistingProcessPath {
+                    fallback_command: "Claude",
+                    hidden: false
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn codex_restart_targets_cover_client_cli_and_vscode_backend() {
+        let targets = restart_targets_for_app("codex", RestartContext::default());
+
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].label, "Codex");
+        assert!(matches!(targets[0].launch, RestartLaunch::CodexClient));
+        assert_eq!(targets[1].label, "Codex VS Code extension backend");
+        assert!(matches!(targets[1].launch, RestartLaunch::CloseOnly));
+        assert!(targets[1]
+            .command_markers
+            .iter()
+            .any(|marker| marker.contains("openai.chatgpt")));
+        assert_eq!(targets[2].label, "Codex CLI");
         assert!(matches!(
-            targets[0].launch,
-            RestartLaunch::MsixPackage {
-                package_identities: &["Claude", "Anthropic.Claude"]
+            targets[2].launch,
+            RestartLaunch::Command {
+                command: "codex",
+                hidden: true
             }
         ));
+    }
+
+    #[test]
+    fn claude_restart_targets_only_include_vscode_backend_when_synced() {
+        let base_targets = restart_targets_for_app("claude", RestartContext::default());
+        assert_eq!(base_targets.len(), 1);
+        assert_eq!(base_targets[0].label, "Claude Code");
+
+        let synced_targets = restart_targets_for_app(
+            "claude",
+            RestartContext {
+                sync_claude_vs_code: true,
+            },
+        );
+        assert_eq!(synced_targets.len(), 2);
+        assert_eq!(synced_targets[0].label, "Claude Code");
+        assert_eq!(synced_targets[1].label, "Claude VS Code extension backend");
+        assert!(matches!(synced_targets[1].launch, RestartLaunch::CloseOnly));
+        assert!(synced_targets[1]
+            .command_markers
+            .iter()
+            .any(|marker| marker.contains("anthropic.claude-code")));
     }
 
     #[test]

@@ -14,10 +14,10 @@ const dictionaries: Record<Locale, Record<TranslationKey, string>> = {
   "en-US": enUS
 };
 
-export const supportedLocales: Array<{ code: Locale; labelKey: TranslationKey }> = [
-  { code: "zh-CN", labelKey: "settings.language.zhCN" },
-  { code: "zh-TW", labelKey: "settings.language.zhTW" },
-  { code: "en-US", labelKey: "settings.language.enUS" }
+export const supportedLocales: Array<{ code: Locale; label: string }> = [
+  { code: "zh-CN", label: "简体中文" },
+  { code: "zh-TW", label: "繁體中文" },
+  { code: "en-US", label: "English" }
 ];
 
 function normalizeLocale(value: string | null | undefined): Locale {

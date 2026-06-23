@@ -103,6 +103,7 @@ pub fn gemini_json_headers(api_key: &str) -> String {
     )
 }
 
+#[cfg(windows)]
 #[derive(Debug)]
 struct ParsedUrl {
     secure: bool,
@@ -111,6 +112,7 @@ struct ParsedUrl {
     path: String,
 }
 
+#[cfg(windows)]
 fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     let (scheme, rest) = url
         .split_once("://")

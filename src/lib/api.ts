@@ -256,6 +256,9 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
     command: plan.commands.find((command) => command.stage === "target")?.command ?? plan.command
   });
   markMockToolUpdated(request.toolId);
+  if (request.toolId === "node") {
+    markMockToolUpdated("npm");
+  }
   const currentStatus = mockFindToolStatus(request.toolId);
   writeMockDetectionCache(mockDetection());
   const success = currentStatus?.installState === "installed";
@@ -905,6 +908,12 @@ export async function launchClaudeDesktop(request: ClaudeDesktopLaunchRequest = 
   }
 }
 
+export async function openClaudeDesktopPath(kind: "staging"): Promise<void> {
+  if (isTauri()) {
+    return invoke("open_claude_desktop_path", { kind });
+  }
+}
+
 export async function updateCodexClientSettings(
   request: UpdateCodexClientSettingsRequest
 ): Promise<CodexClientSettings> {
@@ -1499,7 +1508,7 @@ export async function applyProfile(request: ApplyProfileRequest): Promise<ApplyP
   const backupId = new Date().toISOString().replaceAll(":", "-");
   const appliedPath = "~/.codestudio-lite/app_state.sqlite";
   const nativePath = selectedModePreview.writesNativeConfig ? selectedModePreview.nativeDiff?.path ?? null : null;
-  const restartMessage = request.restartAfterApply ? mockRestartMessageForProfile(profile) : null;
+  const restartMessage = request.restartAfterApply ? mockRestartMessageForProfile(profile, syncClaudeVsCode) : null;
   mockBackupSnapshots[backupId] = cloneMockActiveProfilesByMode();
   mockActiveProfilesByMode = setMockActiveProfileForMode(mode, profile);
   const backup: BackupManifest = {
@@ -2469,7 +2478,12 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
       manager: "winget",
       command: "winget install --id Git.Git --exact --accept-source-agreements --accept-package-agreements --disable-interactivity"
     },
-    npm: { toolName: "npm", manager: "dependency", command: "Provided by Node.js LTS", dependency: "Node.js LTS" },
+    npm: {
+      toolName: "npm",
+      manager: "winget",
+      command: "winget install --id OpenJS.NodeJS.LTS --exact --accept-source-agreements --accept-package-agreements --disable-interactivity",
+      dependency: "Node.js LTS"
+    },
     pnpm: { toolName: "pnpm", manager: "npm", command: "npm install -g pnpm" },
     bun: {
       toolName: "Bun",
@@ -2485,9 +2499,7 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
   const missingDependency = definition.manager === "npm" && !mockInstalledToolIds.has("npm");
   const blocker = alreadyInstalled
     ? `${definition.toolName} is already installed.`
-    : definition.dependency
-      ? `${definition.toolName} is provided by ${definition.dependency}; install ${definition.dependency}.`
-      : null;
+    : null;
   const prerequisites: ToolInstallPlan["prerequisites"] = missingDependency
     ? [
         {
@@ -2677,9 +2689,6 @@ function mockUpdateManager(command: string): string {
   }
   if (command.startsWith("powershell ")) {
     return "powershell";
-  }
-  if (command.startsWith("brew ")) {
-    return "homebrew";
   }
   return command ? "shell" : "manual";
 }
@@ -4597,11 +4606,11 @@ function canonicalProfileApp(app: string): string {
   return normalized;
 }
 
-function mockRestartMessageForProfile(profile: ProfileDraft): string {
+function mockRestartMessageForProfile(profile: ProfileDraft, syncClaudeVsCode = false): string {
   const labels: Record<string, string> = {
-    codex: "Codex, Codex CLI, or Codex VS Code",
+    codex: "Codex, Codex CLI, or Codex VS Code extension backend",
     "claude-desktop": "Claude Desktop",
-    claude: "Claude Code or Claude VS Code",
+    claude: syncClaudeVsCode ? "Claude Code or Claude VS Code extension backend" : "Claude Code",
     gemini: "Gemini CLI",
     "gemini-code-assist": "Gemini Code Assist",
     opencode: "OpenCode",

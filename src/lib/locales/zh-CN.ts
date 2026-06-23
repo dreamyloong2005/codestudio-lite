@@ -132,9 +132,6 @@ export const zhCN = {
   "settings.title": "偏好设置",
   "settings.subtitle": "选择界面语言和主题。",
   "settings.language": "语言",
-  "settings.language.zhCN": "简体中文",
-  "settings.language.zhTW": "繁體中文",
-  "settings.language.enUS": "English",
   "settings.theme": "主题",
   "settings.theme.system": "跟随系统",
   "settings.theme.light": "浅色",
@@ -304,7 +301,7 @@ export const zhCN = {
   "profiles.codexOAuthConflictNeedsConfirm": "需要确认",
   "profiles.codexOAuthConflictConfirmed": "已确认",
   "profiles.syncClaudeVsCode": "同步 Claude VS Code 插件",
-  "profiles.syncClaudeVsCodeDescription": "额外写入 ~/.claude/config.json 的插件联动项；应用后请重启 VS Code 或重新打开 Claude Code 面板。",
+  "profiles.syncClaudeVsCodeDescription": "额外写入 ~/.claude/config.json 的插件联动项；应用并重启会在插件后端运行时重启它。",
   "profiles.restartCompleted": "{message}",
   "profiles.restartConfigOnly": "只有配置档案支持应用并重启。",
   "profiles.restartNeedsNativeWrite": "应用并重启需要此 Profile 有原生客户端配置写入。",
@@ -654,6 +651,8 @@ export const zhCN = {
   "codexClient.latestVersion": "最新版本",
   "codexClient.packageSize": "安装包大小",
   "codexClient.planNotLoaded": "尚未加载更新计划",
+  "codexClient.planRefreshing": "正在更新计划...",
+  "codexClient.planStale": "更新计划已变更，正在等待重新计算。",
   "codexClient.upToDate": "已是最新",
   "codexClient.updateAvailable": "可安装/更新",
   "codexClient.stage": "暂存安装包",
@@ -714,7 +713,7 @@ export const zhCN = {
   "codexClient.capabilityHint": "用于判断当前平台安装链路是否可用。",
   "codexClient.capabilityEmpty": "尚未运行能力检查。",
   "codexClient.settingsTitle": "安装设置",
-  "codexClient.settingsHint": "Windows 继续使用镜像源；macOS 可在镜像源和官网源之间切换，更改会自动保存。",
+  "codexClient.settingsHint": "macOS 可在镜像源和官网源之间切换；Windows 只能使用镜像源，更改会自动保存。",
   "codexClient.settingsSaved": "Codex 桌面端设置已保存。",
   "codexClient.source": "更新源",
   "codexClient.source.auto": "自动",
@@ -747,6 +746,7 @@ export const zhCN = {
   "claudeDesktop.uninstallDescription": "CodeStudio Lite 会在需要时关闭 Claude Desktop，然后执行内置卸载动作。",
   "claudeDesktop.confirmUninstall": "确认卸载",
   "claudeDesktop.uninstalling": "卸载中...",
+  "claudeDesktop.openStagingPath": "打开暂存目录",
   "claudeDesktop.launchOptionsTitle": "启动选项",
   "claudeDesktop.patchLaunchDescription": "仅影响本次启动。",
   "claudeDesktop.localizeLaunch": "汉化界面",
@@ -807,4 +807,3 @@ export const zhCN = {
 } as const;
 
 export type TranslationKey = keyof typeof zhCN;
-

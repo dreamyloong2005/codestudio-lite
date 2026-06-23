@@ -1,7 +1,8 @@
 use crate::core::activity_log;
+use crate::core::app_paths::app_paths;
 use crate::core::detector;
 use crate::core::env_health;
-use crate::core::platform::{hidden_command_with_args, resolve_command};
+use crate::core::platform::{hidden_command, hidden_command_with_args, package, resolve_command};
 use crate::core::process_control;
 use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
@@ -9,17 +10,26 @@ use crate::core::types::{
     ToolInstallPlan, ToolInstallPrerequisite, ToolInstallProgress, ToolInstallRequest,
     ToolInstallResult, ToolInstallStageResult, ToolInstallStep, ToolStatus, ToolUninstallRequest,
 };
+use serde::Deserialize;
 use std::env;
-use std::io::Read;
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 enum InstallAction {
     NpmGlobal(&'static str),
     Winget(&'static str),
-    HomebrewFormula(&'static str),
-    HomebrewCask(&'static str),
+    MacosDmgApp {
+        label: &'static str,
+        latest_url: &'static str,
+        app_name: &'static str,
+        bundle_identifier: &'static str,
+        destination: &'static str,
+    },
     // Reserved install action for a bundled PowerShell script. The match arms
     // across plan/run/preview already handle it; no tool currently constructs
     // it, so it is intentionally dead until a tool opts in.
@@ -28,7 +38,7 @@ enum InstallAction {
     ShellScript(&'static str, &'static str),
     InteractiveShellScript(&'static str, &'static str),
     VsCodeExtension(&'static str),
-    ProvidedBy(&'static str),
+    ProvidedByTool(&'static str),
     CustomUnsupported(&'static str),
 }
 
@@ -589,6 +599,14 @@ pub fn repair_tool_path(request: RepairToolPathRequest) -> Result<RepairToolPath
     env_health::repair_tool_path(request)
 }
 
+pub fn open_claude_desktop_path(kind: String) -> Result<(), String> {
+    let target = match kind.as_str() {
+        "staging" => claude_desktop_download_dir()?,
+        _ => return Err("Unknown Claude Desktop path type.".to_string()),
+    };
+    open_folder(&target)
+}
+
 fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
     let tool = ai_tools()
         .into_iter()
@@ -600,7 +618,13 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "claude" => InstallAction::NpmGlobal("@anthropic-ai/claude-code"),
         "claude-desktop" => {
             if cfg!(target_os = "macos") {
-                InstallAction::HomebrewCask("claude")
+                InstallAction::MacosDmgApp {
+                    label: "Claude Desktop official DMG",
+                    latest_url: CLAUDE_DESKTOP_LATEST_MACOS_URL,
+                    app_name: CLAUDE_DESKTOP_MACOS_APP_NAME,
+                    bundle_identifier: CLAUDE_DESKTOP_MACOS_BUNDLE_ID,
+                    destination: CLAUDE_DESKTOP_MACOS_DESTINATION,
+                }
             } else if cfg!(target_os = "windows") {
                 InstallAction::Winget("Anthropic.Claude")
             } else {
@@ -614,11 +638,14 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "openclaw" => InstallAction::NpmGlobal("openclaw"),
         "hermes" => {
             if cfg!(target_os = "macos") {
-                InstallAction::HomebrewFormula("hermes-agent")
+                InstallAction::InteractiveShellScript(
+                    "Hermes official install script",
+                    HERMES_UNIX_INSTALL_COMMAND,
+                )
             } else if cfg!(target_os = "linux") {
                 InstallAction::InteractiveShellScript(
                     "Hermes official install script",
-                    "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+                    HERMES_UNIX_INSTALL_COMMAND,
                 )
             } else {
                 InstallAction::InteractiveShellScript(
@@ -629,7 +656,10 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         }
         "node" => {
             if cfg!(target_os = "macos") {
-                InstallAction::HomebrewFormula("node")
+                InstallAction::InteractiveShellScript(
+                    "Node.js official macOS pkg installer",
+                    NODE_MACOS_OFFICIAL_PKG_INSTALL_COMMAND,
+                )
             } else if cfg!(target_os = "linux") {
                 InstallAction::ShellScript(
                     "NodeSource Node.js LTS install script",
@@ -641,7 +671,10 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         }
         "git" => {
             if cfg!(target_os = "macos") {
-                InstallAction::HomebrewFormula("git")
+                InstallAction::InteractiveShellScript(
+                    "Apple Command Line Tools installer",
+                    GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND,
+                )
             } else if cfg!(target_os = "linux") {
                 InstallAction::ShellScript(
                     "APT Git install command",
@@ -654,17 +687,17 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "pnpm" => InstallAction::NpmGlobal("pnpm"),
         "bun" => {
             if cfg!(target_os = "macos") {
-                InstallAction::HomebrewFormula("bun")
-            } else if cfg!(target_os = "linux") {
-                InstallAction::ShellScript(
+                InstallAction::InteractiveShellScript(
                     "Bun official install script",
-                    "curl -fsSL https://bun.sh/install | bash",
+                    BUN_UNIX_INSTALL_COMMAND,
                 )
+            } else if cfg!(target_os = "linux") {
+                InstallAction::ShellScript("Bun official install script", BUN_UNIX_INSTALL_COMMAND)
             } else {
                 InstallAction::Winget("Oven-sh.Bun")
             }
         }
-        "npm" => InstallAction::ProvidedBy("Node.js LTS"),
+        "npm" => InstallAction::ProvidedByTool("node"),
         _ => InstallAction::CustomUnsupported("No built-in installer is available."),
     };
     Some(InstallDefinition { tool, action })
@@ -781,42 +814,19 @@ fn build_plan(
                 can_install = false;
             }
         }
-        InstallAction::HomebrewFormula(formula) => {
+        InstallAction::MacosDmgApp {
+            label,
+            app_name,
+            destination,
+            ..
+        } => {
             steps.push(ToolInstallStep {
-                label: "Check Homebrew".to_string(),
-                detail: "The local brew command must be available.".to_string(),
+                label: "Fetch official release".to_string(),
+                detail: format!("Read the latest {label} metadata from downloads.claude.ai."),
             });
             steps.push(ToolInstallStep {
-                label: "Install formula".to_string(),
-                detail: format!("Install {formula} through Homebrew."),
-            });
-            steps.push(ToolInstallStep {
-                label: "Verify command".to_string(),
-                detail: format!(
-                    "After installation, run {} --version and refresh the dashboard.",
-                    definition.tool.command
-                ),
-            });
-            if !cfg!(target_os = "macos") {
-                blocker =
-                    Some("The Homebrew installer is currently enabled only on macOS.".to_string());
-                can_install = false;
-            } else if !command_available("brew") {
-                blocker = Some(
-                    "brew is not available. Install Homebrew first, or install manually."
-                        .to_string(),
-                );
-                can_install = false;
-            }
-        }
-        InstallAction::HomebrewCask(cask) => {
-            steps.push(ToolInstallStep {
-                label: "Check Homebrew".to_string(),
-                detail: "The local brew command must be available.".to_string(),
-            });
-            steps.push(ToolInstallStep {
-                label: "Install app".to_string(),
-                detail: format!("Install {cask} through Homebrew Cask."),
+                label: "Install DMG".to_string(),
+                detail: format!("Mount the official DMG and copy {app_name} to {destination}."),
             });
             steps.push(ToolInstallStep {
                 label: "Verify app".to_string(),
@@ -827,12 +837,12 @@ fn build_plan(
             });
             if !cfg!(target_os = "macos") {
                 blocker = Some(
-                    "The Homebrew Cask installer is currently enabled only on macOS.".to_string(),
+                    "The official macOS DMG installer is only supported on macOS.".to_string(),
                 );
                 can_install = false;
-            } else if !command_available("brew") {
+            } else if !macos_dmg_dependencies_available() {
                 blocker = Some(
-                    "brew is not available. Install Homebrew first, or install manually."
+                    "hdiutil or ditto is unavailable, so the official DMG cannot be installed."
                         .to_string(),
                 );
                 can_install = false;
@@ -949,19 +959,61 @@ fn build_plan(
                 can_install = false;
             }
         }
-        InstallAction::ProvidedBy(provider) => {
-            blocker = Some(format!(
-                "{} is provided by {provider}; install {provider}.",
-                definition.tool.name
-            ));
-            can_install = false;
-            steps.push(ToolInstallStep {
-                label: "Install upstream dependency".to_string(),
-                detail: format!(
-                    "{} does not have a standalone installer.",
+        InstallAction::ProvidedByTool(provider_tool_id) => {
+            let provider_definition = install_definition(provider_tool_id);
+            let provider_status = current_status(provider_tool_id).ok();
+            let provider_installed = provider_status
+                .as_ref()
+                .map(|status| status.install_state == InstallState::Installed)
+                .unwrap_or(false);
+            if let Some(provider_definition) = provider_definition.as_ref() {
+                let provider_plan = build_plan(provider_definition, provider_status.as_ref());
+                steps.push(ToolInstallStep {
+                    label: "Install upstream dependency".to_string(),
+                    detail: format!(
+                        "{} is provided by {}; install {} to make {} available.",
+                        definition.tool.name,
+                        provider_definition.tool.name,
+                        provider_definition.tool.name,
+                        definition.tool.name
+                    ),
+                });
+                steps.push(ToolInstallStep {
+                    label: "Verify command".to_string(),
+                    detail: format!(
+                        "After installation, run {} --version and refresh the dashboard.",
+                        definition.tool.command
+                    ),
+                });
+                if provider_installed {
+                    steps.push(ToolInstallStep {
+                        label: "Repair bundled command".to_string(),
+                        detail: format!(
+                            "{} appears to be installed, but {} was not found. Reinstalling {} can repair the bundled command and PATH registration.",
+                            provider_definition.tool.name,
+                            definition.tool.name,
+                            provider_definition.tool.name
+                        ),
+                    });
+                } else if !provider_plan.can_install {
+                    blocker = Some(format!(
+                        "{} is provided by {}, but {} cannot be installed automatically. {}",
+                        definition.tool.name,
+                        provider_definition.tool.name,
+                        provider_definition.tool.name,
+                        provider_plan
+                            .blocker
+                            .unwrap_or_else(|| "No install route is available.".to_string())
+                    ));
+                    can_install = false;
+                }
+            } else {
+                blocker = Some(format!(
+                    "{} is provided by {provider_tool_id}, but that installer is unavailable.",
                     definition.tool.name
-                ),
-            });
+                ));
+                can_install = false;
+            }
         }
         InstallAction::CustomUnsupported(reason) => {
             blocker = Some(reason.to_string());
@@ -975,17 +1027,30 @@ fn build_plan(
         .filter_map(|prerequisite| install_definition(&prerequisite.tool_id))
         .map(|definition| command_entry(&definition, "prerequisite"))
         .collect::<Vec<_>>();
-    commands.push(command_entry(definition, "target"));
+    if let InstallAction::ProvidedByTool(provider_tool_id) = &definition.action {
+        if let Some(provider_definition) = install_definition(provider_tool_id) {
+            commands.push(provider_command_entry(definition, &provider_definition));
+        } else {
+            commands.push(command_entry(definition, "target"));
+        }
+    } else {
+        commands.push(command_entry(definition, "target"));
+    }
     let requires_prerequisites = prerequisites
         .iter()
         .any(|prerequisite| !prerequisite.installed);
-    let requires_admin = action_requires_admin(&definition.action)
+    let requires_admin = action_requires_admin_for_tool(definition)
         || prerequisites
             .iter()
             .filter(|prerequisite| !prerequisite.installed)
             .filter_map(|prerequisite| install_definition(&prerequisite.tool_id))
             .any(|definition| action_requires_admin(&definition.action));
-    let interactive = action_interactive(&definition.action);
+    let interactive = action_interactive_for_tool(definition)
+        || prerequisites
+            .iter()
+            .filter(|prerequisite| !prerequisite.installed)
+            .filter_map(|prerequisite| install_definition(&prerequisite.tool_id))
+            .any(|definition| action_interactive(&definition.action));
 
     ToolInstallPlan {
         tool_id: definition.tool.id.to_string(),
@@ -1104,11 +1169,47 @@ fn command_entry(definition: &InstallDefinition, stage: &str) -> ToolInstallComm
     }
 }
 
+fn provider_command_entry(
+    target_definition: &InstallDefinition,
+    provider_definition: &InstallDefinition,
+) -> ToolInstallCommand {
+    ToolInstallCommand {
+        tool_id: target_definition.tool.id.to_string(),
+        tool_name: target_definition.tool.name.to_string(),
+        stage: "target".to_string(),
+        manager: manager_label(&provider_definition.action).to_string(),
+        command: command_preview(&provider_definition.action),
+        requires_admin: action_requires_admin(&provider_definition.action),
+        interactive: action_interactive(&provider_definition.action),
+    }
+}
+
+fn provider_definition_for_action(action: &InstallAction) -> Option<InstallDefinition> {
+    match action {
+        InstallAction::ProvidedByTool(provider_tool_id) => install_definition(provider_tool_id),
+        _ => None,
+    }
+}
+
+fn action_requires_admin_for_tool(definition: &InstallDefinition) -> bool {
+    provider_definition_for_action(&definition.action)
+        .as_ref()
+        .map(|provider| action_requires_admin(&provider.action))
+        .unwrap_or_else(|| action_requires_admin(&definition.action))
+}
+
+fn action_interactive_for_tool(definition: &InstallDefinition) -> bool {
+    provider_definition_for_action(&definition.action)
+        .as_ref()
+        .map(|provider| action_interactive(&provider.action))
+        .unwrap_or_else(|| action_interactive(&definition.action))
+}
+
 fn dependency_satisfied(action: &InstallAction) -> bool {
     match action {
         InstallAction::NpmGlobal(_) => command_available("npm"),
-        InstallAction::HomebrewFormula(_) | InstallAction::HomebrewCask(_) => {
-            command_available("brew")
+        InstallAction::MacosDmgApp { .. } => {
+            cfg!(target_os = "macos") && macos_dmg_dependencies_available()
         }
         InstallAction::PowerShellScript(_, _) => powershell_available(),
         InstallAction::ShellScript(_, _) | InstallAction::InteractiveShellScript(_, _) => {
@@ -1140,12 +1241,19 @@ fn run_install_action(
             ],
             progress,
         ),
-        InstallAction::HomebrewFormula(formula) => {
-            run_action_command("brew", &["install", formula], progress)
-        }
-        InstallAction::HomebrewCask(cask) => {
-            run_action_command("brew", &["install", "--cask", cask], progress)
-        }
+        InstallAction::MacosDmgApp {
+            latest_url,
+            app_name,
+            bundle_identifier,
+            destination,
+            ..
+        } => run_macos_dmg_app_install(
+            latest_url,
+            app_name,
+            bundle_identifier,
+            Path::new(destination),
+            progress,
+        ),
         InstallAction::PowerShellScript(_, script) => run_action_command(
             "powershell",
             &[
@@ -1166,7 +1274,13 @@ fn run_install_action(
         InstallAction::VsCodeExtension(extension_id) => {
             run_action_command("code", &["--install-extension", extension_id], progress)
         }
-        InstallAction::ProvidedBy(_) | InstallAction::CustomUnsupported(_) => {
+        InstallAction::ProvidedByTool(provider_tool_id) => {
+            let provider_definition = install_definition(provider_tool_id).ok_or_else(|| {
+                format!("Provider tool '{provider_tool_id}' has no executable install action.")
+            })?;
+            run_install_action(&provider_definition.action, progress)
+        }
+        InstallAction::CustomUnsupported(_) => {
             Err("This tool has no executable standalone install action.".to_string())
         }
     }
@@ -1198,12 +1312,19 @@ fn run_update_action(
             ],
             progress,
         ),
-        InstallAction::HomebrewFormula(formula) => {
-            run_action_command("brew", &["upgrade", formula], progress)
-        }
-        InstallAction::HomebrewCask(cask) => {
-            run_action_command("brew", &["upgrade", "--cask", cask], progress)
-        }
+        InstallAction::MacosDmgApp {
+            latest_url,
+            app_name,
+            bundle_identifier,
+            destination,
+            ..
+        } => run_macos_dmg_app_install(
+            latest_url,
+            app_name,
+            bundle_identifier,
+            Path::new(destination),
+            progress,
+        ),
         InstallAction::PowerShellScript(_, script) => run_action_command(
             "powershell",
             &[
@@ -1226,7 +1347,13 @@ fn run_update_action(
             &["--install-extension", extension_id, "--force"],
             progress,
         ),
-        InstallAction::ProvidedBy(_) | InstallAction::CustomUnsupported(_) => {
+        InstallAction::ProvidedByTool(provider_tool_id) => {
+            let provider_definition = install_definition(provider_tool_id).ok_or_else(|| {
+                format!("Provider tool '{provider_tool_id}' has no executable update action.")
+            })?;
+            run_update_action(&provider_definition.action, progress)
+        }
+        InstallAction::CustomUnsupported(_) => {
             Err("This tool has no executable standalone update action.".to_string())
         }
     }
@@ -1267,12 +1394,17 @@ fn run_uninstall_action_for_tool(
             &["uninstall", "--id", package_id, "--exact"],
             progress,
         ),
-        InstallAction::HomebrewCask(cask) => {
-            run_action_command("brew", &["uninstall", "--cask", cask], progress)
-        }
-        InstallAction::HomebrewFormula(formula) => {
-            run_action_command("brew", &["uninstall", formula], progress)
-        }
+        InstallAction::MacosDmgApp {
+            app_name,
+            bundle_identifier,
+            destination,
+            ..
+        } => run_macos_app_uninstall(
+            app_name,
+            bundle_identifier,
+            Path::new(destination),
+            progress,
+        ),
         InstallAction::VsCodeExtension(extension_id) => {
             run_action_command("code", &["--uninstall-extension", extension_id], progress)
         }
@@ -1282,7 +1414,7 @@ fn run_uninstall_action_for_tool(
         InstallAction::PowerShellScript(_, _)
         | InstallAction::ShellScript(_, _)
         | InstallAction::InteractiveShellScript(_, _)
-        | InstallAction::ProvidedBy(_)
+        | InstallAction::ProvidedByTool(_)
         | InstallAction::CustomUnsupported(_) => {
             Err("This tool has no executable standalone uninstall action.".to_string())
         }
@@ -1291,6 +1423,17 @@ fn run_uninstall_action_for_tool(
 
 const CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND: &str =
     "Download and run the latest Claude Desktop installer from downloads.claude.ai";
+
+const CLAUDE_DESKTOP_LATEST_MACOS_URL: &str =
+    "https://downloads.claude.ai/releases/darwin/universal/.latest";
+const CLAUDE_DESKTOP_MACOS_APP_NAME: &str = "Claude.app";
+const CLAUDE_DESKTOP_MACOS_BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
+const CLAUDE_DESKTOP_MACOS_DESTINATION: &str = "/Applications/Claude.app";
+const HERMES_UNIX_INSTALL_COMMAND: &str =
+    "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash";
+const BUN_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://bun.sh/install | bash";
+const GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND: &str = "xcode-select --install";
+const NODE_MACOS_OFFICIAL_PKG_INSTALL_COMMAND: &str = r#"set -e; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"lts":"[^"]*"' | sed -E 's/.*"version":"([^"]+)".*/\1/')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /"#;
 
 const CLAUDE_DESKTOP_WINDOWS_UPDATE_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
@@ -1314,8 +1457,10 @@ if ($item.Length -le 0) {
 }
 Write-Output "Starting Claude Desktop installer"
 $process = Start-Process -FilePath $target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($target)) -Wait -PassThru
-if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {
-  exit $process.ExitCode
+$exitCode = $process.ExitCode
+Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+if ($null -ne $exitCode -and $exitCode -ne 0) {
+  exit $exitCode
 }
 "#;
 
@@ -1398,6 +1543,161 @@ fn run_claude_desktop_exe_uninstall(
     )
 }
 
+#[derive(Debug, Deserialize)]
+struct ClaudeDesktopLatestMetadata {
+    version: String,
+    hash: String,
+}
+
+fn run_macos_dmg_app_install(
+    latest_url: &str,
+    app_name: &str,
+    bundle_identifier: &str,
+    destination: &Path,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(failed_output(
+            "The official macOS DMG installer is only supported on macOS.",
+        ));
+    }
+    if !macos_dmg_dependencies_available() {
+        return Ok(failed_output(
+            "hdiutil or ditto is unavailable, so the official DMG cannot be installed.",
+        ));
+    }
+
+    emit_install_progress(
+        progress,
+        "stdout",
+        "Reading Claude Desktop official release metadata...\n".to_string(),
+        None,
+        false,
+    );
+    let latest = match read_claude_desktop_latest_metadata(latest_url) {
+        Ok(latest) => latest,
+        Err(err) => return Ok(failed_output_with_progress(&err, progress)),
+    };
+    let url = claude_desktop_macos_dmg_url(&latest.version, &latest.hash);
+    let dmg_path = match claude_desktop_download_path(&latest.version) {
+        Ok(path) => path,
+        Err(err) => return Ok(failed_output_with_progress(&err, progress)),
+    };
+
+    emit_install_progress(
+        progress,
+        "stdout",
+        format!(
+            "Downloading Claude Desktop {} official DMG...\n",
+            latest.version
+        ),
+        None,
+        false,
+    );
+    if let Err(err) = download_url_to_file(&url, &dmg_path, progress) {
+        return Ok(failed_output_with_progress(&err, progress));
+    }
+
+    emit_install_progress(
+        progress,
+        "stdout",
+        format!("Installing {app_name} to {}...\n", destination.display()),
+        None,
+        false,
+    );
+    let report =
+        match package::install_macos_dmg(&dmg_path, app_name, destination, Some(bundle_identifier))
+        {
+            Ok(report) => report,
+            Err(err) => return Ok(failed_output_with_progress(&err, progress)),
+        };
+    for note in report.notes {
+        emit_install_progress(progress, "stdout", format!("{note}\n"), None, false);
+    }
+    let installed = report.installed.is_some();
+    let mut stdout_tail = format!(
+        "Claude Desktop {} official DMG installed to {}.",
+        latest.version,
+        destination.display()
+    );
+    if installed {
+        match cleanup_claude_desktop_download_cache(&dmg_path) {
+            Ok(Some(note)) => {
+                emit_install_progress(progress, "stdout", format!("{note}\n"), None, false);
+                stdout_tail = format!("{stdout_tail} {note}");
+            }
+            Ok(None) => {}
+            Err(err) => {
+                let note = format!("Failed to clean Claude Desktop download cache: {err}");
+                emit_install_progress(progress, "stderr", format!("{note}\n"), None, false);
+                stdout_tail = format!("{stdout_tail} {note}");
+            }
+        }
+    }
+    emit_install_progress(
+        progress,
+        "status",
+        String::new(),
+        Some(if installed { 0 } else { 1 }),
+        true,
+    );
+    Ok(InstallCommandOutput {
+        success: installed,
+        exit_code: Some(if installed { 0 } else { 1 }),
+        stdout_tail,
+        stderr_tail: if installed {
+            String::new()
+        } else {
+            "Claude Desktop app was copied, but verification did not find it.".to_string()
+        },
+        missing_command: None,
+    })
+}
+
+fn run_macos_app_uninstall(
+    app_name: &str,
+    bundle_identifier: &str,
+    destination: &Path,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(failed_output(
+            "macOS app uninstall is only supported on macOS.",
+        ));
+    }
+    let candidates = macos_app_candidates(destination, app_name);
+    let app = package::detect_macos_app(&candidates, Some(bundle_identifier))
+        .or_else(|| package::detect_macos_app(&candidates, None));
+    let path = app
+        .map(|app| PathBuf::from(app.path))
+        .unwrap_or_else(|| destination.to_path_buf());
+    emit_install_progress(
+        progress,
+        "stdout",
+        format!("Removing {}...\n", path.display()),
+        None,
+        false,
+    );
+    let result = if path.exists() {
+        fs::remove_dir_all(&path).map_err(|err| format!("Failed to remove macOS app bundle: {err}"))
+    } else {
+        Ok(())
+    };
+    match result {
+        Ok(()) => {
+            emit_install_progress(progress, "status", String::new(), Some(0), true);
+            Ok(InstallCommandOutput {
+                success: true,
+                exit_code: Some(0),
+                stdout_tail: format!("Removed {}.", path.display()),
+                stderr_tail: String::new(),
+                missing_command: None,
+            })
+        }
+        Err(err) => Ok(failed_output_with_progress(&err, progress)),
+    }
+}
+
 fn current_status(tool_id: &str) -> Result<ToolStatus, String> {
     let snapshot = detector::detect_environment()?;
     snapshot
@@ -1463,6 +1763,221 @@ fn powershell_available() -> bool {
     .output()
     .map(|output| output.status.success())
     .unwrap_or(false)
+}
+
+fn command_resolves(command: &str) -> bool {
+    resolve_command(command).is_some()
+}
+
+fn macos_dmg_dependencies_available() -> bool {
+    command_resolves("hdiutil") && command_resolves("ditto")
+}
+
+fn failed_output(message: impl Into<String>) -> InstallCommandOutput {
+    InstallCommandOutput {
+        success: false,
+        exit_code: Some(1),
+        stdout_tail: String::new(),
+        stderr_tail: message.into(),
+        missing_command: None,
+    }
+}
+
+fn failed_output_with_progress(
+    message: &str,
+    progress: Option<&InstallProgressContext>,
+) -> InstallCommandOutput {
+    emit_install_progress(progress, "stderr", format!("{message}\n"), None, false);
+    emit_install_progress(progress, "status", String::new(), Some(1), true);
+    failed_output(message)
+}
+
+fn read_claude_desktop_latest_metadata(url: &str) -> Result<ClaudeDesktopLatestMetadata, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent("CodeStudio Lite")
+        .build()
+        .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|err| format!("Failed to read Claude Desktop latest metadata: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to read Claude Desktop latest metadata: HTTP {}",
+            response.status()
+        ));
+    }
+    let latest = response
+        .json::<ClaudeDesktopLatestMetadata>()
+        .map_err(|err| format!("Failed to parse Claude Desktop latest metadata: {err}"))?;
+    if latest.version.trim().is_empty() || latest.hash.trim().is_empty() {
+        return Err("Claude Desktop latest metadata is incomplete.".to_string());
+    }
+    Ok(latest)
+}
+
+fn claude_desktop_macos_dmg_url(version: &str, hash: &str) -> String {
+    format!("https://downloads.claude.ai/releases/darwin/universal/{version}/Claude-{hash}.dmg")
+}
+
+fn claude_desktop_download_path(version: &str) -> Result<PathBuf, String> {
+    Ok(claude_desktop_download_dir()?.join(format!("Claude-{version}.dmg")))
+}
+
+fn claude_desktop_download_dir() -> Result<PathBuf, String> {
+    let paths = app_paths().map_err(|err| format!("Failed to resolve app paths: {err}"))?;
+    let dir = paths.downloads_dir.join("claude-desktop");
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("Failed to create download directory: {err}"))?;
+    Ok(dir)
+}
+
+fn cleanup_claude_desktop_download_cache(installed_dmg: &Path) -> Result<Option<String>, String> {
+    let dir = claude_desktop_download_dir()?;
+    let mut removed = false;
+    if installed_dmg.exists() {
+        fs::remove_file(installed_dmg).map_err(|err| {
+            format!(
+                "Failed to remove downloaded DMG {}: {err}",
+                installed_dmg.display()
+            )
+        })?;
+        removed = true;
+    }
+    let partial = installed_dmg.with_extension("download");
+    if partial.exists() {
+        fs::remove_file(&partial).map_err(|err| {
+            format!(
+                "Failed to remove partial download {}: {err}",
+                partial.display()
+            )
+        })?;
+        removed = true;
+    }
+    let empty = fs::read_dir(&dir)
+        .map_err(|err| {
+            format!(
+                "Failed to inspect download directory {}: {err}",
+                dir.display()
+            )
+        })?
+        .next()
+        .is_none();
+    if empty {
+        let _ = fs::remove_dir(&dir);
+    }
+    Ok(removed.then(|| "Removed Claude Desktop downloaded installer cache.".to_string()))
+}
+
+fn download_url_to_file(
+    url: &str,
+    path: &Path,
+    progress: Option<&InstallProgressContext>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create download directory: {err}"))?;
+    }
+    let temp = path.with_extension("download");
+    if temp.exists() {
+        let _ = fs::remove_file(&temp);
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .user_agent("CodeStudio Lite")
+        .build()
+        .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
+    let mut response = client
+        .get(url)
+        .send()
+        .map_err(|err| format!("Failed to download Claude Desktop DMG: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to download Claude Desktop DMG: HTTP {}",
+            response.status()
+        ));
+    }
+    let total = response.content_length();
+    let mut file =
+        fs::File::create(&temp).map_err(|err| format!("Failed to create download file: {err}"))?;
+    let mut downloaded = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut last_emit = Instant::now() - Duration::from_secs(2);
+    loop {
+        let size = response
+            .read(&mut buffer)
+            .map_err(|err| format!("Failed while downloading Claude Desktop DMG: {err}"))?;
+        if size == 0 {
+            break;
+        }
+        file.write_all(&buffer[..size])
+            .map_err(|err| format!("Failed to write Claude Desktop DMG: {err}"))?;
+        downloaded += size as u64;
+        if last_emit.elapsed() >= Duration::from_millis(750) {
+            emit_install_progress(
+                progress,
+                "stdout",
+                format_download_progress(downloaded, total),
+                None,
+                false,
+            );
+            last_emit = Instant::now();
+        }
+    }
+    file.flush()
+        .map_err(|err| format!("Failed to finish Claude Desktop DMG download: {err}"))?;
+    fs::rename(&temp, path).map_err(|err| format!("Failed to save Claude Desktop DMG: {err}"))?;
+    emit_install_progress(
+        progress,
+        "stdout",
+        format_download_progress(downloaded, total),
+        None,
+        false,
+    );
+    Ok(())
+}
+
+fn format_download_progress(downloaded: u64, total: Option<u64>) -> String {
+    match total {
+        Some(total) if total > 0 => format!(
+            "Downloaded {} / {} MB\n",
+            downloaded / 1_000_000,
+            total / 1_000_000
+        ),
+        _ => format!("Downloaded {} MB\n", downloaded / 1_000_000),
+    }
+}
+
+fn macos_app_candidates(destination: &Path, app_name: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![destination.to_path_buf()];
+    if let Ok(paths) = app_paths() {
+        candidates.push(paths.home_dir.join("Applications").join(app_name));
+    }
+    candidates
+}
+
+fn open_folder(path: &Path) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        hidden_command("explorer.exe")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("Failed to open path: {err}"))
+    } else if cfg!(target_os = "macos") {
+        hidden_command("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("Failed to open path: {err}"))
+    } else {
+        hidden_command("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("Failed to open path: {err}"))
+    }
 }
 
 fn run_action_command(
@@ -1727,12 +2242,14 @@ fn manager_label(action: &InstallAction) -> &'static str {
     match action {
         InstallAction::NpmGlobal(_) => "npm",
         InstallAction::Winget(_) => "winget",
-        InstallAction::HomebrewFormula(_) | InstallAction::HomebrewCask(_) => "homebrew",
+        InstallAction::MacosDmgApp { .. } => "official-dmg",
         InstallAction::PowerShellScript(_, _) => "powershell",
         InstallAction::ShellScript(_, _) => "shell",
         InstallAction::InteractiveShellScript(_, _) => "terminal",
         InstallAction::VsCodeExtension(_) => "vscode",
-        InstallAction::ProvidedBy(_) => "dependency",
+        InstallAction::ProvidedByTool(provider_tool_id) => install_definition(provider_tool_id)
+            .map(|definition| manager_label(&definition.action))
+            .unwrap_or("dependency"),
         InstallAction::CustomUnsupported(_) => "manual",
     }
 }
@@ -1743,8 +2260,9 @@ fn command_preview(action: &InstallAction) -> String {
         InstallAction::Winget(package_id) => {
             format!("winget install --id {package_id} --exact --accept-source-agreements --accept-package-agreements --disable-interactivity")
         }
-        InstallAction::HomebrewFormula(formula) => format!("brew install {formula}"),
-        InstallAction::HomebrewCask(cask) => format!("brew install --cask {cask}"),
+        InstallAction::MacosDmgApp { label, .. } => {
+            format!("Download and install the latest {label} from downloads.claude.ai")
+        }
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
         }
@@ -1753,16 +2271,15 @@ fn command_preview(action: &InstallAction) -> String {
         InstallAction::VsCodeExtension(extension_id) => {
             format!("code --install-extension {extension_id}")
         }
-        InstallAction::ProvidedBy(provider) => format!("Provided by {provider}"),
+        InstallAction::ProvidedByTool(provider_tool_id) => install_definition(provider_tool_id)
+            .map(|definition| command_preview(&definition.action))
+            .unwrap_or_else(|| format!("Provided by {provider_tool_id}")),
         InstallAction::CustomUnsupported(reason) => reason.to_string(),
     }
 }
 
 fn update_supported(action: &InstallAction) -> bool {
-    !matches!(
-        action,
-        InstallAction::ProvidedBy(_) | InstallAction::CustomUnsupported(_)
-    )
+    !matches!(action, InstallAction::CustomUnsupported(_))
 }
 
 fn update_command_preview(action: &InstallAction) -> String {
@@ -1771,8 +2288,9 @@ fn update_command_preview(action: &InstallAction) -> String {
         InstallAction::Winget(package_id) => {
             format!("winget upgrade --id {package_id} --exact --accept-source-agreements --accept-package-agreements --disable-interactivity")
         }
-        InstallAction::HomebrewFormula(formula) => format!("brew upgrade {formula}"),
-        InstallAction::HomebrewCask(cask) => format!("brew upgrade --cask {cask}"),
+        InstallAction::MacosDmgApp { label, .. } => {
+            format!("Download and install the latest {label} from downloads.claude.ai")
+        }
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
         }
@@ -1781,7 +2299,9 @@ fn update_command_preview(action: &InstallAction) -> String {
         InstallAction::VsCodeExtension(extension_id) => {
             format!("code --install-extension {extension_id} --force")
         }
-        InstallAction::ProvidedBy(provider) => format!("Provided by {provider}"),
+        InstallAction::ProvidedByTool(provider_tool_id) => install_definition(provider_tool_id)
+            .map(|definition| update_command_preview(&definition.action))
+            .unwrap_or_else(|| format!("Provided by {provider_tool_id}")),
         InstallAction::CustomUnsupported(reason) => reason.to_string(),
     }
 }
@@ -1798,8 +2318,7 @@ fn uninstall_supported_for_tool(tool_id: &str, action: &InstallAction) -> bool {
         action,
         InstallAction::NpmGlobal(_)
             | InstallAction::Winget(_)
-            | InstallAction::HomebrewFormula(_)
-            | InstallAction::HomebrewCask(_)
+            | InstallAction::MacosDmgApp { .. }
             | InstallAction::VsCodeExtension(_)
     )
 }
@@ -1820,15 +2339,16 @@ fn uninstall_command_preview_for_tool(_tool_id: &str, action: &InstallAction) ->
         InstallAction::Winget(package_id) => {
             format!("winget uninstall --id {package_id} --exact")
         }
-        InstallAction::HomebrewFormula(formula) => format!("brew uninstall {formula}"),
-        InstallAction::HomebrewCask(cask) => format!("brew uninstall --cask {cask}"),
+        InstallAction::MacosDmgApp { destination, .. } => {
+            format!("Remove macOS app bundle at {destination}")
+        }
         InstallAction::VsCodeExtension(extension_id) => {
             format!("code --uninstall-extension {extension_id}")
         }
         InstallAction::PowerShellScript(_, _)
         | InstallAction::ShellScript(_, _)
         | InstallAction::InteractiveShellScript(_, _)
-        | InstallAction::ProvidedBy(_)
+        | InstallAction::ProvidedByTool(_)
         | InstallAction::CustomUnsupported(_) => {
             "No built-in uninstall action is available.".to_string()
         }
@@ -1838,6 +2358,7 @@ fn uninstall_command_preview_for_tool(_tool_id: &str, action: &InstallAction) ->
 fn action_requires_admin(action: &InstallAction) -> bool {
     match action {
         InstallAction::Winget(_) => true,
+        InstallAction::MacosDmgApp { destination, .. } => destination.starts_with("/Applications/"),
         InstallAction::ShellScript(_, script) => script.contains("sudo "),
         InstallAction::InteractiveShellScript(_, script) => script.contains("sudo "),
         _ => false,
@@ -1879,7 +2400,11 @@ struct UpdateProcessTargets {
 fn update_process_targets(tool_id: &str) -> UpdateProcessTargets {
     match tool_id {
         "codex" => UpdateProcessTargets {
-            process_names: if cfg!(target_os = "windows") { Vec::new() } else { vec!["codex"] },
+            process_names: if cfg!(target_os = "windows") {
+                Vec::new()
+            } else {
+                vec!["codex"]
+            },
             command_line_markers: vec!["@openai/codex"],
         },
         "codex-vscode" | "claude-vscode" | "gemini-code-assist" => UpdateProcessTargets {
@@ -1891,7 +2416,11 @@ fn update_process_targets(tool_id: &str) -> UpdateProcessTargets {
             command_line_markers: Vec::new(),
         },
         "claude" => UpdateProcessTargets {
-            process_names: if cfg!(target_os = "windows") { Vec::new() } else { vec!["claude"] },
+            process_names: if cfg!(target_os = "windows") {
+                Vec::new()
+            } else {
+                vec!["claude"]
+            },
             command_line_markers: vec!["@anthropic-ai/claude-code"],
         },
         "gemini" => UpdateProcessTargets {
@@ -1967,8 +2496,14 @@ mod tests {
     fn npm_is_provided_by_node() {
         let definition = install_definition("npm").expect("definition");
         let plan = build_plan(&definition, None);
-        assert!(!plan.can_install);
-        assert!(plan.blocker.unwrap().contains("Node.js"));
+        assert!(plan.can_install);
+        assert!(plan.command.contains("OpenJS.NodeJS.LTS") || plan.command.contains("nodejs.org"));
+        assert_eq!(plan.commands[0].tool_id, "npm");
+        assert_eq!(plan.commands[0].tool_name, "npm");
+        if cfg!(target_os = "macos") {
+            assert!(plan.interactive);
+            assert!(plan.command.contains("https://nodejs.org/dist/index.json"));
+        }
     }
 
     #[test]
@@ -1987,22 +2522,73 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_actions_render_expected_commands() {
+    fn macos_install_routes_do_not_use_brew_commands() {
+        let source = include_str!("tool_installer.rs");
+        let registry = include_str!("tool_registry.rs");
+        let detector = include_str!("detector.rs");
+        let brew = ["br", "ew"].concat();
+        let formula_variant = ["Home", "brew", "Formula"].concat();
+
+        assert!(!source.contains(&formula_variant));
+        assert!(!source.contains(&format!("{brew} install")));
+        assert!(!source.contains(&format!("{brew} upgrade")));
+        assert!(!source.contains(&format!("{brew} uninstall")));
+        assert!(!registry.contains(&format!("{brew} install")));
+        assert!(!detector.contains(&format!("{brew} upgrade")));
+        assert!(source.contains("https://nodejs.org/dist/index.json"));
+        assert!(source.contains("https://bun.sh/install"));
+        assert!(source.contains("https://hermes-agent.nousresearch.com/install.sh"));
+        assert!(source.contains("xcode-select --install"));
+    }
+
+    #[test]
+    fn official_script_actions_render_expected_commands() {
         assert_eq!(
-            command_preview(&InstallAction::HomebrewFormula("node")),
-            "brew install node"
+            command_preview(&InstallAction::InteractiveShellScript(
+                "Bun official install script",
+                BUN_UNIX_INSTALL_COMMAND,
+            )),
+            BUN_UNIX_INSTALL_COMMAND
         );
         assert_eq!(
-            command_preview(&InstallAction::HomebrewCask("claude")),
-            "brew install --cask claude"
+            command_preview(&InstallAction::InteractiveShellScript(
+                "Apple Command Line Tools installer",
+                GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND,
+            )),
+            GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND
         );
+    }
+
+    #[test]
+    fn claude_desktop_macos_uses_official_dmg_not_homebrew_cask() {
+        let source = include_str!("tool_installer.rs");
+        let registry = include_str!("tool_registry.rs");
+        let detector = include_str!("detector.rs");
+        let cask_variant = ["Home", "brew", "Cask(\"", "cla", "ude\")"].concat();
+        let cask_install = ["br", "ew install --", "cask ", "cla", "ude"].concat();
+        let cask_upgrade = ["br", "ew upgrade --", "cask ", "cla", "ude"].concat();
+        let cask_uninstall = ["br", "ew uninstall --", "cask ", "cla", "ude"].concat();
+        let cask_detection = ["\"claude-desktop\" => Some(\"", "cla", "ude\")"].concat();
+
+        assert!(source.contains("InstallAction::MacosDmgApp"));
+        assert!(source.contains("CLAUDE_DESKTOP_LATEST_MACOS_URL"));
+        assert!(source.contains("downloads.claude.ai/releases/darwin/universal"));
+        assert!(!source.contains(&cask_variant));
+        assert!(!source.contains(&cask_install));
+        assert!(!source.contains(&cask_upgrade));
+        assert!(!source.contains(&cask_uninstall));
+        assert!(!registry.contains(&cask_install));
+        assert!(!detector.contains(&cask_detection));
+        assert!(!detector.contains(&cask_upgrade));
         assert_eq!(
-            update_command_preview(&InstallAction::HomebrewFormula("bun")),
-            "brew upgrade bun"
-        );
-        assert_eq!(
-            update_command_preview(&InstallAction::HomebrewCask("claude")),
-            "brew upgrade --cask claude"
+            command_preview(&InstallAction::MacosDmgApp {
+                label: "Claude Desktop official DMG",
+                latest_url: CLAUDE_DESKTOP_LATEST_MACOS_URL,
+                app_name: CLAUDE_DESKTOP_MACOS_APP_NAME,
+                bundle_identifier: CLAUDE_DESKTOP_MACOS_BUNDLE_ID,
+                destination: CLAUDE_DESKTOP_MACOS_DESTINATION,
+            }),
+            "Download and install the latest Claude Desktop official DMG from downloads.claude.ai"
         );
     }
 

@@ -103,6 +103,7 @@ fn start_terminal_session(
     let localize = request.localize.unwrap_or(false);
     if localize && request.tool_id == "claude-desktop" {
         claude_desktop_patch::ensure_localization_patch()?;
+        claude_desktop_patch::ensure_localized_launch_prerequisites()?;
     }
     let launch_command =
         claude_desktop_patch::patched_launch_command(&request.tool_id, &request.command, localize)?;
@@ -245,9 +246,13 @@ pub async fn launch_tool_external(
         let localize = request.localize.unwrap_or(false);
         if localize && request.tool_id == "claude-desktop" {
             claude_desktop_patch::ensure_localization_patch()?;
+            claude_desktop_patch::ensure_localized_launch_prerequisites()?;
         }
-        let launch_command =
-            claude_desktop_patch::patched_launch_command(&request.tool_id, &request.command, localize)?;
+        let launch_command = claude_desktop_patch::patched_launch_command(
+            &request.tool_id,
+            &request.command,
+            localize,
+        )?;
         let env = tool_launch::launch_environment_for_profile(request.profile_id.as_deref())?;
         let working_directory = normalized_working_directory(&request.working_directory);
         tool_launch::spawn_external_terminal(
@@ -257,6 +262,9 @@ pub async fn launch_tool_external(
             working_directory.as_deref(),
         )
         .map_err(|err| format!("Failed to open external terminal: {err}"))?;
+        if localize && request.tool_id == "claude-desktop" {
+            claude_desktop_patch::spawn_silent_localization_injector();
+        }
         Ok(ExternalToolLaunchResult {
             started: true,
             tool_id: request.tool_id,

@@ -8,8 +8,8 @@ use crate::core::profile;
 use crate::core::storage;
 use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
-    ClaudeDesktopInstallKinds, ConfigState, DetectionSnapshot, DetectionSource,
-    DesktopInstallKindInfo, InstallState, Problem, Severity, ToolCategory, ToolStatus,
+    ClaudeDesktopInstallKinds, ConfigState, DesktopInstallKindInfo, DetectionSnapshot,
+    DetectionSource, InstallState, Problem, Severity, ToolCategory, ToolStatus,
 };
 use chrono::Utc;
 use serde::Deserialize;
@@ -36,7 +36,6 @@ const UPDATE_CACHE_TTL: Duration = Duration::from_secs(600);
 // (cached) scan — e.g. the dashboard's 30s background re-scan.
 const NPM_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const WINGET_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
-const BREW_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CODEX_CLIENT_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CLAUDE_DESKTOP_INSTALL_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -238,11 +237,6 @@ pub fn invalidate_update_cache() {
     }
     {
         let mut cache = winget_update_cache().lock().unwrap();
-        cache.packages.clear();
-        cache.checked_at = None;
-    }
-    {
-        let mut cache = brew_update_cache().lock().unwrap();
         cache.packages.clear();
         cache.checked_at = None;
     }
@@ -507,8 +501,16 @@ pub fn claude_desktop_windows_native_install_path() -> Option<PathBuf> {
 pub fn claude_desktop_install_kinds() -> ClaudeDesktopInstallKinds {
     if !cfg!(target_os = "windows") {
         return ClaudeDesktopInstallKinds {
-            msix: DesktopInstallKindInfo { installed: false, version: None, path: None },
-            exe: DesktopInstallKindInfo { installed: false, version: None, path: None },
+            msix: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
+            exe: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
         };
     }
     let msix = detect_claude_desktop_windows_registered_msix()
@@ -520,14 +522,22 @@ pub fn claude_desktop_install_kinds() -> ClaudeDesktopInstallKinds {
             version: Some(app.version.clone()),
             path: Some(app.path.clone()),
         })
-        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+        .unwrap_or(DesktopInstallKindInfo {
+            installed: false,
+            version: None,
+            path: None,
+        });
     let exe = detect_claude_desktop_windows_native_exe()
         .map(|app| DesktopInstallKindInfo {
             installed: true,
             version: Some(app.version.clone()),
             path: Some(app.path.clone()),
         })
-        .unwrap_or(DesktopInstallKindInfo { installed: false, version: None, path: None });
+        .unwrap_or(DesktopInstallKindInfo {
+            installed: false,
+            version: None,
+            path: None,
+        });
     ClaudeDesktopInstallKinds { msix, exe }
 }
 
@@ -1056,18 +1066,6 @@ struct WingetUpdateCache {
     in_progress: bool,
 }
 
-#[derive(Debug, Clone)]
-struct BrewOutdatedPackage {
-    latest: String,
-}
-
-#[derive(Debug, Default)]
-struct BrewUpdateCache {
-    packages: HashMap<String, BrewOutdatedPackage>,
-    checked_at: Option<Instant>,
-    in_progress: bool,
-}
-
 #[derive(Debug, Default)]
 struct ClaudeDesktopUpdateCache {
     version: Option<String>,
@@ -1083,14 +1081,12 @@ struct ClaudeDesktopInstallCache {
 
 static NPM_UPDATE_CACHE: OnceLock<Mutex<NpmUpdateCache>> = OnceLock::new();
 static WINGET_UPDATE_CACHE: OnceLock<Mutex<WingetUpdateCache>> = OnceLock::new();
-static BREW_UPDATE_CACHE: OnceLock<Mutex<BrewUpdateCache>> = OnceLock::new();
 static CLAUDE_DESKTOP_UPDATE_CACHE: OnceLock<Mutex<ClaudeDesktopUpdateCache>> = OnceLock::new();
 static CLAUDE_DESKTOP_INSTALL_CACHE: OnceLock<Mutex<ClaudeDesktopInstallCache>> = OnceLock::new();
 
 fn annotate_update_status(tools: &mut [ToolStatus], system: &mut [ToolStatus]) {
     let npm_outdated = cached_npm_global_outdated(NPM_UPDATE_WAIT_BUDGET);
     let winget_outdated = cached_winget_outdated(WINGET_UPDATE_WAIT_BUDGET);
-    let brew_outdated = cached_brew_outdated(BREW_UPDATE_WAIT_BUDGET);
     let claude_desktop_latest = cached_claude_desktop_latest(CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET);
     let codex_client_latest = codex_client::latest_version_cached(CODEX_CLIENT_UPDATE_WAIT_BUDGET);
     for tool in tools.iter_mut().chain(system.iter_mut()) {
@@ -1132,12 +1128,6 @@ fn annotate_update_status(tools: &mut [ToolStatus], system: &mut [ToolStatus]) {
         if let Some(package_id) = winget_package_for_tool(&tool.id) {
             if let Some(latest) = winget_outdated.get(package_id) {
                 tool.latest_version = Some(latest.clone());
-                tool.update_available = true;
-            }
-        }
-        if let Some(package) = brew_package_for_tool(&tool.id) {
-            if let Some(outdated) = brew_outdated.get(package) {
-                tool.latest_version = Some(outdated.latest.clone());
                 tool.update_available = true;
             }
         }
@@ -1295,10 +1285,6 @@ fn winget_update_cache() -> &'static Mutex<WingetUpdateCache> {
     WINGET_UPDATE_CACHE.get_or_init(|| Mutex::new(WingetUpdateCache::default()))
 }
 
-fn brew_update_cache() -> &'static Mutex<BrewUpdateCache> {
-    BREW_UPDATE_CACHE.get_or_init(|| Mutex::new(BrewUpdateCache::default()))
-}
-
 fn cached_npm_global_outdated(wait_budget: Duration) -> HashMap<String, NpmOutdatedPackage> {
     let should_start = {
         let mut cache = npm_update_cache().lock().unwrap();
@@ -1366,41 +1352,6 @@ fn cached_winget_outdated(wait_budget: Duration) -> HashMap<String, String> {
     wait_for_winget_update_cache(wait_budget)
 }
 
-fn cached_brew_outdated(wait_budget: Duration) -> HashMap<String, BrewOutdatedPackage> {
-    if !cfg!(target_os = "macos") {
-        return HashMap::new();
-    }
-    let should_start = {
-        let mut cache = brew_update_cache().lock().unwrap();
-        if cache
-            .checked_at
-            .map(|checked_at| checked_at.elapsed() < UPDATE_CACHE_TTL)
-            .unwrap_or(false)
-        {
-            return cache.packages.clone();
-        }
-
-        if cache.in_progress {
-            false
-        } else {
-            cache.in_progress = true;
-            true
-        }
-    };
-
-    if should_start {
-        thread::spawn(|| {
-            let packages = read_brew_outdated();
-            let mut cache = brew_update_cache().lock().unwrap();
-            cache.packages = packages;
-            cache.checked_at = Some(Instant::now());
-            cache.in_progress = false;
-        });
-    }
-
-    wait_for_brew_update_cache(wait_budget)
-}
-
 fn wait_for_npm_update_cache(wait_budget: Duration) -> HashMap<String, NpmOutdatedPackage> {
     let started_at = Instant::now();
     loop {
@@ -1443,27 +1394,6 @@ fn wait_for_winget_update_cache(wait_budget: Duration) -> HashMap<String, String
     }
 }
 
-fn wait_for_brew_update_cache(wait_budget: Duration) -> HashMap<String, BrewOutdatedPackage> {
-    let started_at = Instant::now();
-    loop {
-        {
-            let cache = brew_update_cache().lock().unwrap();
-            if !cache.in_progress
-                || cache
-                    .checked_at
-                    .map(|checked_at| checked_at.elapsed() < UPDATE_CACHE_TTL)
-                    .unwrap_or(false)
-            {
-                return cache.packages.clone();
-            }
-            if started_at.elapsed() >= wait_budget {
-                return cache.packages.clone();
-            }
-        }
-        thread::sleep(UPDATE_CACHE_POLL_INTERVAL);
-    }
-}
-
 fn npm_package_for_tool(tool_id: &str) -> Option<&'static str> {
     match tool_id {
         "codex" => Some("@openai/codex"),
@@ -1490,27 +1420,16 @@ fn winget_package_for_tool(tool_id: &str) -> Option<&'static str> {
     }
 }
 
-fn brew_package_for_tool(tool_id: &str) -> Option<&'static str> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    match tool_id {
-        "claude-desktop" => Some("claude"),
-        "hermes" => Some("hermes-agent"),
-        "node" => Some("node"),
-        "git" => Some("git"),
-        "bun" => Some("bun"),
-        _ => None,
-    }
-}
-
 fn update_command_for_tool(tool_id: &str) -> Option<String> {
     match tool_id {
         "codex" => Some("npm install -g @openai/codex@latest".to_string()),
         "codex-vscode" => Some("code --install-extension openai.chatgpt --force".to_string()),
         "claude" => Some("npm install -g @anthropic-ai/claude-code@latest".to_string()),
         "claude-desktop" if cfg!(target_os = "macos") => {
-            Some("brew upgrade --cask claude".to_string())
+            Some(
+                "Download and install the latest Claude Desktop official DMG from downloads.claude.ai"
+                    .to_string(),
+            )
         }
         "claude-desktop" => Some(
             "winget upgrade --id Anthropic.Claude --exact --accept-source-agreements --accept-package-agreements --disable-interactivity"
@@ -1525,9 +1444,10 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
         }
         "opencode" => Some("npm install -g opencode-ai@latest".to_string()),
         "openclaw" => Some("npm install -g openclaw@latest".to_string()),
-        "hermes" if cfg!(target_os = "macos") => {
-            Some("brew upgrade hermes-agent".to_string())
-        }
+        "hermes" if cfg!(target_os = "macos") => Some(
+            "bash -lc 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash'"
+                .to_string(),
+        ),
         "hermes" if cfg!(target_os = "linux") => Some(
             "bash -lc 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash'"
                 .to_string(),
@@ -1536,7 +1456,9 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
             "powershell -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\""
                 .to_string(),
         ),
-        "node" if cfg!(target_os = "macos") => Some("brew upgrade node".to_string()),
+        "node" if cfg!(target_os = "macos") => Some(
+            r#"bash -lc 'set -e; tmp="$(mktemp -d)"; trap '"'"'rm -rf "$tmp"'"'"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"'"'"lts":"[^"]*"'"'"' | sed -E '"'"'s/.*"version":"([^"]+)".*/\1/'"'"')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /'"#.to_string(),
+        ),
         "node" if cfg!(target_os = "linux") => Some(
             "bash -lc 'curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs'"
                 .to_string(),
@@ -1545,7 +1467,7 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
             "winget upgrade --id OpenJS.NodeJS.LTS --exact --accept-source-agreements --accept-package-agreements --disable-interactivity"
                 .to_string(),
         ),
-        "git" if cfg!(target_os = "macos") => Some("brew upgrade git".to_string()),
+        "git" if cfg!(target_os = "macos") => Some("xcode-select --install".to_string()),
         "git" if cfg!(target_os = "linux") => {
             Some("bash -lc 'sudo apt-get update && sudo apt-get install -y git'".to_string())
         }
@@ -1554,7 +1476,9 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
                 .to_string(),
         ),
         "pnpm" => Some("npm install -g pnpm@latest".to_string()),
-        "bun" if cfg!(target_os = "macos") => Some("brew upgrade bun".to_string()),
+        "bun" if cfg!(target_os = "macos") => {
+            Some("bash -lc 'curl -fsSL https://bun.sh/install | bash'".to_string())
+        }
         "bun" if cfg!(target_os = "linux") => {
             Some("bash -lc 'curl -fsSL https://bun.sh/install | bash'".to_string())
         }
@@ -1714,60 +1638,6 @@ fn read_winget_outdated() -> HashMap<String, String> {
             Some(((*package_id).to_string(), (*latest).to_string()))
         })
         .collect()
-}
-
-fn read_brew_outdated() -> HashMap<String, BrewOutdatedPackage> {
-    let Some(brew) = resolve_command("brew") else {
-        return HashMap::new();
-    };
-    let Some(output) =
-        run_command_with_timeout(&brew, &["outdated", "--json=v2"], UPDATE_CHECK_TIMEOUT)
-    else {
-        return HashMap::new();
-    };
-    if !output.status.success() {
-        return HashMap::new();
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        return HashMap::new();
-    }
-    let Ok(value) = serde_json::from_str::<Value>(&stdout) else {
-        return HashMap::new();
-    };
-
-    let mut packages = HashMap::new();
-    collect_brew_outdated_items(value.get("formulae"), &mut packages);
-    collect_brew_outdated_items(value.get("casks"), &mut packages);
-    packages
-}
-
-fn collect_brew_outdated_items(
-    items: Option<&Value>,
-    packages: &mut HashMap<String, BrewOutdatedPackage>,
-) {
-    let Some(Value::Array(items)) = items else {
-        return;
-    };
-    for item in items {
-        let Some(name) = item.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        let latest = item
-            .get("current_version")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                item.get("current_versions")
-                    .and_then(Value::as_array)
-                    .and_then(|versions| versions.first())
-                    .and_then(Value::as_str)
-            })
-            .map(str::trim)
-            .filter(|latest| !latest.is_empty())
-            .unwrap_or("latest")
-            .to_string();
-        packages.insert(name.to_string(), BrewOutdatedPackage { latest });
-    }
 }
 
 fn run_command_with_timeout(
@@ -2034,7 +1904,10 @@ mod tests {
         fs::write(install.join("Claude.exe"), b"patched").unwrap();
         // No resources/app.asar — this is an orphaned exe
         let hit = scan_localappdata_for_claude_exe(&root);
-        assert!(hit.is_none(), "orphaned exe without asar should not be detected");
+        assert!(
+            hit.is_none(),
+            "orphaned exe without asar should not be detected"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2280,26 +2153,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_homebrew_outdated_formulae_and_casks() {
-        let value: Value = serde_json::from_str(
-            r#"{
-              "formulae": [{ "name": "node", "current_version": "24.1.0" }],
-              "casks": [{ "name": "claude", "current_version": "0.12.0" }]
-            }"#,
-        )
-        .expect("json");
-        let mut packages = HashMap::new();
+    fn detector_update_routes_do_not_use_homebrew_commands() {
+        let source = include_str!("detector.rs");
+        let brew = ["br", "ew"].concat();
 
-        collect_brew_outdated_items(value.get("formulae"), &mut packages);
-        collect_brew_outdated_items(value.get("casks"), &mut packages);
-
-        assert_eq!(
-            packages.get("node").map(|item| item.latest.as_str()),
-            Some("24.1.0")
-        );
-        assert_eq!(
-            packages.get("claude").map(|item| item.latest.as_str()),
-            Some("0.12.0")
-        );
+        assert!(!source.contains(&format!("{brew} outdated")));
+        assert!(!source.contains(&format!("{brew} upgrade")));
+        assert!(source.contains("https://nodejs.org/dist/index.json"));
+        assert!(source.contains("https://bun.sh/install"));
+        assert!(source.contains("https://hermes-agent.nousresearch.com/install.sh"));
+        assert!(source.contains("xcode-select --install"));
     }
 }

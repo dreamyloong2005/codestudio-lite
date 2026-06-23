@@ -30,7 +30,8 @@ test("Linux install routes use native shell-friendly installers", () => {
   const installer = read("src-tauri/src/core/tool_installer.rs");
   const detector = read("src-tauri/src/core/detector.rs");
 
-  assert.match(registry, /Some\("curl -fsSL https:\/\/hermes-agent\.nousresearch\.com\/install\.sh \| bash"\)/);
+  assert.match(registry, /const HERMES_UNIX_INSTALL_COMMAND: &str =\s*"curl -fsSL https:\/\/hermes-agent\.nousresearch\.com\/install\.sh \| bash"/);
+  assert.match(registry, /Some\(HERMES_UNIX_INSTALL_COMMAND\)/);
   assert.match(registry, /Some\("curl -fsSL https:\/\/deb\.nodesource\.com\/setup_lts\.x \| sudo -E bash - && sudo apt-get install -y nodejs"\)/);
   assert.match(installer, /InstallAction::ShellScript/);
   assert.match(installer, /"Hermes official install script"/);

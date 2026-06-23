@@ -196,11 +196,17 @@ fn claude_desktop_install_command() -> Option<&'static str> {
     if cfg!(target_os = "windows") {
         Some("winget install --id Anthropic.Claude --exact")
     } else if cfg!(target_os = "macos") {
-        Some("brew install --cask claude")
+        Some("Download and install the official Claude Desktop DMG")
     } else {
         None
     }
 }
+
+const HERMES_UNIX_INSTALL_COMMAND: &str =
+    "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash";
+const BUN_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://bun.sh/install | bash";
+const GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND: &str = "xcode-select --install";
+const NODE_MACOS_OFFICIAL_PKG_INSTALL_COMMAND: &str = r#"set -e; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"lts":"[^"]*"' | sed -E 's/.*"version":"([^"]+)".*/\1/')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /"#;
 
 fn hermes_install_command() -> Option<&'static str> {
     if cfg!(target_os = "windows") {
@@ -208,9 +214,9 @@ fn hermes_install_command() -> Option<&'static str> {
             "powershell -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\"",
         )
     } else if cfg!(target_os = "macos") {
-        Some("brew install hermes-agent")
+        Some(HERMES_UNIX_INSTALL_COMMAND)
     } else {
-        Some("curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash")
+        Some(HERMES_UNIX_INSTALL_COMMAND)
     }
 }
 
@@ -218,7 +224,7 @@ fn node_install_command() -> Option<&'static str> {
     if cfg!(target_os = "windows") {
         Some("winget install OpenJS.NodeJS.LTS")
     } else if cfg!(target_os = "macos") {
-        Some("brew install node")
+        Some(NODE_MACOS_OFFICIAL_PKG_INSTALL_COMMAND)
     } else {
         Some("curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs")
     }
@@ -228,7 +234,7 @@ fn git_install_command() -> Option<&'static str> {
     if cfg!(target_os = "windows") {
         Some("winget install Git.Git")
     } else if cfg!(target_os = "macos") {
-        Some("brew install git")
+        Some(GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND)
     } else {
         Some("sudo apt-get update && sudo apt-get install -y git")
     }
@@ -238,8 +244,8 @@ fn bun_install_command() -> Option<&'static str> {
     if cfg!(target_os = "windows") {
         Some("winget install Oven-sh.Bun")
     } else if cfg!(target_os = "macos") {
-        Some("brew install bun")
+        Some(BUN_UNIX_INSTALL_COMMAND)
     } else {
-        Some("curl -fsSL https://bun.sh/install | bash")
+        Some(BUN_UNIX_INSTALL_COMMAND)
     }
 }

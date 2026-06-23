@@ -11,6 +11,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:build:dmg": "scripts/build-macos-dmg.sh",
+    "tauri:sign:macos": "scripts/sign-macos-bundle.sh",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test:unit": "tsc -p tsconfig.tests.json && node --test src/lib/*.test.mjs",
     "test": "npm run check && npm run test:unit"

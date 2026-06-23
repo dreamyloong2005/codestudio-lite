@@ -1,6 +1,5 @@
 use crate::core::activity_log;
 use crate::core::app_paths::display_path;
-use crate::core::credentials;
 use crate::core::detector;
 use crate::core::platform::{
     hidden_command_with_args, repair_candidate_for_command, resolve_command_on_path, run_powershell,
@@ -152,20 +151,20 @@ pub fn claude_env_conflicts_for_profile(
         "ANTHROPIC_BASE_URL".to_string(),
         ExpectedEnvValue::Exact(profile.base_url.trim().to_string()),
     );
-    let expected_secret = profile
+    if profile
         .auth_ref
         .as_deref()
-        .and_then(|auth_ref| credentials::load_keychain_secret(auth_ref).ok())
-        .map(|secret| secret.trim().to_string())
-        .filter(|secret| !secret.is_empty());
-    if let Some(secret) = expected_secret {
+        .map(str::trim)
+        .filter(|auth_ref| !auth_ref.is_empty())
+        .is_some()
+    {
         expected.insert(
             "ANTHROPIC_AUTH_TOKEN".to_string(),
-            ExpectedEnvValue::Secret(secret.clone()),
+            ExpectedEnvValue::StoredSecret,
         );
         expected.insert(
             "ANTHROPIC_API_KEY".to_string(),
-            ExpectedEnvValue::Secret(secret),
+            ExpectedEnvValue::StoredSecret,
         );
     } else {
         expected.insert("ANTHROPIC_AUTH_TOKEN".to_string(), ExpectedEnvValue::Absent);
@@ -292,7 +291,7 @@ pub fn clear_environment_variables(
 #[derive(Debug, Clone)]
 enum ExpectedEnvValue {
     Exact(String),
-    Secret(String),
+    StoredSecret,
     Absent,
 }
 
@@ -309,17 +308,27 @@ fn claude_env_conflicts(
                 .unwrap_or(ExpectedEnvValue::Absent);
             let matches = match &expected_value {
                 ExpectedEnvValue::Exact(expected) => value.value.trim() == expected.trim(),
-                ExpectedEnvValue::Secret(expected) => value.value.trim() == expected.trim(),
+                ExpectedEnvValue::StoredSecret => false,
                 ExpectedEnvValue::Absent => false,
             };
             if matches {
                 return None;
             }
+            let message = match expected_value {
+                ExpectedEnvValue::StoredSecret => format!(
+                    "{} affects Claude API connections and may override the saved Provider API key.",
+                    value.name
+                ),
+                _ => format!(
+                    "{} affects Claude API connections and does not match the current CodeStudio configuration.",
+                    value.name
+                ),
+            };
             let expected_value_preview = match expected_value {
                 ExpectedEnvValue::Exact(expected) if !expected.trim().is_empty() => {
                     Some(preview_env_value(&value.name, &expected))
                 }
-                ExpectedEnvValue::Secret(_) => Some("saved Provider API key".to_string()),
+                ExpectedEnvValue::StoredSecret => Some("saved Provider API key".to_string()),
                 ExpectedEnvValue::Exact(_) | ExpectedEnvValue::Absent => None,
             };
             Some(EnvironmentVariableConflict {
@@ -330,10 +339,7 @@ fn claude_env_conflicts(
                 expected_value_preview,
                 scope: value.scope,
                 severity: Severity::Warning,
-                message: format!(
-                    "{} affects Claude API connections and does not match the current CodeStudio configuration.",
-                    value.name
-                ),
+                message,
             })
         })
         .collect()
@@ -727,4 +733,14 @@ fn sh_double_quote(value: &str) -> String {
 
 fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn claude_env_health_does_not_read_keychain_secrets() {
+        let source = include_str!("env_health.rs");
+
+        assert!(!source.contains(&format!("{}{}", "load_keychain", "_secret")));
+    }
 }

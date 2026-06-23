@@ -121,7 +121,7 @@
       <span><AppIcon name="language" size={18} /> {$t("settings.language")}</span>
       <select bind:value={language} disabled={saving} on:change={(event) => changeLanguage(event.currentTarget.value as Locale)}>
         {#each supportedLocales as locale}
-          <option value={locale.code}>{$t(locale.labelKey)}</option>
+          <option value={locale.code}>{locale.label}</option>
         {/each}
       </select>
     </label>
