@@ -25,6 +25,8 @@ use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "windows")]
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
@@ -40,6 +42,8 @@ const MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(9
 const MACOS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
 const WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 const WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS: u64 = 100;
 #[cfg(target_os = "windows")]
 const WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(20);
 const INSTALL_TERMINAL_OUTPUT_EVENT: &str = "install-terminal://output";
@@ -571,21 +575,14 @@ fn ensure_windows_claude_main_process_debugger() -> Result<(), String> {
 
     let started = Instant::now();
     let mut last_error = "Claude Node inspector endpoint was not available.".to_string();
-    let mut request_count = 0usize;
     while started.elapsed() < WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT {
         if claude_node_inspector_available() {
             return Ok(());
         }
 
-        request_count += 1;
-        match request_windows_claude_main_process_debugger_once() {
+        match request_windows_claude_main_process_debugger_until_available() {
             Ok(()) => {
-                if wait_for_claude_node_inspector() {
-                    return Ok(());
-                }
-                last_error = format!(
-                    "Claude main process debugger request #{request_count} completed, but no Claude Node inspector endpoint opened yet."
-                );
+                return Ok(());
             }
             Err(err) => {
                 last_error = err;
@@ -599,6 +596,73 @@ fn ensure_windows_claude_main_process_debugger() -> Result<(), String> {
     Err(format!(
         "Timed out waiting for Claude main process debugger on Windows. Open Claude, use Developer > Enable Main Process Debugger, then retry localized launch. Last error: {last_error}."
     ))
+}
+
+#[cfg(target_os = "windows")]
+fn request_windows_claude_main_process_debugger_until_available() -> Result<(), String> {
+    let (sender, receiver) = mpsc::channel();
+    let request_thread = thread::spawn(move || {
+        let result = request_windows_claude_main_process_debugger_once();
+        let _ = sender.send(result);
+    });
+    let started = Instant::now();
+    let mut request_result: Option<Result<(), String>> = None;
+
+    while started.elapsed() < WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT {
+        if claude_node_inspector_available() {
+            return Ok(());
+        }
+
+        match receiver.try_recv() {
+            Ok(result) => {
+                request_result = Some(result);
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                thread::sleep(Duration::from_millis(WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS));
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                request_result = Some(Err(
+                    "PowerShell debugger automation exited without reporting a result.".to_string(),
+                ));
+                break;
+            }
+        }
+    }
+
+    if request_result.is_none() {
+        if claude_node_inspector_available() {
+            return Ok(());
+        }
+        request_result = Some(
+            receiver
+                .try_recv()
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "PowerShell debugger automation did not finish within {} seconds while waiting for inspector availability.",
+                        WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT.as_secs()
+                    ))
+                }),
+        );
+    }
+
+    let _ = request_thread.join();
+
+    match request_result.unwrap_or_else(|| {
+        Err("PowerShell debugger automation finished without a result.".to_string())
+    }) {
+        Ok(()) => {
+            if wait_for_claude_node_inspector() {
+                Ok(())
+            } else {
+                Err(
+                    "Claude main process debugger automation completed, but no Claude Node inspector endpoint opened yet."
+                        .to_string(),
+                )
+            }
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -658,6 +722,15 @@ function Format-ClaudeElementForLog($element) {
   } catch {
     return '<stale element>'
   }
+}
+
+function Wait-ClaudeCondition([int]$attempts, [int]$delayMs, [scriptblock]$condition) {
+  for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
+    $result = & $condition
+    if ($result) { return $result }
+    Start-Sleep -Milliseconds $delayMs
+  }
+  return $null
 }
 
 function Start-ClaudeWindowsApp {
@@ -1042,8 +1115,7 @@ function Open-ClaudeMenu($window, [string[]]$developerNames) {
       Write-ClaudeDebuggerLog 'Claude menu button did not expose an invokable UIA pattern.'
       return $false
     }
-    Start-Sleep -Milliseconds 120
-    if (Test-ClaudeMenuPopupOpen $window $developerNames) {
+    if (Wait-ClaudeCondition 16 40 { if (Test-ClaudeMenuPopupOpen $window $developerNames) { $true } else { $null } }) {
       Write-ClaudeDebuggerLog 'Claude menu popup opened.'
       return $true
     }
@@ -1183,13 +1255,71 @@ function Wait-CloseClaudeInspectorPromptWindows($window, [int]$attempts = 10) {
   for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
     $closed += Close-ClaudeInspectorPromptWindows $window
     if ($closed -gt 0) {
-      Start-Sleep -Milliseconds 120
+      Start-Sleep -Milliseconds 40
       $closed += Close-ClaudeInspectorPromptWindows $window
       break
     }
-    Start-Sleep -Milliseconds 120
+    Start-Sleep -Milliseconds 40
   }
   $closed
+}
+
+function Start-ClaudeInspectorPromptCleanupJob($window, [int]$durationMs) {
+  $processId = [int]$window.ProcessId
+  $mainHwnd = [IntPtr]$window.Hwnd
+  $mainWidth = [int]$window.Width
+  $mainHeight = [int]$window.Height
+  Start-Job -ScriptBlock {
+    param([int]$processId, [IntPtr]$mainHwnd, [int]$mainWidth, [int]$mainHeight, [int]$durationMs)
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class CslClaudePromptCleanupWin32 {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extraData);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam);
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+}
+'@
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($durationMs)
+    $WM_CLOSE = 0x0010
+    while ([DateTime]::UtcNow -lt $deadline) {
+      [CslClaudePromptCleanupWin32]::EnumWindows({
+        param([IntPtr]$hWnd, [IntPtr]$extraData)
+        if ($hWnd -eq $mainHwnd) { return $true }
+        $windowProcessId = [uint32]0
+        [CslClaudePromptCleanupWin32]::GetWindowThreadProcessId($hWnd, [ref]$windowProcessId) | Out-Null
+        if ([int]$windowProcessId -ne $processId) { return $true }
+
+        $classBuilder = New-Object System.Text.StringBuilder 256
+        [CslClaudePromptCleanupWin32]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
+        $className = $classBuilder.ToString()
+        if ($className -notlike 'Chrome_WidgetWin_*' -and $className -ne '#32770') { return $true }
+
+        $titleBuilder = New-Object System.Text.StringBuilder 512
+        [CslClaudePromptCleanupWin32]::GetWindowText($hWnd, $titleBuilder, $titleBuilder.Capacity) | Out-Null
+        $title = $titleBuilder.ToString()
+        $rect = New-Object CslClaudePromptCleanupWin32+RECT
+        [CslClaudePromptCleanupWin32]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
+        $width = $rect.Right - $rect.Left
+        $height = $rect.Bottom - $rect.Top
+        $looksLikePrompt =
+          $title -match 'Inspector|Debugger|DevTools|Main Process|调试|偵錯|检查|檢查' -or
+          ($title.Length -eq 0 -and $width -ge 480 -and $width -le 1200 -and $height -ge 360 -and $height -le 900)
+        $insideMainWindow = $width -ge ($mainWidth - 80) -and $height -ge ($mainHeight - 80)
+        if ($looksLikePrompt -and -not $insideMainWindow) {
+          [CslClaudePromptCleanupWin32]::PostMessage($hWnd, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+        }
+        return $true
+      }, [IntPtr]::Zero) | Out-Null
+      Start-Sleep -Milliseconds 80
+    }
+  } -ArgumentList $processId, $mainHwnd, $mainWidth, $mainHeight, $durationMs | Out-Null
 }
 
 function Invoke-DebuggerConfirmation($window) {
@@ -1213,11 +1343,16 @@ if ($window) {
   Write-ClaudeDebuggerLog 'Using existing Claude window before app activation.'
 } else {
   Start-ClaudeWindowsApp
-  for ($attempt = 0; $attempt -lt 20; $attempt++) {
-    $window = Get-ClaudeMainWindow
-    if ($window) { break }
-    if ($attempt -eq 4) { Start-ClaudeWindowsApp }
-    Start-Sleep -Milliseconds 500
+  $window = Wait-ClaudeCondition 30 40 {
+    $candidate = Get-ClaudeMainWindow
+    if ($candidate) { $candidate } else { $null }
+  }
+  if (-not $window) {
+    Start-ClaudeWindowsApp
+    $window = Wait-ClaudeCondition 50 100 {
+      $candidate = Get-ClaudeMainWindow
+      if ($candidate) { $candidate } else { $null }
+    }
   }
 }
 if (-not $window) {
@@ -1228,7 +1363,6 @@ if (-not $window) {
 [CslClaudeWin32]::ShowWindow($window.Hwnd, 9) | Out-Null
 [CslClaudeWin32]::BringWindowToTop($window.Hwnd) | Out-Null
 [CslClaudeWin32]::SetForegroundWindow($window.Hwnd) | Out-Null
-Start-Sleep -Milliseconds 100
 Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null
 Close-ClaudeBlockingOverlayWindows $window | Out-Null
 
@@ -1257,7 +1391,6 @@ if (-not (Invoke-Element $developer)) {
   Write-ClaudeDebuggerLog ("Developer menu could not be opened: " + (Format-ClaudeElementForLog $developer))
   throw 'Claude Developer menu could not be opened through UI Automation.'
 }
-Start-Sleep -Milliseconds 120
 
 $debuggerItem = Find-ClaudeDebuggerToggleElement $debuggerNames $window
 if (-not $debuggerItem) {
@@ -1280,21 +1413,21 @@ if ($debuggerItem.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]
   if ($togglePattern.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
     Write-ClaudeDebuggerLog 'Toggling Claude Main Process Debugger on.'
     $togglePattern.Toggle()
-    Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null
+    Start-ClaudeInspectorPromptCleanupJob $window 4500
   } else {
     Write-ClaudeDebuggerLog 'Claude Main Process Debugger toggle already appears on.'
+    Start-ClaudeInspectorPromptCleanupJob $window 2000
   }
 } else {
   Write-ClaudeDebuggerLog 'Claude Main Process Debugger menu item did not expose TogglePattern.'
   throw 'Claude Main Process Debugger menu item does not expose TogglePattern.'
 }
 
-for ($attempt = 0; $attempt -lt 8; $attempt++) {
-  Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null
+for ($attempt = 0; $attempt -lt 3; $attempt++) {
+  Wait-CloseClaudeInspectorPromptWindows $window 1 | Out-Null
   if (-not (Invoke-DebuggerConfirmation $window)) { break }
-  Wait-CloseClaudeInspectorPromptWindows $window 4 | Out-Null
 }
-Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null
+Start-ClaudeInspectorPromptCleanupJob $window 2000
 Write-ClaudeDebuggerLog 'Windows Main Process Debugger automation completed.'
 "#;
 
@@ -3692,11 +3825,9 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   const FULL_ZH = {
     "Create new skills, modify and improve existing skills": "\u521b\u5efa\u65b0\u6280\u80fd\uff0c\u4fee\u6539\u5e76\u6539\u8fdb\u73b0\u6709\u6280\u80fd\uff0c\u5e76\u8861\u91cf\u6280\u80fd\u8868\u73b0\u3002\u5f53\u7528\u6237\u60f3\u8981\u4ece\u96f6\u5f00\u59cb\u521b\u5efa\u6280\u80fd\u3001\u7f16\u8f91\u6216\u4f18\u5316\u73b0\u6709\u6280\u80fd\u3001\u8fd0\u884c\u8bc4\u4f30\u6765\u6d4b\u8bd5\u6280\u80fd\u3001\u901a\u8fc7\u65b9\u5dee\u5206\u6790\u5bf9\u6280\u80fd\u8868\u73b0\u8fdb\u884c\u57fa\u51c6\u6d4b\u8bd5\uff0c\u6216\u4f18\u5316\u6280\u80fd\u63cf\u8ff0\u4ee5\u63d0\u5347\u89e6\u53d1\u51c6\u786e\u6027\u65f6\u4f7f\u7528\u3002",
   };
-  // Substring replacements: translate a fragment anywhere in the text
-  // node so model-card sentences keep the model name (e.g. "Claude Fable 5
-  // is currently unavailable." -> model name + 当前不可用。).
   const gatewayProviderSubstringFallback = true;
   const codeUiLabelFallback = true;
+  const uiOnlyDomFallback = true;
   const reversibleTextFallback = true;
   const SUBSTR_ZH = {
     "GATEWAY": "\u7f51\u5173",
@@ -3708,20 +3839,30 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   const CSL_TRANSLATED_TEXT = "__cslTranslatedText";
   const TEXT_EN = {};
   try { for (var rek in TEXT_ZH) if (TEXT_ZH[rek] && TEXT_EN[TEXT_ZH[rek]] === undefined) TEXT_EN[TEXT_ZH[rek]] = rek; } catch (_) {}
-  const shouldSkipTextNode = (node) => {
-    // Skip text inside thinking blocks and code/pre elements: these contain
-    // Claude's reasoning/output and must not be prefix-translated, or the
-    // thinking output may be corrupted and fail to render after completion.
-    if (node.parentElement) {
-      var el = node.parentElement;
-      if (el.closest && el.closest('[data-thinking], [class*="thinking"], [class*="thought"], pre, code, [contenteditable]')) return true;
-    }
-    return false;
+  const genSel = '[data-thinking], [class*="thinking"], [class*="thought"], [class*="markdown"], [class*="prose"], pre, code, [contenteditable]';
+  const uiHint = /(nav|menu|sidebar|tab|model|toolbar|button|btn|dropdown|popover|modal)/i;
+  const generatedContentTextNode = (node) => {
+    try { return !!(node.parentElement?.closest?.(genSel)); } catch (_) { return false; }
   };
   const likelyUiTextNode = (node) => {
     try {
-      const el = node && node.parentElement;
-      return !!(el && el.closest && el.closest('button, a, nav, aside, header, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="tab"], [role="option"], [aria-label], [data-testid*="nav"], [data-testid*="menu"], [data-testid*="sidebar"]'));
+      for (var el = node && node.parentElement, d = 0; el && d < 5; el = el.parentElement, d++) {
+        var tag = el.tagName || "";
+        if (/^(BUTTON|A|NAV|ASIDE|HEADER)$/.test(tag)) return true;
+        var role = el.getAttribute?.("role") || "";
+        if (/^(button|menuitem|menuitemradio|tab|option)$/.test(role)) return true;
+        if (el.getAttribute?.("aria-label") || el.getAttribute?.("aria-controls") || el.getAttribute?.("aria-current") || el.getAttribute?.("aria-selected")) return true;
+        var hint = (el.getAttribute?.("data-testid") || "") + " " + (el.getAttribute?.("class") || "");
+        if (uiHint.test(hint)) return true;
+      }
+    } catch (_) { return false; }
+    return false;
+  };
+  const shouldTranslateDomFallbackTextNode = (node, trimmed) => {
+    try {
+      if (!trimmed || trimmed.length > 160) return false;
+      if (generatedContentTextNode(node)) return false;
+      return likelyUiTextNode(node);
     } catch (_) { return false; }
   };
   const clearTextState = (node) => { try { delete node[CSL_ORIG_TEXT]; delete node[CSL_TRANSLATED_TEXT]; } catch (_) {} };
@@ -3752,8 +3893,6 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     if (zh) return v.slice(0, lead) + zh + v.slice(lead + trimmed.length);
     for (var fk in FULL_ZH) if (fk.length > 15 && trimmed.indexOf(fk) === 0) return v.slice(0, lead) + FULL_ZH[fk];
     for (var k in TEXT_ZH) if (k.length > 15 && trimmed.indexOf(k) === 0) return v.slice(0, lead) + TEXT_ZH[k] + v.slice(lead + k.length);
-    // Substring replacement: translate a fragment anywhere in the text,
-    // preserving the surrounding (e.g. model-name) prefix/suffix.
     var nv = v;
     for (var sk in SUBSTR_ZH) {
       var pos = nv.indexOf(sk);
@@ -3763,13 +3902,15 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   };
   const translateTextNode = (node) => {
     if (!node || node.nodeType !== 3) return;
-    if (shouldSkipTextNode(node)) return;
+    if (generatedContentTextNode(node)) { restoreTextNode(node); return; }
     if (!zhOn()) { restoreTextNode(node); return; }
     let base = typeof node[CSL_ORIG_TEXT] === "string" ? node[CSL_ORIG_TEXT] : node.nodeValue;
     if (typeof node[CSL_ORIG_TEXT] === "string" && node.nodeValue !== node[CSL_TRANSLATED_TEXT] && node.nodeValue !== node[CSL_ORIG_TEXT]) {
       clearTextState(node);
       base = node.nodeValue;
     }
+    const trimmed = (base || "").trim();
+    if (!shouldTranslateDomFallbackTextNode(node, trimmed)) { restoreTextNode(node); return; }
     const nv = translatedTextValue(base);
     if (!nv || nv === base) { clearTextState(node); return; }
     try { node[CSL_ORIG_TEXT] = base; node[CSL_TRANSLATED_TEXT] = nv; } catch (_) {}
@@ -4414,10 +4555,10 @@ mod tests {
             request_body,
             &[
                 "$togglePattern.Toggle()",
-                "for ($attempt = 0; $attempt -lt 8; $attempt++)",
-                "Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null",
+                "Start-ClaudeInspectorPromptCleanupJob $window 4500",
+                "for ($attempt = 0; $attempt -lt 3; $attempt++)",
             ],
-            "inspector prompt windows should be closed after debugger opens",
+            "inspector prompt cleanup should start without blocking after debugger opens",
         );
         assert_contains_none(
             request_body,
@@ -4538,7 +4679,9 @@ mod tests {
                 "$window = Get-ClaudeMainWindow",
                 "if ($window) {",
                 "} else {\n  Start-ClaudeWindowsApp",
-                "for ($attempt = 0; $attempt -lt 20; $attempt++)",
+                "Wait-ClaudeCondition 30 40",
+                "if (-not $window) {",
+                "Wait-ClaudeCondition 50 100",
             ],
             "existing Claude window should be preferred before fallback AppX activation",
         );
@@ -4557,22 +4700,100 @@ mod tests {
             &[
                 "function Wait-CloseClaudeInspectorPromptWindows($window",
                 "Close-ClaudeInspectorPromptWindows $window",
-                "Start-Sleep -Milliseconds 120",
+                "Start-Sleep -Milliseconds 40",
             ],
         );
         assert_order(
             request_body,
             "$togglePattern.Toggle()",
-            "Wait-CloseClaudeInspectorPromptWindows $window",
-            "inspector prompt should be polled after toggling debugger",
+            "Start-ClaudeInspectorPromptCleanupJob $window 4500",
+            "inspector prompt cleanup should start after toggling debugger",
         );
         assert_contains_in_order(
             request_body,
             &[
-                "for ($attempt = 0; $attempt -lt 8; $attempt++)",
-                "Wait-CloseClaudeInspectorPromptWindows $window",
+                "for ($attempt = 0; $attempt -lt 3; $attempt++)",
+                "Wait-CloseClaudeInspectorPromptWindows $window 1 | Out-Null",
             ],
             "inspector prompt should also be polled after confirmations",
+        );
+    }
+
+    #[test]
+    fn windows_debugger_request_waits_for_inspector_while_automation_runs() {
+        let ensure_body = production_between(
+            "fn ensure_windows_claude_main_process_debugger()",
+            "fn request_windows_claude_main_process_debugger_once()",
+            "ensure_windows_claude_main_process_debugger",
+        );
+
+        assert_contains_all(
+            ensure_body,
+            &[
+                "request_windows_claude_main_process_debugger_until_available",
+                "mpsc::channel",
+                "request_thread",
+                "WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS",
+                "claude_node_inspector_available()",
+            ],
+        );
+        assert_order(
+            ensure_body,
+            "request_windows_claude_main_process_debugger_until_available",
+            "thread::sleep(Duration::from_millis(",
+            "Windows debugger requests should wait for inspector availability before outer retry sleep",
+        );
+    }
+
+    #[test]
+    fn windows_debugger_automation_uses_short_condition_polling() {
+        let request_body = windows_debugger_request_body();
+
+        assert_contains_all(
+            request_body,
+            &[
+                "function Wait-ClaudeCondition",
+                "Wait-ClaudeCondition 30 40",
+                "Wait-ClaudeCondition 16 40",
+                "Start-Sleep -Milliseconds 40",
+            ],
+        );
+        assert_contains_none(
+            request_body,
+            &[
+                "Start-Sleep -Milliseconds 120",
+                "for ($attempt = 0; $attempt -lt 20; $attempt++)",
+                "Start-Sleep -Milliseconds 500",
+            ],
+        );
+    }
+
+    #[test]
+    fn windows_debugger_prompt_cleanup_runs_after_toggle_without_blocking_completion() {
+        let request_body = windows_debugger_request_body();
+
+        assert_contains_all(
+            request_body,
+            &[
+                "Start-ClaudeInspectorPromptCleanupJob $window 2000",
+                "Start-ClaudeInspectorPromptCleanupJob $window 4500",
+                "Windows Main Process Debugger automation completed.",
+            ],
+        );
+        assert_order(
+            request_body,
+            "$togglePattern.Toggle()",
+            "Start-ClaudeInspectorPromptCleanupJob $window 4500",
+            "inspector cleanup job should start immediately after toggling the debugger",
+        );
+        assert_order(
+            request_body,
+            "Start-ClaudeInspectorPromptCleanupJob $window 4500",
+            "Windows Main Process Debugger automation completed.",
+            "post-toggle inspector cleanup should not block automation completion",
+        );
+        assert!(
+            !request_body.contains("Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null")
         );
     }
 
@@ -5227,11 +5448,19 @@ mod tests {
         assert!(TRANSLATION_RUNTIME.contains("\"Code\": \"\\u4ee3\\u7801\""));
         assert!(!TRANSLATION_RUNTIME.contains("[class*=\"code\"]"));
         assert!(TRANSLATION_RUNTIME.contains("codeUiLabelFallback"));
+        assert!(TRANSLATION_RUNTIME.contains("uiOnlyDomFallback"));
+        assert!(TRANSLATION_RUNTIME.contains("genSel"));
+        assert!(TRANSLATION_RUNTIME.contains("uiHint"));
+        assert!(TRANSLATION_RUNTIME.contains("shouldTranslateDomFallbackTextNode"));
+        assert!(TRANSLATION_RUNTIME.contains("likelyUiTextNode(node)"));
+        assert!(TRANSLATION_RUNTIME.contains("generatedContentTextNode(node)"));
         assert!(TRANSLATION_RUNTIME.contains("reversibleTextFallback"));
         assert!(TRANSLATION_RUNTIME.contains("__cslOrigText"));
         assert!(TRANSLATION_RUNTIME.contains("__cslTranslatedText"));
         assert!(TRANSLATION_RUNTIME.contains("restoreTextNode"));
         assert!(TRANSLATION_RUNTIME.contains("TEXT_EN"));
+        assert!(TRANSLATION_RUNTIME.contains(r#"[class*="markdown"]"#));
+        assert!(TRANSLATION_RUNTIME.contains(r#"[class*="prose"]"#));
     }
 
     #[test]
