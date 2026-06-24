@@ -13,6 +13,7 @@
     "tauri:build": "tauri build",
     "tauri:build:dmg": "scripts/build-macos-dmg.sh",
     "tauri:sign:macos": "scripts/sign-macos-bundle.sh",
+    "icons": "tauri icon public/icon.png && node scripts/sharpen-small-icons.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test:unit": "tsc -p tsconfig.tests.json && node --test src/lib/*.test.mjs",
     "test": "npm run check && npm run test:unit"
@@ -30,6 +31,7 @@
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
     "@tauri-apps/cli": "^2.0.0",
     "@tsconfig/svelte": "^5.0.8",
+    "sharp": "^0.35.2",
     "svelte-check": "^4.0.0",
     "typescript": "^5.6.0",
     "vite": "^6.3.0"

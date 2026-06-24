@@ -41,6 +41,13 @@
   --motion-quick: 170ms cubic-bezier(0.2, 0.8, 0.2, 1);
   --motion-smooth: 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
   --motion-spring: 380ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Spacing scale used across cards, grids and section headings so layout
+     rhythm stays consistent instead of mixing ad-hoc 10/12/14/18px values. */
+  --space-xs: 6px;
+  --space-sm: 10px;
+  --space-md: 14px;
+  --space-lg: 18px;
+  --space-xl: 24px;
   background: var(--bg);
   color: var(--text);
 }
@@ -440,93 +447,9 @@ nav button.active svg {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-.sidebar-gateway,
-.sidebar-status {
-  display: grid;
-  gap: 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px;
-  background: var(--surface);
-}
-
-.sidebar-gateway {
-  margin-top: auto;
-}
-
-.sidebar-status {
-  margin-top: 10px;
-}
-
-.sidebar-status-line,
-.sidebar-status-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.sidebar-status-line {
-  justify-content: flex-start;
-}
-
-.sidebar-status-line strong,
-.sidebar-status-line span,
-.sidebar-gateway-field span,
-.sidebar-gateway-field strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-status-line span,
-.sidebar-gateway-field span {
-  color: var(--text-muted);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
-.sidebar-gateway-field {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-
-.sidebar-gateway-field code {
-  max-width: 100%;
-  padding: 6px 7px;
-  font-size: 10px;
-  line-height: 1.35;
-}
-
-.sidebar-gateway-field strong {
-  color: var(--text-soft);
-  text-transform: none;
-}
-
-.sidebar-gateway-actions {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.sidebar-gateway-actions .icon-button {
-  width: 100%;
-  min-height: 32px;
-}
-
-.sidebar-gateway-actions .gateway-start-button:not(:disabled) {
-  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
-  background: color-mix(in srgb, var(--accent) 16%, var(--surface-soft));
-  color: var(--accent);
-}
-
+/* sidebar-gateway-error: reused by the Gateway route's inline error banner.
+   The sidebar gateway/status card CSS that used to live here was removed once
+   those controls moved into the Gateway route. */
 .sidebar-gateway-error {
   border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
   border-radius: 7px;
@@ -538,42 +461,6 @@ nav button.active svg {
   overflow-wrap: anywhere;
 }
 
-.status-dot {
-  position: relative;
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--text-muted);
-}
-
-.sidebar-gateway.online .status-dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.sidebar-status p,
-.sidebar-status small,
-.sidebar-status-meta span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sidebar-status p {
-  margin: 0;
-  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-}
-
-.sidebar-status small {
-  display: block;
-  color: var(--text-muted);
-}
-
 .workspace {
   min-width: 0;
   min-height: 0;
@@ -581,12 +468,15 @@ nav button.active svg {
   overflow: auto;
   border-left: 1px solid var(--workspace-border);
   background: var(--bg);
-  padding: 26px 32px 34px;
+  /* Slightly larger outer padding than the --space-xl token so the workspace
+     reads as a distinct frame around the route stack (24px top/right, plus a
+     little extra breathing room at the bottom for scroll clearance). */
+  padding: var(--space-xl) var(--space-xl) 32px;
 }
 
 .route-stack {
   display: grid;
-  gap: 18px;
+  gap: var(--space-lg);
   width: 100%;
   max-width: 1120px;
   min-width: 0;
@@ -675,16 +565,16 @@ nav button.active svg {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 18px;
-  min-height: 132px;
+  gap: var(--space-lg);
   overflow: hidden;
-  padding: 24px;
+  padding: var(--space-xl) var(--space-xl) 20px;
 }
 
+/* compact-top-strip: sparse pages (no trailing actions) use a flatter,
+   shorter hero so the top band doesn't dominate the viewport. */
 .compact-top-strip {
   align-items: center;
-  min-height: auto;
-  padding: 16px 18px;
+  padding: 16px var(--space-md);
 }
 
 .compact-top-strip h1 {
@@ -834,13 +724,15 @@ nav button.active svg {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  border-bottom: 1px solid var(--border);
-  padding: 16px 18px;
+  gap: var(--space-md);
+  /* Use an inset hairline instead of border-bottom so the heading doesn't draw
+     a second line inside the panel-band's own border (avoids the "frame in a frame" look). */
+  box-shadow: inset 0 -1px 0 var(--border);
+  padding: 16px var(--space-lg);
 }
 
 .section-heading.compact {
-  padding-bottom: 14px;
+  padding-bottom: var(--space-md);
 }
 
 .section-actions {
@@ -874,14 +766,14 @@ nav button.active svg {
 
 .tool-grid {
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: var(--space-md);
+  padding: var(--space-md);
 }
 
 .gateway-panel {
   display: grid;
-  gap: 14px;
-  padding: 14px;
+  gap: var(--space-md);
+  padding: var(--space-md);
 }
 
 .gateway-route {
@@ -896,7 +788,7 @@ nav button.active svg {
 .provider-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-  gap: 10px;
+  gap: var(--space-sm);
 }
 
 .gateway-metrics > div,
@@ -1028,7 +920,7 @@ nav button.active svg {
 .gateway-request-panel {
   display: grid;
   gap: 12px;
-  padding: 14px;
+  padding: var(--space-md);
 }
 
 .compact-heading {
@@ -1053,14 +945,20 @@ nav button.active svg {
 
 .gateway-request-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 58px 72px 92px minmax(110px, max-content);
+  /* First column (client + method/path) gets the flex share so long paths can
+     truncate instead of squeezing the status/latency/time/privacy columns. */
+  grid-template-columns: minmax(160px, 1.6fr) auto auto auto auto;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface-strong);
-  padding: 10px;
+  padding: var(--space-sm);
+}
+
+.gateway-request-time {
+  min-width: 0;
 }
 
 .gateway-request-row strong,
@@ -1131,8 +1029,8 @@ code,
 .install-progress {
   display: grid;
   gap: 9px;
-  margin: 14px 12px 2px;
-  padding: 12px;
+  margin: var(--space-md) var(--space-sm) 2px;
+  padding: var(--space-md);
 }
 
 .progress-copy,
@@ -1185,14 +1083,14 @@ code,
 }
 
 .provider-summary {
-  padding: 12px;
+  padding: var(--space-md);
 }
 
 .system-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
-  gap: 10px;
-  padding: 12px;
+  gap: var(--space-md);
+  padding: var(--space-md);
 }
 
 .system-grid .empty-row {
@@ -1200,6 +1098,7 @@ code,
 }
 
 .system-card {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(86px, auto) minmax(220px, 1fr);
   grid-template-rows: minmax(0, 1fr) auto;
@@ -1219,8 +1118,16 @@ code,
 .system-card:hover {
   border-color: var(--border-strong);
   background: var(--tool-hover-bg);
-  transform: translateY(-4px);
-  box-shadow: 0 18px 40px color-mix(in srgb, var(--modal-shadow) 34%, transparent);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--modal-shadow) 26%, transparent);
+}
+
+/* A open card-action overflow popover must float above later grid siblings.
+   Without lifting its host card the sibling cards' stacking contexts (formed by
+   their hover transform / will-change) paint over the absolutistely-positioned
+   menu even though the menu has z-index:5. */
+.system-card:has(.card-action-overflow[open]) {
+  z-index: 6;
 }
 
 .system-main {
@@ -1305,6 +1212,69 @@ code,
   white-space: nowrap;
 }
 
+/* card-action-overflow: folds the least-urgent "New profile" action into a
+   native <details> popover so the connected-client card's main action row
+   (update / repair / launch) stays at most three buttons even when all are
+   present — the overflow keeps the row from overflowing a 300px card. */
+.card-action-overflow {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.card-action-overflow > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  list-style: none;
+  border-radius: 7px;
+}
+
+/* Hide the default <details> disclosure triangle. */
+.card-action-overflow > summary::-webkit-details-marker {
+  display: none;
+}
+
+.card-action-overflow > summary::marker {
+  content: "";
+}
+
+.card-overflow-toggle {
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* Menu hidden by default; revealed by details[open] so no JS drives visibility. */
+.card-action-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  display: none;
+  min-width: 200px;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 18px 40px var(--modal-shadow);
+}
+
+.card-action-overflow[open] .card-action-menu {
+  display: grid;
+}
+
+/* Menu button: full-width, left-aligned so the icon+label read as a row. */
+.card-action-menu .secondary-button {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 32px;
+  white-space: nowrap;
+}
+
 .tool-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1324,8 +1294,8 @@ code,
 .tool-card:hover {
   border-color: var(--border-strong);
   background: var(--tool-hover-bg);
-  transform: translateY(-4px);
-  box-shadow: 0 18px 40px color-mix(in srgb, var(--modal-shadow) 34%, transparent);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--modal-shadow) 26%, transparent);
 }
 
 .tool-main {
@@ -1439,8 +1409,8 @@ code,
 .doctor-list,
 .activity-list {
   display: grid;
-  gap: 8px;
-  padding: 12px;
+  gap: var(--space-sm);
+  padding: var(--space-md);
 }
 
 .problem-row,
@@ -1962,8 +1932,8 @@ input[type="checkbox"] {
   border-color: var(--border-strong);
   background: var(--surface-hover);
   color: var(--text);
-  transform: translateY(-4px) scale(1.012);
-  box-shadow: 0 18px 36px color-mix(in srgb, var(--modal-shadow) 34%, transparent);
+  transform: translateY(-2px) scale(1.012);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--modal-shadow) 26%, transparent);
 }
 
 .profile-tool-tabs button.selected {
@@ -2971,7 +2941,7 @@ input[type="checkbox"] {
 }
 
 .settings-list {
-  padding: 12px;
+  padding: var(--space-md);
 }
 
 .launch-options-grid {
@@ -3165,8 +3135,8 @@ input[type="checkbox"] {
 
 .about-content {
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: var(--space-sm);
+  padding: var(--space-md);
 }
 
 .about-summary {
@@ -3398,10 +3368,6 @@ input[type="checkbox"] {
     padding-bottom: 10px;
   }
 
-  .sidebar-status {
-    display: none;
-  }
-
   .sidebar-nav {
     grid-template-columns: repeat(4, minmax(0, 1fr));
     overflow: visible;
@@ -3499,6 +3465,11 @@ input[type="checkbox"] {
 
   .gateway-request-row em {
     justify-self: flex-start;
+  }
+
+  /* On narrow screens the timestamp is the least essential column — collapse it so the client/method column keeps room to breathe. */
+  .gateway-request-time {
+    display: none;
   }
 
   .top-actions .primary-button,

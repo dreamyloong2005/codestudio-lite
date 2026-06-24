@@ -44,7 +44,7 @@
     ToolLaunchPlan,
     ToolStatus
   } from "../types";
-  import { afterUpdate, onDestroy, tick } from "svelte";
+  import { afterUpdate, onDestroy, onMount, tick } from "svelte";
 
   export let snapshot: DetectionSnapshot | null = null;
   export let onRefresh: (options?: { quiet?: boolean; scheduleFollowup?: boolean }) => void | Promise<void> = () => {};
@@ -90,6 +90,10 @@
   let unlistenInstallProgress: (() => void) | null = null;
   let refreshing = false;
   let clearingClaudeEnv = false;
+  // Currently open card-action overflow (<details>) element, if any. Kept as a
+  // module-level ref so a single document click listener can close it when the
+  // user clicks outside the popover without wiring one listener per card.
+  let openOverflowDetails: HTMLDetailsElement | null = null;
   const vscodePluginToolIds = new Set(["codex-vscode", "claude-vscode", "gemini-code-assist"]);
 
   function clientSortRank(tool: ToolStatus) {
@@ -470,11 +474,19 @@
     })
     .catch(() => {});
 
+  // Close any open card-action overflow popover when the user clicks outside it
+  // or presses Escape. Registered once at module init and torn down on destroy so
+  // every card shares a single listener instead of one popover per card.
+  document.addEventListener("click", closeOverflowOnOutsideClick);
+  document.addEventListener("keydown", closeOverflowOnEscape);
+
   onDestroy(() => {
     unlistenInstallProgress?.();
     unlistenInstallTerminalOutput?.();
     void disposeInstallTerminal(true);
     void disposeLaunchTerminal(true);
+    document.removeEventListener("click", closeOverflowOnOutsideClick);
+    document.removeEventListener("keydown", closeOverflowOnEscape);
   });
 
   function desktopClientRouteForTool(toolId: string): string | null {
@@ -514,6 +526,10 @@
     } else {
       installingToolId = tool.id;
     }
+    // Jump to the dedicated client page so the user can watch the download
+    // progress. The stores are global, so the page subscribes to the same
+    // install/update stream on mount and renders the progress panel.
+    onNavigateToClient(tool.id);
     try {
       const result = tool.id === "codex-app"
         ? await installOrUpdateCodexClient()
@@ -676,7 +692,38 @@
     }
   }
 
-  async function refreshDashboard() {
+  // Toggle a card-action overflow <details>. Closing the previous popover when a
+// second one opens guarantees only one is open at a time; native <details>
+// would otherwise let several stay open simultaneously.
+function toggleOverflowDetails(event: MouseEvent, details: HTMLDetailsElement) {
+  event.stopPropagation();
+  const willOpen = !details.open;
+  if (openOverflowDetails && openOverflowDetails !== details) {
+    openOverflowDetails.open = false;
+  }
+  openOverflowDetails = willOpen ? details : null;
+}
+
+function closeOverflowOnOutsideClick(event: MouseEvent) {
+  if (!openOverflowDetails) {
+    return;
+  }
+  if (openOverflowDetails.contains(event.target as Node)) {
+    return;
+  }
+  openOverflowDetails.open = false;
+  openOverflowDetails = null;
+}
+
+function closeOverflowOnEscape(event: KeyboardEvent) {
+  if (event.key !== "Escape" || !openOverflowDetails) {
+    return;
+  }
+  openOverflowDetails.open = false;
+  openOverflowDetails = null;
+}
+
+async function refreshDashboard() {
     if (refreshing) {
       return;
     }
@@ -1012,15 +1059,25 @@
                   {isLaunchingTool(tool) ? $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restarting" : "toolLaunch.starting") : $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restart" : "toolLaunch.action")}
                 </button>
               {/if}
-              <button
-                class="secondary-button"
-                title={$t("tool.createConfig", { name: tool.name })}
-                disabled={isToolActionBusy(tool)}
-                on:click={() => onConfigureTool(tool)}
-              >
-                <AppIcon name="settings" size={16} />
-                {$t("common.createConfig")}
-              </button>
+              <details class="card-action-overflow">
+                <summary
+                  class="icon-button card-overflow-toggle"
+                  title={$t("tool.moreActionsTitle", { name: tool.name })}
+                  aria-label={$t("common.moreActions")}
+                  on:click={(event) => toggleOverflowDetails(event, (event.currentTarget as Element).closest("details") as HTMLDetailsElement)}
+                >⋯</summary>
+                <div class="card-action-menu">
+                  <button
+                    class="secondary-button"
+                    title={$t("tool.createConfig", { name: tool.name })}
+                    disabled={isToolActionBusy(tool)}
+                    on:click|stopPropagation={() => onConfigureTool(tool)}
+                  >
+                    <AppIcon name="settings" size={16} />
+                    {$t("common.createConfig")}
+                  </button>
+                </div>
+              </details>
             {/if}
           </div>
         </article>

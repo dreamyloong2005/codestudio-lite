@@ -183,9 +183,9 @@
               <strong>{entry.client}</strong>
               <small>{entry.method} {entry.path}</small>
             </div>
-            <span>{entry.status}</span>
-            <span>{entry.latencyMs}ms</span>
-            <span>{formatTime(entry.timestamp)}</span>
+            <span class="gateway-request-cell">{entry.status}</span>
+            <span class="gateway-request-cell">{entry.latencyMs}ms</span>
+            <span class="gateway-request-time gateway-request-cell">{formatTime(entry.timestamp)}</span>
             <em>{privacyActionLabel(entry)}</em>
           </div>
         {/each}

@@ -112,7 +112,7 @@
 </script>
 
 <div class="route-stack">
-  <section class="top-strip">
+  <section class="top-strip compact-top-strip">
     <div>
       <span class="eyebrow">{$t("settings.eyebrow")}</span>
       <h1>{$t("settings.title")}</h1>

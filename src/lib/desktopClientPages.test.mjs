@@ -28,7 +28,7 @@ test("desktop client pages are shown only on Windows and macOS", () => {
   assert.doesNotMatch(app, /codexClientAvailable = snapshot\?\.platform !== "linux"/);
 });
 
-test("dashboard desktop client actions run in place instead of navigating to client pages", () => {
+test("dashboard desktop client install/update navigates to the client page to show progress", () => {
   const dashboard = read("src/routes/Dashboard.svelte");
 
   assert.match(dashboard, /installOrUpdateCodexClient/);
@@ -36,6 +36,9 @@ test("dashboard desktop client actions run in place instead of navigating to cli
   assert.match(dashboard, /tool\.id === "codex-app"[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
   assert.match(dashboard, /tool\.id === "claude-desktop"[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
   assert.doesNotMatch(dashboard, /if \(tool\.id === "codex-app"\) \{\s*onOpenCodexClient\(\)/);
+  // install/update must hand off to the dedicated client page so the user can
+  // watch the download/progress stream that the page renders from the store.
+  assert.match(dashboard, /triggerDesktopClientAction\(tool: ToolStatus, mode: "install" \| "update"\) \{[\s\S]*onNavigateToClient\(tool\.id\)/);
 });
 
 test("route switches refresh the active CodeStudio Lite page", () => {
