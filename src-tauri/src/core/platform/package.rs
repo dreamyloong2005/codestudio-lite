@@ -46,6 +46,19 @@ pub struct MsixRemoveReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MsixPayloadRemoveReport {
+    pub success: bool,
+    pub message: String,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    #[serde(default)]
+    pub removed_payloads: Vec<String>,
+    #[serde(default)]
+    pub remaining_payloads: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PackageCapability {
     pub id: String,
@@ -249,6 +262,394 @@ try {{
     let json = run_powershell(&script)?;
     serde_json::from_str(&json)
         .map_err(|err| format!("Failed to parse MSIX uninstall result: {err}"))
+}
+
+pub fn remove_first_msix_package(package_identities: &[&str]) -> Result<MsixRemoveReport, String> {
+    if !cfg!(target_os = "windows") {
+        return Err("MSIX uninstall is only supported on Windows.".to_string());
+    }
+    let Some(installed) = detect_first_msix_package(package_identities) else {
+        return Ok(MsixRemoveReport {
+            success: true,
+            message: "MSIX package was not installed".to_string(),
+            notes: Vec::new(),
+        });
+    };
+    let Some(package_name) = installed
+        .package_family_name
+        .as_deref()
+        .and_then(|family| {
+            package_identities
+                .iter()
+                .find(|identity| family.starts_with(&format!("{identity}_")))
+                .copied()
+        })
+        .or_else(|| {
+            package_identities
+                .iter()
+                .find(|identity| installed.path.contains(**identity))
+                .copied()
+        })
+    else {
+        return Err("Unable to resolve packaged app identity for uninstall.".to_string());
+    };
+    remove_msix_package(package_name)
+}
+
+pub fn remove_claude_msix_payloads(
+    package_identities: &[&str],
+    publisher_suffix: &str,
+) -> Result<MsixPayloadRemoveReport, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(MsixPayloadRemoveReport {
+            success: true,
+            message: "MSIX/AppX payload cleanup is only needed on Windows.".to_string(),
+            notes: Vec::new(),
+            removed_payloads: Vec::new(),
+            remaining_payloads: Vec::new(),
+        });
+    }
+    let script = claude_msix_payload_cleanup_script(package_identities, publisher_suffix);
+    let json = run_powershell(&script)?;
+    serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse MSIX payload cleanup result: {err}"))
+}
+
+fn claude_msix_payload_cleanup_script(
+    package_identities: &[&str],
+    publisher_suffix: &str,
+) -> String {
+    let identity_prefixes = package_identities
+        .iter()
+        .map(|identity| ps_quote(identity))
+        .collect::<Vec<_>>()
+        .join(", ");
+    r#"
+$ErrorActionPreference = 'Continue'
+$root = 'C:\Program Files\WindowsApps'
+$identityPrefixes = @(__IDENTITY_PREFIXES__)
+$publisherSuffix = __PUBLISHER_SUFFIX__
+$notes = @()
+$removedPayloads = @()
+$remainingPayloads = @()
+$scanFailed = $false
+
+function Test-ClaudePackageDirectoryName {
+  param([System.IO.DirectoryInfo]$Dir)
+  if ($null -eq $Dir) { return $false }
+  $rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
+  $dirFull = [System.IO.Path]::GetFullPath($Dir.FullName).TrimEnd('\')
+  if (-not $dirFull.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    return $false
+  }
+  $matchedIdentity = $false
+  foreach ($identity in $identityPrefixes) {
+    $expectedPrefix = $identity + '_'
+    if ($Dir.Name.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $Dir.Name.EndsWith('__' + $publisherSuffix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $Dir.Name -like '*_x64__*') {
+      $matchedIdentity = $true
+      break
+    }
+  }
+  if (-not $matchedIdentity) { return $false }
+  return $true
+}
+
+function Test-ClaudeCompletePayloadDirectory {
+  param([System.IO.DirectoryInfo]$Dir)
+  if (-not (Test-ClaudePackageDirectoryName $Dir)) { return $false }
+  $dirFull = [System.IO.Path]::GetFullPath($Dir.FullName).TrimEnd('\')
+  if (-not (Test-Path -LiteralPath (Join-Path $dirFull 'AppxManifest.xml') -PathType Leaf)) {
+    return $false
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $dirFull 'app\Claude.exe') -PathType Leaf)) {
+    return $false
+  }
+  return $true
+}
+
+function Test-ClaudePartialPayloadDirectory {
+  param([System.IO.DirectoryInfo]$Dir)
+  if (-not (Test-ClaudePackageDirectoryName $Dir)) { return $false }
+  $dirFull = [System.IO.Path]::GetFullPath($Dir.FullName).TrimEnd('\')
+  return (
+    (Test-Path -LiteralPath (Join-Path $dirFull 'app') -PathType Container) -or
+    (Test-Path -LiteralPath (Join-Path $dirFull 'app\resources') -PathType Container) -or
+    (Test-Path -LiteralPath (Join-Path $dirFull 'app\resources\cowork-svc.exe') -PathType Leaf)
+  )
+}
+
+function Test-ClaudePayloadDirectory {
+  param([System.IO.DirectoryInfo]$Dir)
+  return ((Test-ClaudeCompletePayloadDirectory $Dir) -or (Test-ClaudePartialPayloadDirectory $Dir))
+}
+
+function Invoke-ElevatedClaudePayloadCleanup {
+  param(
+    [string[]]$Paths,
+    [bool]$ScanRoot
+  )
+  $elevatedNotes = @()
+  $elevatedRemoved = @()
+  $elevatedRemaining = @()
+  $elevatedScanSucceeded = (-not $ScanRoot)
+  if ((-not $ScanRoot) -and ($null -eq $Paths -or $Paths.Count -eq 0)) {
+    return [pscustomobject]@{ notes = @(); removedPayloads = @(); remainingPayloads = @() }
+  }
+
+  $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('codestudio-lite-claude-cleanup-' + [guid]::NewGuid().ToString('N'))
+  $targetsPath = Join-Path $workRoot 'targets.json'
+  $resultPath = Join-Path $workRoot 'result.json'
+  $scriptPath = Join-Path $workRoot 'cleanup.ps1'
+  try {
+    New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
+    @($Paths) | ConvertTo-Json -Compress | Set-Content -LiteralPath $targetsPath -Encoding UTF8
+    @'
+param(
+  [Parameter(Mandatory=$true)][string]$TargetsPath,
+  [Parameter(Mandatory=$true)][string]$ResultPath,
+  [switch]$ScanRoot
+)
+$ErrorActionPreference = 'Continue'
+$root = 'C:\Program Files\WindowsApps'
+$identityPrefixes = @(__IDENTITY_PREFIXES__)
+$publisherSuffix = __PUBLISHER_SUFFIX__
+$notes = @()
+$removedPayloads = @()
+$remainingPayloads = @()
+$scanSucceeded = (-not $ScanRoot)
+
+function Test-ClaudePackageDirectoryName {
+  param([System.IO.DirectoryInfo]$Dir)
+  if ($null -eq $Dir) { return $false }
+  $rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
+  $dirFull = [System.IO.Path]::GetFullPath($Dir.FullName).TrimEnd('\')
+  if (-not $dirFull.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    return $false
+  }
+  $matchedIdentity = $false
+  foreach ($identity in $identityPrefixes) {
+    $expectedPrefix = $identity + '_'
+    if ($Dir.Name.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $Dir.Name.EndsWith('__' + $publisherSuffix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $Dir.Name -like '*_x64__*') {
+      $matchedIdentity = $true
+      break
+    }
+  }
+  if (-not $matchedIdentity) { return $false }
+  return $true
+}
+
+function Test-ClaudeCompletePayloadDirectory {
+  param([System.IO.DirectoryInfo]$Dir)
+  if (-not (Test-ClaudePackageDirectoryName $Dir)) { return $false }
+  $dirFull = [System.IO.Path]::GetFullPath($Dir.FullName).TrimEnd('\')
+  if (-not (Test-Path -LiteralPath (Join-Path $dirFull 'AppxManifest.xml') -PathType Leaf)) {
+    return $false
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $dirFull 'app\Claude.exe') -PathType Leaf)) {
+    return $false
+  }
+  return $true
+}
+
+function Test-ClaudePartialPayloadDirectory {
+  param([System.IO.DirectoryInfo]$Dir)
+  if (-not (Test-ClaudePackageDirectoryName $Dir)) { return $false }
+  $dirFull = [System.IO.Path]::GetFullPath($Dir.FullName).TrimEnd('\')
+  return (
+    (Test-Path -LiteralPath (Join-Path $dirFull 'app') -PathType Container) -or
+    (Test-Path -LiteralPath (Join-Path $dirFull 'app\resources') -PathType Container) -or
+    (Test-Path -LiteralPath (Join-Path $dirFull 'app\resources\cowork-svc.exe') -PathType Leaf)
+  )
+}
+
+function Test-ClaudePayloadDirectory {
+  param([System.IO.DirectoryInfo]$Dir)
+  return ((Test-ClaudeCompletePayloadDirectory $Dir) -or (Test-ClaudePartialPayloadDirectory $Dir))
+}
+
+if ($ScanRoot) {
+  try {
+    $targetDirs = Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop |
+      Where-Object { Test-ClaudePayloadDirectory $_ }
+    $scanSucceeded = $true
+  } catch {
+    $notes += ('Elevated scan could not enumerate WindowsApps while verifying Claude Desktop package files: ' + [string]$_.Exception.Message)
+    $targetDirs = @()
+  }
+} else {
+  try {
+    $rawTargets = Get-Content -LiteralPath $TargetsPath -Raw -ErrorAction Stop
+    $parsedTargets = if ([string]::IsNullOrWhiteSpace($rawTargets)) { @() } else { $rawTargets | ConvertFrom-Json }
+    $targets = @($parsedTargets)
+  } catch {
+    $notes += ('Failed to read elevated Claude Desktop cleanup targets: ' + [string]$_.Exception.Message)
+    $targets = @()
+  }
+  $targetDirs = foreach ($target in $targets) {
+    Get-Item -LiteralPath ([string]$target) -ErrorAction SilentlyContinue
+  }
+}
+
+foreach ($dir in $targetDirs) {
+  $targetPath = if ($null -ne $dir) { [string]$dir.FullName } else { '' }
+  if (-not (Test-ClaudePayloadDirectory $dir)) {
+    $notes += ('Skipped unsafe Claude Desktop cleanup target: ' + $targetPath)
+    if (Test-Path -LiteralPath $targetPath) {
+      $remainingPayloads += $targetPath
+    }
+    continue
+  }
+
+  try {
+    Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+  } catch {
+    $notes += ('Elevated direct removal failed for {0}: {1}' -f $dir.FullName, [string]$_.Exception.Message)
+    $takeown = Join-Path $env:SystemRoot 'System32\takeown.exe'
+    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+    if (Test-Path -LiteralPath $takeown) {
+      Start-Process -FilePath $takeown -ArgumentList @('/F', $dir.FullName, '/R', '/D', 'Y') -WindowStyle Hidden -Wait -PassThru | Out-Null
+    }
+    if (Test-Path -LiteralPath $icacls) {
+      $principal = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+      $grant = $principal + ':(OI)(CI)F'
+      Start-Process -FilePath $icacls -ArgumentList @($dir.FullName, '/grant', $grant, '/T', '/C') -WindowStyle Hidden -Wait -PassThru | Out-Null
+    }
+    try {
+      Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+    } catch {
+      $notes += ('Elevated permission repair removal failed for {0}: {1}' -f $dir.FullName, [string]$_.Exception.Message)
+    }
+  }
+
+  if (Test-Path -LiteralPath $dir.FullName) {
+    $remainingPayloads += [string]$dir.FullName
+  } else {
+    $removedPayloads += [string]$dir.FullName
+  }
+}
+
+[pscustomobject]@{
+  notes = @($notes)
+  removedPayloads = @($removedPayloads)
+  remainingPayloads = @($remainingPayloads)
+  scanSucceeded = [bool]$scanSucceeded
+} | ConvertTo-Json -Compress -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+'@ | Set-Content -LiteralPath $scriptPath -Encoding UTF8
+
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershell)) { $powershell = 'powershell.exe' }
+    $elevatedArgs = @(
+      '-NoLogo',
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      $scriptPath,
+      '-TargetsPath',
+      $targetsPath,
+      '-ResultPath',
+      $resultPath
+    )
+    if ($ScanRoot) {
+      $elevatedArgs += '-ScanRoot'
+    }
+    $process = Start-Process -FilePath $powershell -ArgumentList $elevatedArgs -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {
+      $elevatedNotes += ('Elevated Claude Desktop cleanup exited with code ' + $process.ExitCode)
+    }
+    if (Test-Path -LiteralPath $resultPath) {
+      $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+      $elevatedNotes += @($result.notes)
+      $elevatedRemoved += @($result.removedPayloads)
+      $elevatedRemaining += @($result.remainingPayloads)
+      $elevatedScanSucceeded = [bool]$result.scanSucceeded
+    } else {
+      $elevatedNotes += 'Elevated Claude Desktop cleanup did not produce a verification report.'
+      foreach ($path in $Paths) {
+        if (Test-Path -LiteralPath $path) {
+          $elevatedRemaining += [string]$path
+        }
+      }
+    }
+  } catch {
+    $elevatedNotes += ('Failed to run elevated Claude Desktop cleanup: ' + [string]$_.Exception.Message)
+    foreach ($path in $Paths) {
+      if (Test-Path -LiteralPath $path) {
+        $elevatedRemaining += [string]$path
+      }
+    }
+  } finally {
+    Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  [pscustomobject]@{
+    notes = @($elevatedNotes)
+    removedPayloads = @($elevatedRemoved)
+    remainingPayloads = @($elevatedRemaining)
+    scanSucceeded = [bool]$elevatedScanSucceeded
+  }
+}
+
+if (Test-Path -LiteralPath $root -PathType Container) {
+  try {
+    $payloads = Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop |
+      Where-Object { Test-ClaudePayloadDirectory $_ }
+  } catch {
+    $scanFailed = $true
+    $notes += ('Failed to enumerate WindowsApps while verifying Claude Desktop package files: ' + [string]$_.Exception.Message)
+    $payloads = @()
+  }
+
+  foreach ($dir in $payloads) {
+    try {
+      Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+    } catch {
+      $notes += ('Failed to remove Claude Desktop MSIX/AppX payload {0}: {1}' -f $dir.FullName, [string]$_.Exception.Message)
+    }
+    if (Test-Path -LiteralPath $dir.FullName) {
+      $remainingPayloads += [string]$dir.FullName
+    } else {
+      $removedPayloads += [string]$dir.FullName
+    }
+  }
+}
+
+if ($remainingPayloads.Count -gt 0 -or $scanFailed) {
+  $elevated = Invoke-ElevatedClaudePayloadCleanup -Paths @($remainingPayloads) -ScanRoot ([bool]$scanFailed)
+  $notes += @($elevated.notes)
+  $removedPayloads += @($elevated.removedPayloads)
+  $remainingPayloads = @($elevated.remainingPayloads)
+  if ($scanFailed -and [bool]$elevated.scanSucceeded) {
+    $scanFailed = $false
+  }
+}
+
+$success = (($remainingPayloads.Count -eq 0) -and (-not $scanFailed))
+$message = if ($success) {
+  if ($removedPayloads.Count -gt 0) {
+    'Claude Desktop MSIX/AppX package files removed and verified.'
+  } else {
+    'No Claude Desktop MSIX/AppX package files remain.'
+  }
+} elseif ($scanFailed) {
+  'Claude Desktop MSIX/AppX package file verification failed because WindowsApps could not be enumerated.'
+} else {
+  'Claude Desktop MSIX/AppX package files remain: ' + ($remainingPayloads -join '; ')
+}
+[pscustomobject]@{
+  success = [bool]$success
+  message = [string]$message
+  notes = @($notes)
+  removedPayloads = @($removedPayloads)
+  remainingPayloads = @($remainingPayloads)
+} | ConvertTo-Json -Compress -Depth 4
+"#
+    .replace("__IDENTITY_PREFIXES__", &identity_prefixes)
+    .replace("__PUBLISHER_SUFFIX__", &ps_quote(publisher_suffix))
 }
 
 pub fn probe_msix_capabilities() -> Vec<PackageCapability> {
@@ -1036,7 +1437,9 @@ fn ps_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{desktop_package_fallback_script, plist_string_value};
+    use super::{
+        claude_msix_payload_cleanup_script, desktop_package_fallback_script, plist_string_value,
+    };
 
     #[test]
     fn reads_string_values_from_macos_info_plist() {
@@ -1075,5 +1478,38 @@ mod tests {
         assert!(script.contains("'Claude_pzs8sxrjxfjjc'"));
         assert!(script.contains("--remote-debugging-port=9229"));
         assert!(!script.contains("__CODESTUDIO"));
+    }
+
+    #[test]
+    fn claude_msix_payload_cleanup_script_removes_only_verified_claude_windowsapps_dirs() {
+        let script =
+            claude_msix_payload_cleanup_script(&["Claude", "Anthropic.Claude"], "pzs8sxrjxfjjc");
+
+        assert!(script.contains("C:\\Program Files\\WindowsApps"));
+        assert!(script.contains("$identityPrefixes = @('Claude', 'Anthropic.Claude')"));
+        assert!(script.contains("$publisherSuffix = 'pzs8sxrjxfjjc'"));
+        assert!(script.contains("AppxManifest.xml"));
+        assert!(script.contains("app\\Claude.exe"));
+        assert!(script.contains("Remove-Item -LiteralPath $dir.FullName -Recurse -Force"));
+        assert!(script.contains("Test-Path -LiteralPath $dir.FullName"));
+        assert!(script.contains("Invoke-ElevatedClaudePayloadCleanup"));
+        assert!(script.contains("-Verb RunAs"));
+        assert!(script.contains("takeown.exe"));
+        assert!(script.contains("icacls.exe"));
+        assert!(script.contains("scanSucceeded"));
+        assert!(script.contains("remainingPayloads"));
+        assert!(!script.contains("Remove-Item -LiteralPath $root -Recurse"));
+    }
+
+    #[test]
+    fn claude_msix_payload_cleanup_script_includes_partial_package_residue() {
+        let script =
+            claude_msix_payload_cleanup_script(&["Claude", "Anthropic.Claude"], "pzs8sxrjxfjjc");
+
+        assert!(script.contains("Test-ClaudePackageDirectoryName"));
+        assert!(script.contains("Test-ClaudeCompletePayloadDirectory"));
+        assert!(script.contains("Test-ClaudePartialPayloadDirectory"));
+        assert!(script.contains("app\\resources\\cowork-svc.exe"));
+        assert!(script.contains("Test-ClaudePayloadDirectory"));
     }
 }

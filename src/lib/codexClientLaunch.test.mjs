@@ -67,7 +67,7 @@ test("Codex client notices are localized and dismiss with an icon", () => {
   }
 });
 
-test("Codex client hides stale update plan while settings are being replanned", () => {
+test("Codex client keeps cached update plan visible while background refresh runs", () => {
   const route = read("src/routes/CodexClient.svelte");
   const store = read("src/lib/codexClientStore.ts");
   const zhCN = read("src/lib/locales/zh-CN.ts");
@@ -78,9 +78,12 @@ test("Codex client hides stale update plan while settings are being replanned", 
   assert.match(store, /planStale:\s*boolean/);
   assert.match(store, /function planAffectingSettingsChanged/);
   assert.match(store, /planAffectingSettingsChanged\(lastSavedSettings,\s*nextDraft\)/);
-  assert.match(route, /planUnavailable\s*=\s*planRefreshing\s*\|\|\s*view\.planStale/);
+  assert.match(route, /planUnavailable\s*=\s*kindView\.planStale/);
+  assert.doesNotMatch(route, /planUnavailable\s*=\s*planRefreshing\s*\|\|\s*view\.planStale/);
   assert.match(route, /effectivePlan\s*=\s*planUnavailable\s*\?\s*null\s*:\s*plan/);
   assert.match(route, /effectiveRelease\s*=\s*planUnavailable\s*\?\s*null\s*:\s*release/);
+  assert.match(route, /planRefreshText\s*=\s*\$t\("codexClient\.planRefreshing"\)/);
+  assert.match(route, /planRefreshing && effectivePlan/);
   assert.match(route, /\{#if planUnavailable\}/);
   assert.match(route, /codexClient\.planStale/);
 
@@ -88,6 +91,70 @@ test("Codex client hides stale update plan while settings are being replanned", 
     assert.match(dictionary, /"codexClient\.planRefreshing"/);
     assert.match(dictionary, /"codexClient\.planStale"/);
   }
+});
+
+test("Codex client refresh preserves draft edits made while the scan is in flight", () => {
+  const store = read("src/lib/codexClientStore.ts");
+
+  assert.match(store, /type ApplyStateOptions = \{[\s\S]*preserveDraft\?: boolean/);
+  assert.match(store, /const preserveDraft = Boolean\(options\.preserveDraft && current\.settingsDraft\)/);
+  assert.match(store, /if \(!preserveDraft\) \{[\s\S]*lastSavedSettingsKey = settingsKey\(mergedSettings\)/);
+  assert.match(store, /settingsDraft:\s*preserveDraft && existing\.settingsDraft\s*\? existing\.settingsDraft\s*:\s*\{ \.\.\.mergedSettings \}/);
+  assert.match(store, /settingsSaveStatus:\s*preserveDraft\s*\? existing\.settingsSaveStatus\s*:\s*"idle"/);
+  assert.match(store, /planStale:\s*preserveDraft\s*\? existing\.kindViews\[kind\]\.planStale\s*:\s*false/);
+  assert.match(store, /const refreshSettingsRevision = settingsSaveRevision/);
+  assert.match(store, /const preserveDraft = \(\) => settingsSaveRevision !== refreshSettingsRevision/);
+  assert.match(store, /applyState\(nextState,\s*withNetwork \? installKind : stateInstallKind\(nextState\),\s*\{ preserveDraft: preserveDraft\(\) \}\)/);
+  assert.match(store, /applyState\(nextState,\s*installKind,\s*\{ preserveDraft: preserveDraft\(\) \}\)/);
+});
+
+test("Codex client isolates Windows App and EXE tab operation state", () => {
+  const route = read("src/routes/CodexClient.svelte");
+  const store = read("src/lib/codexClientStore.ts");
+  const api = read("src/lib/api.ts");
+  const types = read("src/types.ts");
+  const commands = read("src-tauri/src/commands/codex_client.rs");
+  const core = read("src-tauri/src/core/codex_client.rs");
+
+  assert.match(store, /export type CodexClientInstallKind = "msix" \| "portable"/);
+  assert.match(store, /kindViews:\s*Record<CodexClientInstallKind,\s*CodexClientKindViewState>/);
+  assert.match(store, /function selectedKindView/);
+  assert.match(store, /patchKind\(/);
+  assert.match(store, /listenCodexClientProgress\(\(progress\) => \{\s*patchKind\(progress\.installKind/);
+  assert.match(store, /stageCodexClientUpdate\(\{\s*installKind/);
+  assert.match(store, /planCodexClientUpdate\(\{\s*installKind/);
+  assert.match(store, /operationResult:\s*result/);
+  assert.match(route, /kindView\s*=\s*view\.kindViews\[effectiveSelectedKind\]/);
+  assert.match(route, /stageReport\s*=\s*kindView\.stageReport/);
+  assert.match(route, /operationResult\s*=\s*kindView\.operationResult/);
+  assert.match(route, /progress\s*=\s*kindView\.progress/);
+  assert.match(route, /busyAction\s*=\s*kindView\.busyAction/);
+  assert.match(route, /state\s*=\s*kindView\.state/);
+  assert.doesNotMatch(route, /stageReport\s*=\s*view\.stageReport/);
+  assert.doesNotMatch(route, /operationResult\s*=\s*view\.operationResult/);
+  assert.doesNotMatch(route, /progress\s*=\s*view\.progress/);
+  assert.doesNotMatch(route, /busyAction\s*=\s*view\.busyAction/);
+  assert.doesNotMatch(route, /state\s*=\s*view\.state/);
+
+  assert.match(types, /export interface PlanCodexClientUpdateRequest \{[\s\S]*installKind\?: "msix" \| "portable" \| null;/);
+  assert.match(types, /export interface StageCodexClientUpdateRequest \{[\s\S]*installKind\?: "msix" \| "portable" \| null;/);
+  assert.match(types, /export interface CodexClientState \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(types, /export interface CodexClientStageReport \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(types, /export interface CodexClientProgress \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(types, /export interface CodexClientOperationResult \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(api, /export async function planCodexClientUpdate\(\s*request: PlanCodexClientUpdateRequest = \{\}/);
+  assert.match(api, /invoke\("plan_codex_client_update", \{ request \}\)/);
+  assert.match(api, /export async function stageCodexClientUpdate\(\s*request: StageCodexClientUpdateRequest/);
+  assert.match(api, /invoke\("stage_codex_client_update", \{ request \}\)/);
+  assert.match(commands, /PlanCodexClientUpdateRequest/);
+  assert.match(commands, /StageCodexClientUpdateRequest/);
+  assert.match(commands, /pub async fn plan_codex_client_update\(\s*request: PlanCodexClientUpdateRequest/);
+  assert.match(commands, /pub async fn stage_codex_client_update\(\s*app: tauri::AppHandle,\s*request: StageCodexClientUpdateRequest/);
+  assert.match(core, /pub struct PlanCodexClientUpdateRequest/);
+  assert.match(core, /pub struct StageCodexClientUpdateRequest/);
+  assert.match(core, /fn settings_for_install_kind/);
+  assert.match(core, /pub fn plan_update\(request: PlanCodexClientUpdateRequest\)/);
+  assert.match(core, /pub fn stage_update_with_progress<F>\(\s*request: StageCodexClientUpdateRequest/);
 });
 
 test("Codex client does not expose a Windows official update-source choice", () => {

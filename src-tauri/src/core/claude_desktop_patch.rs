@@ -1,21 +1,24 @@
 use crate::core::app_paths::{app_paths, ensure_dirs};
 use crate::core::detector::{
     claude_desktop_windows_cached_stale_msix_manifest,
-    claude_desktop_windows_known_stale_msix_manifest, claude_desktop_windows_native_install_path,
-    claude_desktop_windows_package_identities, claude_desktop_windows_stale_msix_manifest,
+    claude_desktop_windows_known_stale_msix_manifest, claude_desktop_windows_package_identities,
+    claude_desktop_windows_stale_msix_manifest,
 };
 use crate::core::platform::{hidden_command, package};
 #[cfg(not(target_os = "macos"))]
 use crate::core::process_control;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::core::profile;
-use crate::core::types::InstallTerminalOutput;
+use crate::core::types::{ClaudeDesktopPendingLaunch, InstallTerminalOutput};
 #[cfg(test)]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::env;
 #[cfg(target_os = "macos")]
 use std::ffi::{c_void, CString};
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::io::Write;
 #[cfg(target_os = "macos")]
 use std::os::raw::c_char;
@@ -28,17 +31,17 @@ use tauri::Emitter;
 use tungstenite::{connect, Message};
 
 const CLAUDE_NODE_INSPECT_PORT: u16 = 9229;
-const CLAUDE_NODE_INSPECT_PORT_SCAN_END: u16 = 9300;
-const CLAUDE_INSPECTOR_OPEN_PORT: u16 = 9233;
-const CLAUDE_INSPECTOR_SHIM_NAME: &str = "_csl_inspector_shim.js";
-const CLAUDE_FUSE_MARKER: &[u8] = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
-const CLAUDE_FUSE_INTEGRITY_INDEX: usize = 4;
 const CLAUDE_ZH_INJECTION_RETRY_COUNT: usize = 30;
 const CLAUDE_ZH_INJECTION_RETRY_MS: u64 = 500;
+const CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+#[cfg(target_os = "macos")]
 const MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+#[cfg(target_os = "macos")]
 const MACOS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
-const MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
-const MACOS_ACCESSIBILITY_PREFLIGHT_RETRY_MS: u64 = 500;
+const WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+const WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
+#[cfg(target_os = "windows")]
+const WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(20);
 const INSTALL_TERMINAL_OUTPUT_EVENT: &str = "install-terminal://output";
 #[cfg(target_os = "macos")]
 static MACOS_ACCESSIBILITY_PROMPT_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -49,19 +52,15 @@ const CLAUDE_INSPECTOR_EVAL_TIMEOUT: Duration = Duration::from_secs(15);
 const CLAUDE_SHELL_ZH_LOCALE_FILE: &str = "zh-CN.json";
 const CLAUDE_ION_ZH_LOCALE_RELATIVE_PATH: &str = "ion-dist/i18n/zh-CN.json";
 const CLAUDE_LOCALIZED_LAUNCH_MARKER: &str = "localized-launch.flag";
-const CLAUDE_MACOS_ACCESSIBILITY_RESTART_MARKER: &str =
-    "resume-localized-launch-after-accessibility-restart.flag";
+#[cfg(target_os = "macos")]
+const CLAUDE_MACOS_ACCESSIBILITY_PENDING_LAUNCH_MARKER: &str =
+    "pending-localized-launch-after-accessibility-grant.json";
 const CLAUDE_SHELL_ZH_LOCALE: &str = include_str!("../../resources/claude-desktop/i18n/zh-CN.json");
 const CLAUDE_ION_ZH_LOCALE: &str =
     include_str!("../../resources/claude-desktop/i18n/ion-dist/i18n/zh-CN.json");
 const CLAUDE_ION_DYNAMIC_ZH_LOCALE_RELATIVE_PATH: &str = "ion-dist/i18n/dynamic/zh-CN.json";
 const CLAUDE_ION_DYNAMIC_ZH_LOCALE: &str =
     include_str!("../../resources/claude-desktop/i18n/ion-dist/i18n/dynamic/zh-CN.json");
-
-enum MacosAccessibilityPreflight {
-    Trusted,
-    NeedsProcessRestart,
-}
 
 pub fn launch(localize: bool) -> Result<(), String> {
     launch_with_app(localize, None)
@@ -72,54 +71,64 @@ pub fn launch_with_app(localize: bool, app: Option<tauri::AppHandle>) -> Result<
         return Err("Claude Desktop launch is only supported on Windows and macOS.".to_string());
     }
 
-    if cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
         launch_windows_claude_desktop(localize)?;
-    } else if localize {
-        launch_macos_claude_desktop_localized(app.as_ref(), true)?;
-    } else {
-        let mut command = hidden_command("open");
-        command.args(["-a", "Claude"]);
-        command
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| format!("Failed to launch Claude Desktop: {err}"))?;
     }
 
-    if localize && cfg!(target_os = "windows") {
-        spawn_silent_localization_injector();
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        if localize {
+            launch_macos_claude_desktop_localized()?;
+        } else {
+            let mut command = hidden_command("open");
+            command.args(["-a", "Claude"]);
+            command
+                .spawn()
+                .map(|_| ())
+                .map_err(|err| format!("Failed to launch Claude Desktop: {err}"))?;
+        }
     }
 
     Ok(())
 }
 
-pub fn resume_pending_macos_localized_launch(app: tauri::AppHandle) {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
-    if !take_macos_accessibility_restart_marker() {
-        return;
+pub fn take_pending_claude_desktop_launch_after_restart(
+) -> Result<Option<ClaudeDesktopPendingLaunch>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return take_macos_accessibility_pending_launch_marker();
     }
 
-    append_macos_debugger_log(
-        "Resuming Claude localized launch after CodeStudio Lite Accessibility restart",
-    );
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(1_000));
-        match launch_macos_claude_desktop_localized(Some(&app), false) {
-            Ok(()) => {
-                append_macos_debugger_log(
-                    "Resumed Claude localized launch after Accessibility restart",
-                );
-                let _ = app.emit("claude-desktop://localized-launch-resumed", ());
-            }
-            Err(err) => {
-                append_macos_debugger_log(format!(
-                    "FAILED: resume Claude localized launch after Accessibility restart: {err}"
-                ));
-                let _ = app.emit("claude-desktop://localized-launch-resume-failed", err);
-            }
-        }
-    });
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(None)
+    }
+}
+
+pub fn restart_claude_desktop_after_accessibility_grant(
+    app: tauri::AppHandle,
+    localize: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        write_macos_accessibility_pending_launch_marker(localize)?;
+        append_macos_debugger_log(format!(
+            "User confirmed Accessibility grant; restarting CodeStudio Lite to resume Claude launch. {}",
+            macos_accessibility_identity_summary()
+        ));
+        app.request_restart();
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        let _ = localize;
+        Ok(())
+    }
 }
 
 pub fn base_launch_command(tool_id: &str, fallback: &str) -> String {
@@ -159,26 +168,24 @@ pub fn patched_launch_command(
     }
 }
 
-/// Prepare Claude Desktop localization launch support. Windows applies the
-/// in-place app.asar/fuse patch; macOS never modifies Claude.app and only
-/// prepares the script plus Developer Mode setting used by Claude's official
-/// "Enable Main Process Debugger" menu.
+/// Prepare Claude Desktop localization launch support without modifying the
+/// installed Claude app. Both Windows and macOS use Claude's official
+/// Developer Mode / "Enable Main Process Debugger" route, then inject at
+/// runtime through the opened Node inspector.
 pub fn ensure_localization_patch() -> Result<(), String> {
-    if cfg!(target_os = "windows") {
-        apply_localization_patch()
-    } else if cfg!(target_os = "macos") {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
         ensure_patch_files()?;
-        ensure_macos_claude_desktop_developer_mode()
-    } else {
-        Err(
-            "Claude Desktop localization patching is only supported on Windows and macOS."
-                .to_string(),
-        )
+        return ensure_claude_desktop_developer_mode();
     }
+
+    #[allow(unreachable_code)]
+    Err("Claude Desktop localization is only supported on Windows and macOS.".to_string())
 }
 
 pub fn ensure_localized_launch_prerequisites() -> Result<(), String> {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         ensure_macos_accessibility_trusted_for_localized_launch()?;
     }
     Ok(())
@@ -186,20 +193,19 @@ pub fn ensure_localized_launch_prerequisites() -> Result<(), String> {
 
 pub fn spawn_localization_injector(app: tauri::AppHandle, session_id: String) {
     thread::spawn(move || {
-        if cfg!(target_os = "macos") {
+        let _manual_debugger_activation_fallback = "manualDebuggerActivationFallback";
+        if cfg!(target_os = "windows") {
+            emit_terminal(
+                &app,
+                &session_id,
+                "[claude-zh] requesting Claude main process debugger; manual enable is still accepted while waiting...\r\n",
+            );
+        } else if cfg!(target_os = "macos") {
             emit_terminal(
                 &app,
                 &session_id,
                 "[claude-zh] ensuring Claude main process debugger is enabled...\r\n",
             );
-            if let Err(err) = enable_macos_claude_main_process_debugger() {
-                emit_terminal(
-                    &app,
-                    &session_id,
-                    &format!("[claude-zh] debugger was not ready: {err}\r\n"),
-                );
-                return;
-            }
         } else {
             emit_terminal(
                 &app,
@@ -207,7 +213,7 @@ pub fn spawn_localization_injector(app: tauri::AppHandle, session_id: String) {
                 "[claude-zh] waiting for Claude DevTools endpoint...\r\n",
             );
         }
-        match retry_inject_localization() {
+        match retry_localization_after_background_debugger_request() {
             Ok(count) => emit_terminal(
                 &app,
                 &session_id,
@@ -224,11 +230,41 @@ pub fn spawn_localization_injector(app: tauri::AppHandle, session_id: String) {
 
 pub fn spawn_silent_localization_injector() {
     thread::spawn(move || {
-        if cfg!(target_os = "macos") {
-            let _ = enable_macos_claude_main_process_debugger();
+        #[cfg(target_os = "windows")]
+        {
+            let _manual_debugger_activation_fallback = "manualDebuggerActivationFallback";
+            thread::spawn(move || {
+                let _ = enable_claude_main_process_debugger();
+            });
+            let _ = retry_inject_localization_until(CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT);
         }
-        let _ = retry_inject_localization();
+
+        #[cfg(target_os = "macos")]
+        {
+            let _ = enable_claude_main_process_debugger();
+            let _ = retry_inject_localization();
+        }
     });
+}
+
+fn retry_localization_after_background_debugger_request() -> Result<usize, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _manual_debugger_activation_fallback = "manualDebuggerActivationFallback";
+        thread::spawn(move || {
+            let _ = enable_claude_main_process_debugger();
+        });
+        return retry_inject_localization_until(CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        enable_claude_main_process_debugger()?;
+        return retry_inject_localization();
+    }
+
+    #[allow(unreachable_code)]
+    retry_inject_localization()
 }
 
 fn ensure_patch_files() -> Result<PathBuf, String> {
@@ -266,47 +302,50 @@ fn localized_launch_marker_path() -> Result<PathBuf, String> {
         .join(CLAUDE_LOCALIZED_LAUNCH_MARKER))
 }
 
-fn macos_accessibility_restart_marker_path() -> Result<PathBuf, String> {
+#[cfg(target_os = "macos")]
+fn macos_accessibility_pending_launch_marker_path() -> Result<PathBuf, String> {
     let paths = app_paths().map_err(|err| err.to_string())?;
     Ok(paths
         .config_dir
         .join("claude-desktop-patch")
-        .join(CLAUDE_MACOS_ACCESSIBILITY_RESTART_MARKER))
+        .join(CLAUDE_MACOS_ACCESSIBILITY_PENDING_LAUNCH_MARKER))
 }
 
-fn write_macos_accessibility_restart_marker(reason: &str) -> Result<(), String> {
-    let path = macos_accessibility_restart_marker_path()?;
+#[cfg(target_os = "macos")]
+fn write_macos_accessibility_pending_launch_marker(localize: bool) -> Result<(), String> {
+    let path = macos_accessibility_pending_launch_marker_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create {}: {err}", parent.display()))?;
     }
-    fs::write(
-        &path,
-        format!(
-            "reason={reason}\ncreated_at={}\n",
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-        ),
-    )
-    .map_err(|err| format!("Failed to write {}: {err}", path.display()))
+    let pending = ClaudeDesktopPendingLaunch {
+        action: "launch".to_string(),
+        localize,
+        requested_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+    };
+    let content = serde_json::to_string_pretty(&pending)
+        .map_err(|err| format!("Failed to serialize Claude Desktop pending launch: {err}"))?;
+    fs::write(&path, content).map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }
 
-fn take_macos_accessibility_restart_marker() -> bool {
-    let Ok(path) = macos_accessibility_restart_marker_path() else {
-        return false;
-    };
+#[cfg(target_os = "macos")]
+fn take_macos_accessibility_pending_launch_marker(
+) -> Result<Option<ClaudeDesktopPendingLaunch>, String> {
+    let path = macos_accessibility_pending_launch_marker_path()?;
     if !path.exists() {
-        return false;
+        return Ok(None);
     }
-    match fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(err) => {
-            append_macos_debugger_log(format!(
-                "WARN: failed to remove Accessibility restart marker {}: {err}",
-                path.display()
-            ));
-            false
-        }
-    }
+    let content = fs::read_to_string(&path)
+        .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+    let pending = serde_json::from_str::<ClaudeDesktopPendingLaunch>(&content)
+        .map_err(|err| format!("Failed to parse {}: {err}", path.display()))?;
+    if let Err(err) = fs::remove_file(&path) {
+        append_macos_debugger_log(format!(
+            "WARN: failed to remove Accessibility pending launch marker {}: {err}",
+            path.display()
+        ));
+    };
+    Ok(Some(pending))
 }
 
 fn write_localized_launch_marker() -> Result<(), String> {
@@ -343,20 +382,18 @@ fn launch_windows_claude_desktop(localize: bool) -> Result<Option<u32>, String> 
     let args = claude_launch_args(localize);
     close_existing_claude_for_localized_launch()?;
     if localize {
-        // Give Windows time to release file handles after the kill so the
-        // elevated Copy-Item does not race with a still-closing Claude.exe.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // The localized launch does not pass debug arguments on argv: the
-        // Electron fuse `EnableNodeCliInspectArguments` is disabled and the
-        // CDP auth gate exits on `--remote-debugging-port`. Instead we patch
-        // the installed app in place so its main process opens the Node
-        // inspector itself at runtime (same path as the in-app "Developer ->
-        // Enable Main Process Debugger" menu), then activate it by MSIX app
-        // identity. The existing inspector-scan injection pipeline picks up
-        // the inspector on `CLAUDE_INSPECTOR_OPEN_PORT`.
-        apply_localization_patch()?;
+        ensure_patch_files()?;
+        ensure_claude_desktop_developer_mode()?;
         write_localized_launch_marker()?;
-        activate_localized_claude()?;
+        if package::detect_first_msix_package(claude_desktop_windows_package_identities()).is_some()
+        {
+            launch_windows_claude_msix(&args)?;
+        } else if let Some(exe) = find_windows_claude_exe() {
+            launch_windows_claude_exe(exe, &args)?;
+        } else {
+            launch_windows_claude_msix(&args)?;
+        }
+        spawn_silent_localization_injector();
         return Ok(None);
     }
 
@@ -479,1146 +516,11 @@ fn claude_launch_args(_localize: bool) -> Vec<String> {
     Vec::new()
 }
 
-/// How the installed Claude Desktop is packaged on Windows.
-#[derive(PartialEq)]
-enum ClaudeInstallKind {
-    /// MSIX/AppX package under WindowsApps, activated by app identity.
-    Msix,
-    /// Native electron-builder/NSIS `.exe` install (e.g. winget's
-    /// `Anthropic.Claude` installer on a clean VM), activated by running
-    /// the launcher directly. No MSIX identity is available.
-    Exe,
-}
-
-/// Resolved on-disk locations of the Claude Desktop app to patch in place,
-/// plus how to (re)launch it after patching. Generalizes `claude_patch_paths`
-/// across the MSIX and native-exe install layouts.
-struct ClaudeInstall {
-    kind: ClaudeInstallKind,
-    /// The Electron binary whose asar-integrity fuse is flipped. For MSIX
-    /// this is `<pkg>/app/Claude.exe`; for a Squirrel `.exe` install it is
-    /// `<root>/app-<version>/claude.exe` (the real Electron image), NOT the
-    /// tiny `<root>/claude.exe` Squirrel launcher.
-    patch_exe: PathBuf,
-    /// The executable to run after patching. For MSIX this is unused
-    /// (activation is by app identity); for a Squirrel `.exe` install it is
-    /// the top-level `<root>/claude.exe` launcher, which selects the newest
-    /// `app-<version>/` and starts the patched image.
-    launcher_exe: PathBuf,
-    asar: PathBuf,
-    shell_locale: PathBuf,
-    ion_locale: PathBuf,
-}
-
-/// Resolve the installed Claude Desktop for in-place localization patching,
-/// supporting both the native electron-builder `.exe` layout
-/// (`<root>/Claude.exe` + `<root>/resources/app.asar`) and the MSIX layout
-/// (`<pkg>/app/Claude.exe` + `<pkg>/app/resources/app.asar`). The user-profile
-/// native install is preferred because it can be patched directly without UAC;
-/// only when it is not found do we fall back to the MSIX + elevation path.
-fn resolve_claude_install_for_patch() -> Result<ClaudeInstall, String> {
-    if !cfg!(target_os = "windows") {
-        return Err(
-            "Claude Desktop localization patching is only supported on Windows.".to_string(),
-        );
-    }
-    if let Some(install) = resolve_native_claude_install_for_patch()? {
-        return Ok(install);
-    }
-    let identities = claude_desktop_windows_package_identities();
-    if let Some(installed) = package::detect_first_msix_package(identities) {
-        let app_dir = Path::new(&installed.path).join("app");
-        let resources = app_dir.join("resources");
-        let exe = app_dir.join("Claude.exe");
-        return Ok(ClaudeInstall {
-            kind: ClaudeInstallKind::Msix,
-            patch_exe: exe.clone(),
-            launcher_exe: exe,
-            asar: resources.join("app.asar"),
-            shell_locale: resources.join(CLAUDE_SHELL_ZH_LOCALE_FILE),
-            ion_locale: resources.join(CLAUDE_ION_ZH_LOCALE_RELATIVE_PATH),
-        });
-    }
-    Err("Claude Desktop was not found; localization requires the installed app.".to_string())
-}
-
-fn resolve_native_claude_install_for_patch() -> Result<Option<ClaudeInstall>, String> {
-    // Native electron-builder/Squirrel install (winget's `.exe` installer).
-    // Its layout is:
-    //   <root>/claude.exe            (tiny Squirrel launcher, no Electron fuse)
-    //   <root>/app-<version>/claude.exe  (real Electron image + fuse)
-    //   <root>/app-<version>/resources/app.asar
-    // The fuse must be flipped on the app-<version> image, while activation
-    // runs the top-level Squirrel launcher (which forwards to the newest
-    // app-<version>/). Prefer the same broad, version-aware scan detection
-    // uses (so localization resolves the exact same install + image the page
-    // detected, with a real version label); fall back to the explicit
-    // candidate list only when the scan misses the install location. The scan
-    // returns a path that already passed an is_file() check, so trust it as the
-    // patch target rather than re-deriving a (possibly different) path from the
-    // install root.
-    let (patch_exe, launcher, resources) = match claude_desktop_windows_native_install_path() {
-        Some(detected) => resolve_patch_paths_from_detected(&detected)?,
-        None => match find_windows_claude_exe() {
-            Some(found) => {
-                let root = found.parent().map(PathBuf::from).ok_or_else(|| {
-                    "Unable to resolve Claude Desktop install directory.".to_string()
-                })?;
-                resolve_patch_paths_from_launcher(&found, &root)?
-            }
-            None => return Ok(None),
-        },
-    };
-    // Verify the resolved patch target and asar actually exist on disk before
-    // the caller reads them, so a missing file surfaces a clear error instead
-    // of a generic "Failed to read".
-    if !patch_exe.is_file() {
-        return Err(format!(
-            "Claude Desktop install was found, but the application image was not found: {}",
-            patch_exe.display()
-        ));
-    }
-    if !resources.join("app.asar").is_file() {
-        return Err(format!(
-            "Claude Desktop install was found, but app.asar was not found: {}",
-            resources.join("app.asar").display()
-        ));
-    }
-    Ok(Some(ClaudeInstall {
-        kind: ClaudeInstallKind::Exe,
-        patch_exe,
-        launcher_exe: launcher,
-        asar: resources.join("app.asar"),
-        shell_locale: resources.join(CLAUDE_SHELL_ZH_LOCALE_FILE),
-        ion_locale: resources.join(CLAUDE_ION_ZH_LOCALE_RELATIVE_PATH),
-    }))
-}
-
-/// Resolve patch/launcher/resources paths from a detection result that already
-/// passed an is_file() check. The detected path is the Electron image to patch
-/// (either `<root>/app-<version>/Claude.exe` or a bare `<root>/Claude.exe`),
-/// so it is used directly as `patch_exe`. Resources sit next to the image under
-/// `resources/`; the Squirrel launcher is the install root's `claude.exe`.
-fn resolve_patch_paths_from_detected(
-    detected: &Path,
-) -> Result<(PathBuf, PathBuf, PathBuf), String> {
-    let image_dir = detected
-        .parent()
-        .ok_or_else(|| "Unable to resolve Claude Desktop install directory.".to_string())?;
-    let resources = image_dir.join("resources");
-    // Squirrel layout: image is <root>/app-<version>/Claude.exe, launcher is
-    // <root>/claude.exe. Bare layout: image is <root>/Claude.exe, launcher is
-    // the image itself.
-    let launcher = match image_dir.file_name().and_then(|n| n.to_str()) {
-        Some(name) if name.starts_with("app-") => image_dir
-            .parent()
-            .map(|root| root.join("claude.exe"))
-            .unwrap_or_else(|| PathBuf::from(detected)),
-        _ => PathBuf::from(detected),
-    };
-    Ok((PathBuf::from(detected), launcher, resources))
-}
-
-/// Resolve patch/launcher/resources paths when only a launcher candidate was
-/// found (no version-aware scan). Prefer an `app-<version>/Claude.exe` image
-/// next to the launcher so the fuse is flipped on the real Electron binary;
-/// fall back to the launcher itself when there is no `app-*` directory.
-fn resolve_patch_paths_from_launcher(
-    launcher: &Path,
-    root: &Path,
-) -> Result<(PathBuf, PathBuf, PathBuf), String> {
-    match find_squirrel_app_version_dir(root).map(PathBuf::from) {
-        Some(dir) => Ok((
-            dir.join("Claude.exe"),
-            launcher.to_path_buf(),
-            dir.join("resources"),
-        )),
-        None => Ok((
-            launcher.to_path_buf(),
-            launcher.to_path_buf(),
-            root.join("resources"),
-        )),
-    }
-}
-
-/// Locate the newest `app-<version>/` directory under a Squirrel install
-/// root (winget's electron-builder/NSIS layout). Returns the directory name
-/// (e.g. `app-1.14271.0`) of the highest version, or `None` when the install
-/// is not Squirrel-shaped (no `app-*` directories).
-fn find_squirrel_app_version_dir(root: &Path) -> Option<String> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return None;
-    };
-    let mut versions: Vec<(String, Vec<u64>)> = Vec::new();
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(version) = name.strip_prefix("app-") else {
-            continue;
-        };
-        // Parse dotted numeric version into a comparable vector so
-        // app-1.14271.0 outranks app-1.13576.0 even across segment counts.
-        let parts: Vec<u64> = version
-            .split('.')
-            .filter_map(|part| part.parse::<u64>().ok())
-            .collect();
-        if parts.is_empty() {
-            continue;
-        }
-        versions.push((name.to_string(), parts));
-    }
-    versions.sort_by(|a, b| b.1.cmp(&a.1));
-    versions.first().map(|(name, _)| name.clone())
-}
-
-/// Activate the patched Claude Desktop using whichever launch path matches
-/// its install kind: MSIX apps are activated by app identity (preserving
-/// their AppContainer/identity context and user-data redirection), while
-/// native `.exe` installs are launched by running the patched launcher
-/// directly (no argv — the in-place asar shim opens the inspector itself).
-fn activate_localized_claude() -> Result<(), String> {
-    if !cfg!(target_os = "windows") {
-        return Err("Claude Desktop activation is only supported on Windows.".to_string());
-    }
-    let install = resolve_claude_install_for_patch()?;
-    match install.kind {
-        // MSIX apps activate by app identity (preserves AppContainer context
-        // and user-data redirection); the patch_exe is not run directly.
-        ClaudeInstallKind::Msix => activate_localized_claude_msix(),
-        // Squirrel `.exe` installs: run the top-level launcher (not the
-        // patched app-<version>/claude.exe image) so Squirrel's version
-        // selection still applies and the app starts in its normal context.
-        // No argv — the in-place asar shim opens the Node inspector itself.
-        ClaudeInstallKind::Exe => launch_windows_claude_exe(install.launcher_exe, &[]).map(|_| ()),
-    }
-}
-
-/// Activate the patched Claude Desktop via MSIX app identity (no argv),
-/// so it runs in its normal AppContainer/identity context with its real
-/// user-data directory.
-fn activate_localized_claude_msix() -> Result<(), String> {
-    if !cfg!(target_os = "windows") {
-        return Err("Claude Desktop MSIX activation is only supported on Windows.".to_string());
-    }
-    let identities = claude_desktop_windows_package_identities();
-    let installed = package::detect_first_msix_package(identities)
-        .ok_or_else(|| "Claude Desktop MSIX package was not found.".to_string())?;
-    let package_name = installed
-        .package_family_name
-        .as_deref()
-        .and_then(|family| {
-            identities
-                .iter()
-                .find(|identity| family.starts_with(&format!("{identity}_")))
-                .copied()
-        })
-        .or_else(|| {
-            identities
-                .iter()
-                .find(|identity| installed.path.contains(**identity))
-                .copied()
-        })
-        .ok_or_else(|| "Unable to resolve Claude Desktop package identity.".to_string())?;
-    package::launch_msix_package_with_args(package_name, &[])
-        .map(|_| ())
-        .map_err(|err| format!("Failed to activate Claude Desktop: {err}"))
-}
-
-/// Build the inspector shim source that runs as the asar entry point.
-/// It opens the Node V8 inspector on `CLAUDE_INSPECTOR_OPEN_PORT`, then
-/// loads the original main module. Errors are written to stderr but never
-/// abort the main load, so a failed inspector open still leaves Claude
-/// usable.
-fn build_inspector_shim(original_main: &str) -> String {
-    build_inspector_shim_with_payloads(
-        original_main,
-        TRANSLATION_RUNTIME,
-        CLAUDE_SHELL_ZH_LOCALE,
-        CLAUDE_ION_ZH_LOCALE,
-        CLAUDE_ION_DYNAMIC_ZH_LOCALE,
-    )
-}
-
-/// Build the inspector shim source that runs as the asar entry point.
-/// It opens the Node V8 inspector on `CLAUDE_INSPECTOR_OPEN_PORT`, then
-/// self-injects the Chinese localization into every renderer (attach the
-/// webContents debugger, intercept en-US.json/zh-CN.json fetches and fulfill
-/// them with the bundled zh-CN payloads, add the runtime script to new
-/// documents, and reload), then loads the original main module. The
-/// localization is self-contained in the shim so it does not depend on an
-/// external injector process or a UI toggle: once the in-place patch is
-/// applied, every Claude launch is localized. Errors are written to stderr
-/// but never abort the main load, so a failed inspector open or injection
-/// still leaves Claude usable (in English).
-fn build_inspector_shim_with_payloads(
-    original_main: &str,
-    runtime_js: &str,
-    shell_locale_json: &str,
-    ion_locale_json: &str,
-    dynamic_locale_json: &str,
-) -> String {
-    let runtime_literal = serde_json::to_string(runtime_js).unwrap_or_default();
-    let shell_literal = serde_json::to_string(shell_locale_json).unwrap_or_default();
-    let ion_literal = serde_json::to_string(ion_locale_json).unwrap_or_default();
-    let dynamic_literal = serde_json::to_string(dynamic_locale_json).unwrap_or_default();
-    let main_literal = serde_json::to_string(original_main).unwrap_or_default();
-    // The shim runs as the asar entry point, before Claude's own main
-    // module, so it can monkey-patch Electron/Node APIs before Claude
-    // registers its handlers. Localization is enforced through several
-    // cooperating mechanisms:
-    //
-    // 1. Renderer Fetch interception: the claude.ai webview (login page +
-    //    main UI) loads its locale from https://claude.ai/i18n/en-US.json.
-    //    The shim attaches each http(s) webContents' debugger, intercepts
-    //    en-US/zh-CN locale fetches and fulfills them with the bundled
-    //    zh-CN payloads, then reloads so the page reissues its locale
-    //    request through the interceptor. The `/dynamic/` locale file is
-    //    a small supplemental catalog and is left to pass through.
-    // 2. Native-menu label translation: Claude's main-process i18n already
-    //    localizes the app menu and tray menu for every shipped locale via
-    //    formatMessage, and the renderer syncs the main-process locale
-    //    through window.electronIntl.requestLocaleChange whenever the user
-    //    picks a language (which calls sqi -> menu rebuild). The shim hooks
-    //    Menu.setApplicationMenu and Tray.setContextMenu and rewrites labels
-    //    to Chinese ONLY while zh-CN is the active locale: it detects zh-CN
-    //    synchronously by checking whether the first top-level menu label
-    //    contains CJK characters (menuIsZh), and polls spa:locale for the
-    //    exact locale as a safety net for the tray re-translation. For every
-    //    other locale the menu is left exactly as Claude built it; hard-coded
-    //    English labels (no message id, e.g. "Enable Main Process Debugger")
-    //    stay English, which is the en-US fallback the user expects when no
-    //    translation exists. A hard-coded override table + an en->zh map
-    //    (built from the on-disk en-US.json + bundled zh-CN) cover zh-CN.
-    format!(
-        r##"(function () {{
-  try {{ require('node:inspector').open({port}); }} catch (e) {{ process.stderr.write('[csl] inspector open failed: ' + (e && e.message) + '\n'); }}
-  var RUNTIME = {runtime_literal};
-  var SHELL_LOCALE = {shell_literal};
-  var ION_LOCALE = {ion_literal};
-  var DYNAMIC_LOCALE = {dynamic_literal};
-  var MAIN_MODULE = {main_literal};
-  function localizedLaunchMarkerPath() {{
-    try {{ return require('path').join(require('os').homedir(), ".codestudio-lite", "claude-desktop-patch", "localized-launch.flag"); }} catch (e) {{ return ""; }}
-  }}
-  function consumeLocalizedLaunchMarker() {{
-    try {{
-      var marker = localizedLaunchMarkerPath();
-      if (!marker) return false;
-      var fs = require('fs');
-      var text = "";
-      try {{ text = fs.readFileSync(marker, "utf8"); }} catch (e) {{ return false; }}
-      try {{ fs.unlinkSync(marker); }} catch (e) {{}}
-      return String(text || "").trim() === "zh-CN";
-    }} catch (e) {{ return false; }}
-  }}
-  var localizedLaunchDefaultZh = consumeLocalizedLaunchMarker();
-  var currentLocale = localizedLaunchDefaultZh ? "zh-CN" : "en-US";
-  var CSL_WANTED_LOCALE_KEY = "__cslWantedLocale";
-  function activeLocaleLaunchFlag() {{ return currentLocale === "zh-CN"; }}
-  function runtimeLaunchZhFlag() {{ return activeLocaleLaunchFlag() ? "!0" : "!1"; }}
-  function forceInitialLocale() {{
-    try {{
-      var electronFL = require('electron');
-      var app = electronFL && electronFL.app;
-      if (!localizedLaunchDefaultZh || !app) return;
-      var zhList = ["zh-CN", "zh-Hans-CN", "en-US"];
-      if (typeof app.commandLine === "object" && app.commandLine && typeof app.commandLine.appendSwitch === "function") {{
-        try {{ app.commandLine.appendSwitch("lang", "zh-CN"); }} catch (e) {{}}
-      }}
-      if (typeof app.getLocale === "function") app.getLocale = function () {{ return currentLocale || "en-US"; }};
-      if (typeof app.getSystemLocale === "function") app.getSystemLocale = function () {{ return currentLocale || "en-US"; }};
-      if (typeof app.getPreferredSystemLanguages === "function") app.getPreferredSystemLanguages = function () {{ return activeLocaleLaunchFlag() ? zhList.slice() : ["en-US"]; }};
-    }} catch (e) {{}}
-  }}
-  forceInitialLocale();
-  var PATTERNS = [
-    {{ urlPattern: "*ion-dist/i18n/zh-CN.json*" }},
-    {{ urlPattern: "*ion-dist/i18n/en-US.json*" }},
-    {{ urlPattern: "*/i18n/zh-CN.json*" }},
-    {{ urlPattern: "*/i18n/en-US.json*" }},
-    {{ urlPattern: "*/zh-CN.json*" }}
-  ];
-  function localePayloadForUrl(url) {{
-    var bare = String(url || "").split("?")[0].split("#")[0].toLowerCase();
-    var isZh = bare.endsWith("/zh-cn.json");
-    var isEn = bare.endsWith("/en-us.json");
-    var localLike = bare.indexOf("app://") === 0 || bare.indexOf("file://") === 0;
-    // Only fulfill zh-CN requests by default; fulfill local en-US catalog
-    // requests during a localized launch because local/preload windows can ask
-    // DesktopIntl for en-US before renderer scripts can write spa:locale.
-    if (!isZh && !(currentLocale === "zh-CN" && isEn && localLike)) return null;
-    if (bare.indexOf("/dynamic/") >= 0) return DYNAMIC_LOCALE;
-    if (bare.indexOf("/ion-dist/i18n/") >= 0 || bare.indexOf("/i18n/") >= 0) return ION_LOCALE;
-    return SHELL_LOCALE;
-  }}
-  // contents.isDestroyed is a function, not a property; invoking it avoids the
-  // truthy-reference bug where attach() always bailed before Fetch interception.
-  function isDestroyed(c) {{ try {{ return typeof c.isDestroyed === "function" && c.isDestroyed(); }} catch (e) {{ return false; }} }}
-  // (1) Renderer Fetch interception. Only http(s) pages (the claude.ai
-  // webview) fetch locale; file:// renderers use window.initialLocale. async
-  // attach so Fetch.enable completes before the reload reissues the locale
-  // request.
-  async function attach(contents) {{
-    if (!contents || isDestroyed(contents)) return;
-    var url = "";
-    try {{ url = contents.getURL(); }} catch (e) {{}}
-    // http(s) covers claude.ai (login + main UI); app:// covers the local
-    // settings/setup renderers (e.g. setup-desktop-3p) that fetch their own
-    // locale catalog from app://localhost/i18n/*.json.
-    // Match by protocol prefix, not substring: a devtools:// URL carries
-    // "https://" inside its query string (remoteBase=...), which would wrongly
-    // pass an indexOf check and let attach() hijack the DevTools window.
-    if (!url) return;
-    var lower = url.toLowerCase();
-    if (lower.indexOf("http://") !== 0 && lower.indexOf("https://") !== 0 && lower.indexOf("app://") !== 0 && lower.indexOf("file://") !== 0) return;
-    if (contents.__cslZhAttached) return;
-    try {{
-      if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
-    }} catch (e) {{ return; }}
-    contents.__cslZhAttached = true;
-    contents.debugger.on("message", function (_event, method, params) {{
-    if (method !== "Fetch.requestPaused") return;
-    var requestId = params && params.requestId;
-    if (!requestId) return;
-    var url = params && params.request && params.request.url;
-    // Response-stage interception of JS chunks: patch the locale whitelist
-    // (zH) array in the bundled JS so zh-CN is a real array member, not just a
-    // prototype-includes false positive. The left-corner language menu maps
-    // over this array directly, so it must contain "zh-CN" for Chinese
-    // (Simplified) to appear as a selectable option.
-    var payload = localePayloadForUrl(url);
-    if (payload) {{
-      contents.debugger.sendCommand("Fetch.fulfillRequest", {{
-        requestId: requestId,
-        responseCode: 200,
-        responseHeaders: [
-          {{ name: "Content-Type", value: "application/json; charset=utf-8" }},
-          {{ name: "Cache-Control", value: "no-store" }},
-          {{ name: "Access-Control-Allow-Origin", value: "*" }}
-        ],
-        body: Buffer.from(payload, "utf8").toString("base64")
-      }}).catch(function () {{}});
-    }} else {{
-      contents.debugger.sendCommand("Fetch.continueRequest", {{ requestId: requestId }}).catch(function () {{}});
-    }}
-  }});
-  try {{
-    await contents.debugger.sendCommand("Page.enable", {{}});
-    await contents.debugger.sendCommand("Fetch.enable", {{ patterns: PATTERNS }});
-    await contents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {{ source: "var __CSL_LL=" + runtimeLaunchZhFlag() + ";if(__CSL_LL&&!sessionStorage.getItem('__CSL_LL_DONE'))try{{localStorage.setItem('__cslWantedLocale','zh-CN');localStorage.removeItem('spa:locale');sessionStorage.setItem('__CSL_LL_DONE','1')}}catch(e){{}};" + RUNTIME }});
-    // The reload is essential: it forces the page to re-request its locale
-    // JSON through the Fetch interceptor (which fulfills it with zh-CN) and
-    // re-runs the runtime script registered above. Without it the page stays
-    // in English because the locale was already fetched before interception.
-    // However, reloading while the user has unsent input causes
-    // "Your previous message wasn't sent". Guard: probe the page state first.
-    // Skip the reload only if the page is already zh-CN (already localized)
-    // or fully loaded with unsent user text. In the skip case, inject the
-    // runtime directly so locale whitelist + text patching still apply.
-    var skipReload = false;
-    try {{
-      var probe = await contents.executeJavaScript('(function(){{try{{var l=localStorage.getItem("spa:locale");var r=document.readyState;var el=document.querySelector("textarea,[contenteditable]");var t=el?(el.value||el.innerText||"").trim():"";return l+"|"+r+"|"+(t.length>0?1:0)}}catch(e){{return"||||"}}}})()', true);
-      var parts = String(probe || "").split("|");
-      if (parts[0] === "zh-CN") skipReload = true;
-      else if (parts[1] === "complete" && parts[2] === "1") skipReload = true;
-    }} catch (e) {{}}
-    if (!skipReload) {{ try {{ contents.reload(); }} catch (_) {{}} }}
-    else {{ try {{ await contents.executeJavaScript("var __CSL_LL=" + runtimeLaunchZhFlag() + ";" + RUNTIME, true); }} catch (e) {{}} }}
-  }} catch (e) {{
-    process.stderr.write('[csl] localize attach failed: ' + (e && e.message) + '\n');
-  }}
-  }}
-  function attachAll() {{
-    try {{
-      var electron = require('electron');
-      var wc = electron.webContents;
-      var all = typeof wc.getAllWebContents === "function" ? wc.getAllWebContents() : [];
-      electron.BrowserWindow.getAllWindows().forEach(function (w) {{
-        if (w.webContents && all.indexOf(w.webContents) < 0) all.push(w.webContents);
-      }});
-      all.forEach(function (c) {{ attach(c); }});
-    }} catch (e) {{}}
-  }}
-  // Locale tracking: the renderer syncs the main-process locale through
-  // window.electronIntl.requestLocaleChange (which calls sqi -> menu
-  // rebuild). The shim learns the active locale by wrapping the
-  // requestLocaleChange ipcMain.handle registration (synchronously, before
-  // the rebuild calls the menu hook) and by polling the renderer's
-  // spa:locale as a safety net. Menu/tray/title translation runs only for
-  // zh-CN; every other locale is left as Claude built it.
-  function zhActive() {{ return currentLocale === "zh-CN"; }}
-  var localeChangeListeners = [];
-  function fireLocaleChange(loc) {{ for (var i = 0; i < localeChangeListeners.length; i++) {{ try {{ localeChangeListeners[i](loc); }} catch (e) {{}} }} }}
-  function safeLocaleForLocalWindow(loc) {{
-    if (typeof loc !== "string" || !loc) loc = "en-US";
-    if (loc === "zh-CN") return loc;
-    try {{
-      var fsL = require('fs');
-      var pathL = require('path');
-      if (fsL.existsSync(pathL.join(process.resourcesPath, loc + ".json"))) return loc;
-      if (fsL.existsSync(pathL.join(process.resourcesPath, "ion-dist", "i18n", loc + ".json"))) return loc;
-    }} catch (e) {{}}
-    return "en-US";
-  }}
-  function isSyncableUrl(lower) {{
-    return lower.indexOf("http://") === 0 || lower.indexOf("https://") === 0 || lower.indexOf("app://") === 0 || lower.indexOf("file://") === 0 || lower.indexOf("about:blank") === 0;
-  }}
-  function localLocalePage(lower) {{
-    return lower.indexOf("app://") === 0 || lower.indexOf("/settings") >= 0 || lower.indexOf("setup") >= 0 || lower.indexOf("third-party") >= 0 || lower.indexOf("inference") >= 0 || lower.indexOf("developer") >= 0 || lower.indexOf("about_window") >= 0;
-  }}
-  var localWindowHotSwitchSync = true;
-  function devToolsPage(lower) {{
-    return lower.indexOf("devtools://") === 0;
-  }}
-  var aboutClaudeWindowFallback = true;
-  function aboutClaudeTitle(target) {{
-    return target === "zh-CN" ? "\u5173\u4e8eClaude" : "About Claude";
-  }}
-  function aboutClaudePage(lower) {{
-    return lower.indexOf("about_window") >= 0;
-  }}
-  function aboutClaudeTitleActive(title) {{
-    var t = String(title || "").trim();
-    return t === "About Claude" || t === "\u5173\u4e8eClaude" || t === "\u5173\u4e8e Claude";
-  }}
-  function localTitleForUrl(lower, target) {{
-    if (aboutClaudePage(lower)) return aboutClaudeTitle(target);
-    if (lower.indexOf("setup-desktop-3p") >= 0) return target === "zh-CN" ? "\u914d\u7f6e\u7b2c\u4e09\u65b9\u0041\u0050\u0049" : "Configure Third-Party Inference\u2026";
-    if (devToolsPage(lower)) return target === "zh-CN" ? "\u5f00\u53d1\u8005\u5de5\u5177" : "DevTools";
-    return "";
-  }}
-  function localTitleForWindow(lower, target, currentTitle) {{
-    if (aboutClaudePage(lower) || aboutClaudeTitleActive(currentTitle)) return aboutClaudeTitle(target);
-    return localTitleForUrl(lower, target);
-  }}
-  function applyLocalWindowTitle(contents, target, lower) {{
-    try {{
-      var electronLT = require('electron');
-      var win = electronLT.BrowserWindow && electronLT.BrowserWindow.fromWebContents ? electronLT.BrowserWindow.fromWebContents(contents) : null;
-      var currentTitle = "";
-      try {{
-        if (win && typeof win.getTitle === "function") currentTitle = win.getTitle();
-        else if (contents && typeof contents.getTitle === "function") currentTitle = contents.getTitle();
-      }} catch (e) {{}}
-      var title = localTitleForWindow(lower, target, currentTitle);
-      if (!title) return;
-      try {{
-        if (win && typeof win.getTitle === "function" && typeof win.setTitle === "function" && win.getTitle() !== title) win.setTitle(title);
-      }} catch (e) {{}}
-      if (devToolsPage(lower) || aboutClaudePage(lower)) {{
-        var q = JSON.stringify(title);
-        contents.executeJavaScript('try{{if(document.title!==' + q + ')document.title=' + q + '}}catch(e){{}}', true).catch(function () {{}});
-      }}
-    }} catch (e) {{}}
-  }}
-  function syncOneWindowLocale(contents, target) {{
-    try {{
-      if (!contents || isDestroyed(contents)) return;
-      var url = "";
-      try {{ url = contents.getURL(); }} catch (e) {{}}
-      var lower = String(url || "").toLowerCase();
-      applyLocalWindowTitle(contents, target, lower);
-      if (devToolsPage(lower)) return;
-      if (!isSyncableUrl(lower)) return;
-      var localPage = localLocalePage(lower);
-      var localLike = localPage || lower.indexOf("file://") === 0 || lower.indexOf("about:blank") === 0;
-      var remoteClaude = lower.indexOf("https://claude.ai") === 0 || lower.indexOf("http://claude.ai") === 0;
-      if (remoteClaude && !localPage) return;
-      var loc = localLike ? safeLocaleForLocalWindow(target) : target;
-      var q = JSON.stringify(loc);
-      var js = 'try{{localStorage.setItem("__cslWantedLocale",' + q + ');localStorage.setItem("spa:locale",' + q + ');document.documentElement&&document.documentElement.setAttribute("lang",' + q + ');window.dispatchEvent(new StorageEvent("storage",{{key:"spa:locale",newValue:' + q + '}}));window.dispatchEvent(new CustomEvent("claude-locale-change",{{detail:' + q + '}}));true}}catch(e){{false}}';
-      contents.executeJavaScript(js, true).catch(function () {{}});
-      if (localPage && contents.__cslLocaleReloaded !== loc) {{
-        contents.__cslLocaleReloaded = loc;
-        setTimeout(function () {{ try {{ if (!isDestroyed(contents)) {{ if (typeof contents.reloadIgnoringCache === "function") contents.reloadIgnoringCache(); else contents.reload(); }} }} catch (e) {{}} }}, 80);
-      }}
-    }} catch (e) {{}}
-  }}
-  function syncOpenWindowsLocale(target) {{
-    try {{
-      var electronSWL = require('electron');
-      var all = [];
-      try {{ all = electronSWL.webContents.getAllWebContents(); }} catch (e) {{ all = []; }}
-      try {{ electronSWL.BrowserWindow.getAllWindows().forEach(function (w) {{ if (w.webContents && all.indexOf(w.webContents) < 0) all.push(w.webContents); }}); }} catch (e) {{}}
-      for (var i = 0; i < all.length; i++) syncOneWindowLocale(all[i], target);
-    }} catch (e) {{}}
-  }}
-  localeChangeListeners.push(syncOpenWindowsLocale);
-  syncOpenWindowsLocale(currentLocale);
-  // Locale detection: Claude's main-process i18n builds the app menu and
-  // tray menu via formatMessage in the active locale. When zh-CN is active,
-  // the first top-level label ("文件") contains CJK characters; in every
-  // other locale it is non-CJK ("File", "Fichier", "Datei", …). The shim
-  // detects this synchronously inside the Menu.setApplicationMenu hook —
-  // exactly when the menu is set — so currentLocale updates before any
-  // label translation runs. This avoids fragile IPC wrapping (Claude
-  // registers requestLocaleChange via webContents.ipc, a per-instance
-  // IpcMainImpl not exposed on WebContents.prototype). pollLocale reads
-  // spa:locale for the exact locale (e.g. fr-FR) as a safety net so the
-  // tray re-translation can use the right locale catalog.
-  var CJK_RE = /[\u4e00-\u9fff]/;
-  function menuIsZh(menu) {{
-    try {{ var f = menu && menu.items && menu.items[0] && menu.items[0].label; return typeof f === "string" && CJK_RE.test(f); }} catch (e) {{ return false; }}
-  }}
-  function updateLocaleFromMenu(menu) {{
-    var loc = menuIsZh(menu) ? "zh-CN" : "en-US";
-    if (loc !== currentLocale) {{ currentLocale = loc; fireLocaleChange(loc); }}
-  }}
-  async function pollLocale() {{
-    try {{
-      var electronPL = require('electron');
-      var all = electronPL.webContents.getAllWebContents();
-      var fallback = "";
-      for (var i = 0; i < all.length; i++) {{
-        var wc = all[i];
-        var u = "";
-        try {{ u = wc.getURL(); }} catch (e) {{}}
-        var lower = String(u || "").toLowerCase();
-        if (!u || !isSyncableUrl(lower)) continue;
-        var loc = await wc.executeJavaScript('localStorage.getItem("__cslWantedLocale")||localStorage.getItem("spa:locale")', true);
-        if (typeof loc !== "string" || !loc) continue;
-        if (u && u.toLowerCase().indexOf("https://claude.ai") === 0) {{
-          if (typeof loc === "string" && loc && loc !== currentLocale) {{ currentLocale = loc; fireLocaleChange(loc); }}
-          return;
-        }}
-        if (!fallback) fallback = loc;
-      }}
-      if (fallback && fallback !== currentLocale) {{ currentLocale = fallback; fireLocaleChange(fallback); }}
-    }} catch (e) {{}}
-  }}
-  setInterval(function () {{ pollLocale(); }}, 2000);
-  pollLocale();
-  // (2) Native-menu label translation. Build an en->zh map from the on-disk
-  // en-US.json and the bundled zh-CN, then hook menu installation to walk
-  // and translate labels only while zh-CN is active. A hard-coded override
-  // table covers labels with no message id (Developer submenu items).
-  try {{
-    var fs = require('fs');
-    var path = require('path');
-    var electron = require('electron');
-    var enToZh = {{}};
-    try {{
-      var enObj = JSON.parse(fs.readFileSync(path.join(process.resourcesPath, "en-US.json"), "utf8"));
-      var zhObj = JSON.parse(SHELL_LOCALE);
-      for (var k in enObj) {{ if (zhObj[k]) enToZh[enObj[k]] = zhObj[k]; }}
-    }} catch (e) {{}}
-    var HARDCODED_ZH = {{
-      "Enable Main Process Debugger": "\u542f\u7528\u4e3b\u8fdb\u7a0b\u8c03\u8bd5\u5668",
-      "Record Performance Trace": "\u5f55\u5236\u6027\u80fd\u8ddf\u8e2a",
-      "Write Main Process Heap Snapshot": "\u5199\u5165\u4e3b\u8fdb\u7a0b\u5806\u5feb\u7167",
-      "Record Memory Trace (auto-stop)": "\u5f55\u5236\u5185\u5b58\u8ddf\u8e2a\uff08\u81ea\u52a8\u505c\u6b62\uff09",
-      "Paste and Match Style": "\u7c98\u8d34\u5e76\u5339\u914d\u6837\u5f0f",
-      "Zoom In (numpad)": "\u653e\u5927\uff08\u5c0f\u952e\u76d8\uff09",
-      "Zoom Out (numpad)": "\u7f29\u5c0f\uff08\u5c0f\u952e\u76d8\uff09",
-      "Actual Size (numpad)": "\u5b9e\u9645\u5927\u5c0f\uff08\u5c0f\u952e\u76d8\uff09"
-    }};
-    function translateLabel(label) {{
-      if (typeof label !== "string" || !label) return label;
-      if (HARDCODED_ZH[label]) return HARDCODED_ZH[label];
-      if (enToZh[label]) return enToZh[label];
-      return label;
-    }}
-    function translateMenuItems(menu) {{
-      if (!menu || !menu.items) return menu;
-      updateLocaleFromMenu(menu);
-      if (!zhActive()) return menu;
-      menu.items.forEach(function (item) {{
-        try {{
-          if (typeof item.label === "string") {{
-            if (item.__cslOrig === undefined) item.__cslOrig = item.label;
-            item.label = translateLabel(item.label);
-          }}
-          if (item.submenu) translateMenuItems(item.submenu);
-        }} catch (e) {{}}
-      }});
-      return menu;
-    }}
-    var Menu = electron.Menu;
-    var origSetAppMenu = Menu.setApplicationMenu.bind(Menu);
-    Menu.setApplicationMenu = function (menu) {{ try {{ translateMenuItems(menu); }} catch (e) {{}} return origSetAppMenu(menu); }};
-    var Tray = electron.Tray;
-    var trayMenu = null;
-    var trayRef = null;
-    var zhValToId = {{}};
-    try {{ for (var zid in zhObj) {{ if (zhObj[zid] && typeof zhObj[zid] === "string" && !(zhObj[zid] in zhValToId)) zhValToId[zhObj[zid]] = zid; }} }} catch (e) {{}}
-    function relabelTray(menu, target, idToVal) {{
-      if (!menu || !menu.items) return;
-      menu.items.forEach(function (item) {{
-        try {{
-          var orig = item.__cslOrig;
-          if (typeof orig === "string" && orig) {{
-            if (target === "zh-CN") {{
-              if (HARDCODED_ZH[orig]) item.label = HARDCODED_ZH[orig];
-              else if (enToZh[orig]) item.label = enToZh[orig];
-              else item.label = orig;
-            }} else {{
-              var rid = zhValToId[orig];
-              if (rid && idToVal[rid]) item.label = idToVal[rid];
-              else item.label = orig;
-            }}
-          }}
-          if (item.submenu) relabelTray(item.submenu, target, idToVal);
-        }} catch (e) {{}}
-      }});
-    }}
-    var origTraySetCtx = null;
-    function retranslateTray(target) {{
-      try {{
-        if (!trayMenu || !trayMenu.items || !origTraySetCtx || !trayRef) return;
-        var idToVal = {{}};
-        if (target !== "zh-CN") {{
-          try {{ var tobj = JSON.parse(fs.readFileSync(path.join(process.resourcesPath, target + ".json"), "utf8")); for (var tid in tobj) {{ if (tobj[tid]) idToVal[tid] = tobj[tid]; }} }} catch (e) {{ return; }}
-        }}
-        relabelTray(trayMenu, target, idToVal);
-        origTraySetCtx.call(trayRef, trayMenu);
-      }} catch (e) {{}}
-    }}
-    if (Tray && Tray.prototype) {{
-      origTraySetCtx = Tray.prototype.setContextMenu;
-      if (origTraySetCtx) {{
-        Tray.prototype.setContextMenu = function (menu) {{
-          try {{
-            if (menu && menu.items) {{
-              (function cap(m) {{ if (!m || !m.items) return; m.items.forEach(function (it) {{ try {{ if (typeof it.label === "string" && it.__cslOrig === undefined) it.__cslOrig = it.label; if (it.submenu) cap(it.submenu); }} catch (e) {{}} }}); }})(menu);
-              translateMenuItems(menu);
-              trayMenu = menu; trayRef = this;
-            }}
-          }} catch (e) {{}}
-          return origTraySetCtx.call(this, menu);
-        }};
-      }}
-    }}
-    localeChangeListeners.push(retranslateTray);
-  }} catch (e) {{}}
-  try {{
-    var electron3 = require('electron');
-    var app = electron3.app;
-    if (app && typeof app.on === "function") {{
-      app.on("browser-window-created", function (_event, window) {{
-        setTimeout(function () {{ try {{ syncOneWindowLocale(window.webContents, currentLocale); attach(window.webContents); }} catch (e) {{}} }}, 50);
-        try {{
-          var wc = window.webContents;
-          var SETUP_TITLES = {{ "setup-desktop-3p": "\u914d\u7f6e\u7b2c\u4e09\u65b9\u0041\u0050\u0049", "devtools://devtools": "\u5f00\u53d1\u8005\u5de5\u5177", "about_window": "\u5173\u4e8eClaude" }};
-          var SETUP_TITLES_EN = {{ "setup-desktop-3p": "Configure Third-Party Inference\u2026", "devtools://devtools": "DevTools", "about_window": "About Claude" }};
-          function applySetupTitle() {{ try {{ var u = wc.getURL(); for (var k in SETUP_TITLES) {{ if (u.indexOf(k) >= 0) {{ var want = zhActive() ? SETUP_TITLES[k] : (SETUP_TITLES_EN[k] || SETUP_TITLES[k]); if (window.getTitle() !== want) window.setTitle(want); return; }} }} }} catch (e) {{}} }}
-          function applySetupWindowState() {{ try {{ syncOneWindowLocale(wc, currentLocale); }} catch (e) {{}} applySetupTitle(); }}
-          wc.on("did-finish-load", applySetupWindowState);
-          wc.on("did-navigate", applySetupWindowState);
-          applySetupWindowState();
-          setInterval(applySetupWindowState, 2000);
-        }} catch (e) {{}}
-      }});
-    }}
-    setInterval(attachAll, 2000);
-    // DevTools windows are not in BrowserWindow.getAllWindows() and do not
-    // trigger browser-window-created, so SETUP_TITLES cannot reach them. Their
-    // document.title is hard-coded to "DevTools"; retitle via executeJavaScript
-    // (no debugger attach, so no white-screen risk) and poll to keep it.
-    function fixDevToolsTitles() {{
-      try {{
-        var all = electron3.webContents.getAllWebContents();
-        for (var i = 0; i < all.length; i++) {{
-          try {{
-            var c = all[i];
-            var u = c.getURL();
-            if (u && u.toLowerCase().indexOf("devtools://") === 0) {{
-              if (zhActive()) {{
-                c.executeJavaScript('try{{if(document.title!==\"\u5f00\u53d1\u8005\u5de5\u5177\")document.title=\"\u5f00\u53d1\u8005\u5de5\u5177\"}}catch(e){{}}', true).catch(function () {{}});
-              }} else {{
-                c.executeJavaScript('try{{if(document.title!==\"DevTools\")document.title=\"DevTools\"}}catch(e){{}}', true).catch(function () {{}});
-              }}
-            }}
-          }} catch (e) {{}}
-        }}
-      }} catch (e) {{}}
-    }}
-    setInterval(fixDevToolsTitles, 2000);
-  }} catch (e) {{}}
-  try {{ require('./' + MAIN_MODULE); }} catch (e) {{ process.stderr.write('[csl] main load failed: ' + (e && e.message) + '\n'); }}
-}})();
-"##,
-        port = CLAUDE_INSPECTOR_OPEN_PORT,
-        runtime_literal = runtime_literal,
-        shell_literal = shell_literal,
-        ion_literal = ion_literal,
-        dynamic_literal = dynamic_literal,
-        main_literal = main_literal,
-    )
-}
-/// Build the rewritten package.json: `main` becomes the inspector shim,
-/// and the original main is preserved as `originalMain`.
-fn build_patched_package_json(original_text: &str, original_main: &str) -> Result<String, String> {
-    let mut value: Value = serde_json::from_str(original_text)
-        .map_err(|err| format!("Failed to parse Claude package.json: {err}"))?;
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| "Claude package.json is not an object.".to_string())?;
-    obj.insert("main".to_string(), Value::from(CLAUDE_INSPECTOR_SHIM_NAME));
-    obj.insert("originalMain".to_string(), Value::from(original_main));
-    Ok(serde_json::to_string_pretty(&value)
-        .map_err(|err| format!("Failed to serialize patched package.json: {err}"))?)
-}
-
-/// Paths inside the installed Claude Desktop app that we patch in place.
-struct ClaudePatchPaths {
-    exe: PathBuf,
-    asar: PathBuf,
-    shell_locale: PathBuf,
-    ion_locale: PathBuf,
-}
-
-/// Locate the fuse byte offset for `EnableEmbeddedAsarIntegrityValidation`
-/// (fuse index 4) inside a Claude.exe byte buffer. Returns the absolute
-/// offset of the '0'/'1' status byte.
-fn fuse_integrity_offset(exe_bytes: &[u8]) -> Option<usize> {
-    let marker_start = exe_bytes
-        .windows(CLAUDE_FUSE_MARKER.len())
-        .position(|window| window == CLAUDE_FUSE_MARKER)?;
-    // Wire format after marker: 1 sentinel byte, 1 count byte, then `count`
-    // ASCII fuse status bytes. Fuse index 4 is the integrity flag.
-    let offset = marker_start + CLAUDE_FUSE_MARKER.len() + 2 + CLAUDE_FUSE_INTEGRITY_INDEX;
-    if offset < exe_bytes.len() {
-        Some(offset)
-    } else {
-        None
-    }
-}
-
-/// True when the installed Claude.exe already has its asar-integrity fuse
-/// disabled (byte value '0' / 0x30) at the integrity offset.
-fn fuse_integrity_disabled(exe_bytes: &[u8]) -> bool {
-    fuse_integrity_offset(exe_bytes)
-        .map(|offset| exe_bytes[offset] == b'0')
-        .unwrap_or(false)
-}
-
-/// True when the installed app.asar already loads our inspector shim as
-/// its entry point.
-fn asar_already_patched(asar_bytes: &[u8]) -> bool {
-    crate::core::asar_archive::read_package_json(asar_bytes)
-        .map(|(_text, main)| main == CLAUDE_INSPECTOR_SHIM_NAME)
-        .unwrap_or(false)
-}
-
-/// True when the on-disk locale file at the given path already matches the
-/// bundled zh-CN payload byte-for-byte (so we can skip rewriting it).
-fn locale_file_matches(path: &Path, expected: &str) -> bool {
-    fs::read_to_string(path)
-        .map(|current| current == expected)
-        .unwrap_or(false)
-}
-
-/// True when the patched asar's inspector shim points MAIN_MODULE at itself.
-/// Re-patching an already-patched asar reads the rewritten package.json (whose
-/// main is the shim) as the original main, so the shim's MAIN_MODULE becomes the
-/// shim filename: require('./_csl_inspector_shim.js') loads the in-progress module
-/// (cached empty exports) instead of Claude's real main, no BrowserWindow is
-/// created, and Claude appears to hang on launch. Detect this so the asar is
-/// rewritten even when asar_already_patched is true.
-fn asar_shim_self_references(asar_bytes: &[u8]) -> bool {
-    let Ok(shim) =
-        crate::core::asar_archive::read_named_file(asar_bytes, CLAUDE_INSPECTOR_SHIM_NAME)
-    else {
-        return false;
-    };
-    let Ok(text) = std::str::from_utf8(&shim) else {
-        return false;
-    };
-    // The shim stores MAIN_MODULE as a serde_json string literal, e.g.
-    //   var MAIN_MODULE = "_csl_inspector_shim.js";
-    // A self-reference is that literal equal to the shim filename.
-    let needle = format!(
-        "var MAIN_MODULE = {quoted};",
-        quoted = serde_json::to_string(CLAUDE_INSPECTOR_SHIM_NAME).unwrap_or_default()
-    );
-    text.contains(&needle)
-}
-
-/// True when the asar contains a packed file at the given slash-separated path.
-/// True when the patched asar's inspector shim predates the locale-whitelist
-/// redesign. The old shim forces zh-CN and disables English (contains
-/// `forceZh` and `installLocalePreference` but lacks `installLocaleWhitelist`);
-/// we re-inject the new shim so zh-CN becomes a selectable language instead.
-fn asar_shim_needs_update(asar_bytes: &[u8]) -> bool {
-    let Ok(shim) =
-        crate::core::asar_archive::read_named_file(asar_bytes, CLAUDE_INSPECTOR_SHIM_NAME)
-    else {
-        return false;
-    };
-    let Ok(text) = std::str::from_utf8(&shim) else {
-        return false;
-    };
-    // A real shim never embeds its own filename (MAIN_MODULE points at the
-    // original .vite main, not the shim), so we must not gate on the shim
-    // name being present. read_named_file already confirmed the shim file
-    // exists; if it lacks the redesign signatures, re-inject it.
-    !text.contains("installLocaleWhitelist")
-        || !text.contains("Array.prototype.map")
-        || !text.contains("account_profile")
-        || !text.contains("withZh")
-        || !text.contains("fixLanguageRadio")
-        || !text.contains("overrides.json")
-        || !text.contains("gated_messages")
-        || !text.contains("zhActive")
-        || !text.contains("menuIsZh")
-        || !text.contains("updateLocaleFromMenu")
-        || !text.contains("Currently unavailable")
-        || !text.contains("For more complex tasks")
-        || !text.contains("For complex tasks")
-        || !text.contains("syncOpenWindowsLocale")
-        || !text.contains("localizedLaunchDefaultZh")
-        || !text.contains("localized-launch.flag")
-        || !text.contains("getSystemLocale")
-        || !text.contains("ion-dist/i18n/en-US.json")
-        || !text.contains("gatewayProviderSubstringFallback")
-        || !text.contains("codeUiLabelFallback")
-        || !text.contains("activeLocaleLaunchFlag")
-        || !text.contains("__CSL_LL")
-        || !text.contains("__CSL_LL_DONE")
-        || !text.contains("Set.prototype")
-        || !text.contains("isZhSet")
-        || !text.contains("skipReload")
-        || !text.contains("reversibleTextFallback")
-        || !text.contains("localeRequestBodySync")
-        || !text.contains("localWindowHotSwitchSync")
-        || !text.contains("aboutClaudeWindowFallback")
-        || !text.contains("__cslWantedLocale")
-}
-
-fn asar_contains_file(asar_bytes: &[u8], path: &str) -> bool {
-    let Ok(header) = crate::core::asar_archive::read_header(asar_bytes) else {
-        return false;
-    };
-    let mut node = &header.tree;
-    for part in path.split('/') {
-        let Some(child) = node
-            .get("files")
-            .and_then(Value::as_object)
-            .and_then(|f| f.get(part))
-        else {
-            return false;
-        };
-        node = child;
-    }
-    node.get("size").is_some()
-}
-
-/// Recover Claude's true original main module from a possibly already-patched
-/// asar. When the asar was patched before, package.json main is our shim and the
-/// real entry is preserved in originalMain; if that field was also clobbered by
-/// repeated re-patching (it holds the shim name too), fall back to probing the
-/// asar file tree for Claude's known main entry candidates.
-fn recover_original_main(pkg_text: &str, read_main: String, asar_bytes: &[u8]) -> String {
-    if read_main != CLAUDE_INSPECTOR_SHIM_NAME {
-        return read_main;
-    }
-    if let Ok(pkg) = serde_json::from_str::<Value>(pkg_text) {
-        if let Some(orig) = pkg.get("originalMain").and_then(Value::as_str) {
-            if !orig.is_empty() && orig != CLAUDE_INSPECTOR_SHIM_NAME {
-                return orig.to_string();
-            }
-        }
-    }
-    for candidate in [
-        ".vite/build/index.pre.js",
-        ".vite/build/index.js",
-        "index.js",
-        "main.js",
-    ] {
-        if asar_contains_file(asar_bytes, candidate) {
-            return candidate.to_string();
-        }
-    }
-    read_main
-}
-
-fn build_patched_claude_asar(asar_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let (original_pkg_text, read_main) =
-        crate::core::asar_archive::read_package_json(asar_bytes)
-            .map_err(|err| format!("Failed to read Claude app.asar: {err}"))?;
-    // If the asar was already patched, package.json main is our shim; recover
-    // Claude's true original main so the shim does not require() itself.
-    let original_main = recover_original_main(&original_pkg_text, read_main, asar_bytes);
-    let new_pkg = build_patched_package_json(&original_pkg_text, &original_main)?;
-    let shim = build_inspector_shim(&original_main);
-    crate::core::asar_archive::build_patched_asar(
-        asar_bytes,
-        new_pkg.as_bytes(),
-        CLAUDE_INSPECTOR_SHIM_NAME,
-        shim.as_bytes(),
-    )
-    .map_err(|err| format!("Failed to build patched app.asar: {err}"))
-}
-
-/// Build the body of the elevated PowerShell script that patches the
-/// installed Claude.exe fuse and rewrites app.asar in place. The script
-/// takes ownership, grants Administrators write access, writes the patched
-/// bytes, then restores the original ACL. `patched_exe` / `patched_asar`
-/// are temp paths the host already wrote; the script copies them over the
-/// originals from the elevated context.
-fn elevated_patch_script(
-    exe: &Path,
-    asar: &Path,
-    patched_exe: &Path,
-    patched_asar: &Path,
-    shell_locale: &Path,
-    patched_shell_locale: &Path,
-    ion_locale: &Path,
-    patched_ion_locale: &Path,
-) -> String {
-    let exe_str = ps_path_literal(exe);
-    let asar_str = ps_path_literal(asar);
-    let patched_exe_str = ps_path_literal(patched_exe);
-    let patched_asar_str = ps_path_literal(patched_asar);
-    let shell_locale_str = ps_path_literal(shell_locale);
-    let patched_shell_locale_str = ps_path_literal(patched_shell_locale);
-    let ion_locale_str = ps_path_literal(ion_locale);
-    let patched_ion_locale_str = ps_path_literal(patched_ion_locale);
-    let log_path = patched_asar
-        .parent()
-        .map(|p| p.join("apply-claude-patch.log"))
-        .unwrap_or_else(|| PathBuf::from("apply-claude-patch.log"));
-    let log_path_str = ps_path_literal(&log_path);
-    let ion_locale_dir = ion_locale
-        .parent()
-        .map(ps_path_literal)
-        .unwrap_or_else(|| "''".to_string());
-    format!(
-        r#"$ErrorActionPreference = 'Stop'
-$logPath = {log_path_str}
-$script:exitReason = ''
-Set-Content -LiteralPath $logPath -Value "CodeStudio Lite Claude patch started: $(Get-Date -Format o)" -Encoding UTF8
-function Write-Log($message) {{
-  Add-Content -LiteralPath $logPath -Value $message -Encoding UTF8
-}}
-function Grant-Write($path) {{
-  if (Test-Path $path) {{
-    Write-Log "Grant-Write $path"
-    takeown /F $path /A *>> $logPath
-    icacls $path /grant 'Administrators:F' *>> $logPath
-  }} else {{
-    $parent = Split-Path -Parent $path
-    if (Test-Path $parent) {{
-      Write-Log "Grant-Write parent $parent"
-      takeown /F $parent /A *>> $logPath
-      icacls $parent /grant 'Administrators:F' *>> $logPath
-    }}
-  }}
-}}
-function Restore-Acl($path) {{
-  if (Test-Path $path) {{
-    try {{ icacls $path /remove 'Administrators' *>> $logPath }} catch {{ Write-Log "Restore-Acl ignored: $($_.Exception.Message)" }}
-  }}
-}}
-function Copy-WithRetry($src, $dst, $retries) {{
-  $parent = Split-Path -Parent $dst
-  if ($parent -and -not (Test-Path $parent)) {{
-    New-Item -ItemType Directory -Path $parent -Force *>> $logPath | Out-Null
-  }}
-  for ($i = 0; $i -lt $retries; $i++) {{
-    try {{
-      Write-Log "Copy-Item $src -> $dst attempt $($i+1)/$retries"
-      Copy-Item -LiteralPath $src -Destination $dst -Force
-      return $true
-    }} catch {{
-      $script:exitReason = "Copy-Item $src -> $dst failed (attempt $($i+1)/$retries): $($_.Exception.Message)"
-      Write-Log $script:exitReason
-      if ($i -lt $retries - 1) {{ Start-Sleep -Milliseconds 500 }}
-    }}
-  }}
-  return $false
-}}
-try {{
-  Grant-Write {exe_str}
-  Grant-Write {asar_str}
-  Grant-Write {shell_locale_str}
-  Grant-Write {ion_locale_dir}
-  $ok1 = Copy-WithRetry {patched_exe_str} {exe_str} 5
-  $ok2 = Copy-WithRetry {patched_asar_str} {asar_str} 5
-  $ok3 = Copy-WithRetry {patched_shell_locale_str} {shell_locale_str} 5
-  $ok4 = Copy-WithRetry {patched_ion_locale_str} {ion_locale_str} 5
-  if (-not ($ok1 -and $ok2 -and $ok3 -and $ok4)) {{
-    Write-Log "FAILED: $script:exitReason"
-    exit 2
-  }}
-  Restore-Acl {asar_str}
-  Restore-Acl {exe_str}
-  Restore-Acl {shell_locale_str}
-  Restore-Acl {ion_locale_dir}
-  Write-Log "CodeStudio Lite Claude patch completed."
-}} catch {{
-  Write-Log "ERROR: $($_.Exception.Message)"
-  exit 3
-}}
-"#
-    )
-}
-
-/// Ensure the localization patch is applied to the installed Claude
-/// Desktop: the asar-integrity fuse on Claude.exe is disabled and app.asar
-/// is rewritten so its entry point opens the Node inspector. Both edits are
-/// in place (zero extra footprint once applied). If the patch is already in
-/// place, this is a no-op. User-profile native installs are patched directly;
-/// protected MSIX files fall back to an elevated PowerShell script.
-/// Try to copy the patched files directly without elevation.
-fn try_direct_patch_write(
-    paths: &ClaudePatchPaths,
-    temp_exe: &Path,
-    temp_asar: &Path,
-    temp_shell_locale: &Path,
-    temp_ion_locale: &Path,
-) -> Result<(), String> {
-    // Ensure the ion locale directory exists.
-    if let Some(parent) = paths.ion_locale.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("Failed to create {}: {err}", parent.display()))?;
-    }
-    if let Some(parent) = paths.shell_locale.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("Failed to create {}: {err}", parent.display()))?;
-    }
-    let copies = [
-        (temp_exe, &paths.exe),
-        (temp_asar, &paths.asar),
-        (temp_shell_locale, &paths.shell_locale),
-        (temp_ion_locale, &paths.ion_locale),
-    ];
-    for (src, dst) in &copies {
-        fs::copy(src, dst).map_err(|err| {
-            format!(
-                "Failed to write Claude localization patch file {}: {err}",
-                dst.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn launch_macos_claude_desktop_localized(
-    app: Option<&tauri::AppHandle>,
-    allow_accessibility_restart: bool,
-) -> Result<(), String> {
+#[cfg(target_os = "macos")]
+fn launch_macos_claude_desktop_localized() -> Result<(), String> {
     ensure_patch_files()?;
-    ensure_macos_claude_desktop_developer_mode()?;
-    if allow_accessibility_restart {
-        match ensure_macos_accessibility_trusted_or_restart_needed()? {
-            MacosAccessibilityPreflight::Trusted => {}
-            MacosAccessibilityPreflight::NeedsProcessRestart => {
-                if let Some(app) = app {
-                    schedule_macos_accessibility_restart(app)?;
-                    return Ok(());
-                }
-                return Err(macos_accessibility_not_trusted_error());
-            }
-        }
-    } else {
-        ensure_macos_accessibility_trusted_for_localized_launch()?;
-    }
+    ensure_claude_desktop_developer_mode()?;
+    ensure_macos_accessibility_trusted_for_localized_launch()?;
     write_localized_launch_marker()?;
     close_existing_claude_for_localized_launch()?;
     hidden_command("open")
@@ -1639,116 +541,854 @@ fn launch_macos_claude_desktop_localized(
     Ok(())
 }
 
-fn schedule_macos_accessibility_restart(app: &tauri::AppHandle) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Err(
-            "CodeStudio Lite Accessibility restart is only supported on macOS.".to_string(),
-        );
-    }
-
-    write_macos_accessibility_restart_marker("localized launch accessibility preflight")?;
-    append_macos_debugger_log(format!(
-        "Accessibility preflight still reports untrusted after prompting; restarting CodeStudio Lite once so macOS TCC refreshes trust. {}",
-        macos_accessibility_identity_summary()
-    ));
-    app.request_restart();
-    Ok(())
-}
-
-fn ensure_macos_claude_desktop_developer_mode() -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Ok(());
-    }
-
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn ensure_claude_desktop_developer_mode() -> Result<(), String> {
     profile::ensure_claude_desktop_developer_mode()
         .map(|_| ())
         .map_err(|err| format!("Failed to enable Claude Desktop developer mode: {err}"))
 }
 
-#[cfg(target_os = "macos")]
-fn ensure_macos_accessibility_trusted_for_localized_launch() -> Result<(), String> {
-    match macos_accessibility_preflight(None)? {
-        MacosAccessibilityPreflight::Trusted => Ok(()),
-        MacosAccessibilityPreflight::NeedsProcessRestart => {
-            Err(macos_accessibility_not_trusted_error())
+fn enable_claude_main_process_debugger() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        return ensure_windows_claude_main_process_debugger();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return enable_macos_claude_main_process_debugger();
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_claude_main_process_debugger() -> Result<(), String> {
+    if claude_node_inspector_available() {
+        return Ok(());
+    }
+
+    let started = Instant::now();
+    let mut last_error = "Claude Node inspector endpoint was not available.".to_string();
+    let mut request_count = 0usize;
+    while started.elapsed() < WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT {
+        if claude_node_inspector_available() {
+            return Ok(());
+        }
+
+        request_count += 1;
+        match request_windows_claude_main_process_debugger_once() {
+            Ok(()) => {
+                if wait_for_claude_node_inspector() {
+                    return Ok(());
+                }
+                last_error = format!(
+                    "Claude main process debugger request #{request_count} completed, but no Claude Node inspector endpoint opened yet."
+                );
+            }
+            Err(err) => {
+                last_error = err;
+            }
+        }
+        thread::sleep(Duration::from_millis(
+            WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS,
+        ));
+    }
+
+    Err(format!(
+        "Timed out waiting for Claude main process debugger on Windows. Open Claude, use Developer > Enable Main Process Debugger, then retry localized launch. Last error: {last_error}."
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn request_windows_claude_main_process_debugger_once() -> Result<(), String> {
+    if claude_node_inspector_available() {
+        return Ok(());
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class CslClaudeWin32 {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extraData);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam);
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+}
+'@
+
+[CslClaudeWin32]::SetProcessDPIAware() | Out-Null
+$WM_CLOSE = 0x0010
+$script:claudeDebuggerLogPath = $null
+try {
+  $patchRoot = Join-Path $env:USERPROFILE '.codestudio-lite\claude-desktop-patch'
+  New-Item -ItemType Directory -Force -Path $patchRoot | Out-Null
+  $script:claudeDebuggerLogPath = Join-Path $patchRoot 'windows-main-debugger.log'
+} catch {}
+
+function Write-ClaudeDebuggerLog([string]$message) {
+  if (-not $script:claudeDebuggerLogPath) { return }
+  try {
+    $timestamp = [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss.fff')
+    Add-Content -LiteralPath $script:claudeDebuggerLogPath -Encoding UTF8 -Value "[$timestamp] $message"
+  } catch {}
+}
+
+function Format-ClaudeElementForLog($element) {
+  if (-not $element) { return '<null>' }
+  try {
+    $patterns = [string]::Join(',', @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }))
+    return "name=[$($element.Current.Name)] control=[$($element.Current.ControlType.ProgrammaticName)] class=[$($element.Current.ClassName)] patterns=[$patterns]"
+  } catch {
+    return '<stale element>'
+  }
+}
+
+function Start-ClaudeWindowsApp {
+  Write-ClaudeDebuggerLog 'Starting or activating Claude Windows app.'
+  $pkgNames = @('Claude', 'Anthropic.Claude')
+  $pkg = Get-AppxPackage -ErrorAction SilentlyContinue |
+    Where-Object { $pkgNames -contains $_.Name -or $_.PackageFullName -match 'Claude' } |
+    Sort-Object -Property Version -Descending |
+    Select-Object -First 1
+  if (-not $pkg) {
+    Write-ClaudeDebuggerLog 'No registered Claude AppX package found for activation.'
+    return
+  }
+
+  $bang = [char]33
+  $packagePrefix = $pkg.PackageFamilyName + $bang
+  $app = Get-StartApps |
+    Where-Object { $_.AppID.StartsWith($packagePrefix) -or $_.Name -eq 'Claude' } |
+    Select-Object -First 1
+  $appId = if ($app) { $app.AppID } else { $packagePrefix + 'Claude' }
+  $target = 'shell:AppsFolder\' + $appId
+  Write-ClaudeDebuggerLog "Activating Claude app identity [$appId]."
+  Start-Process -FilePath $target
+}
+
+function Get-ClaudeMainWindow {
+  $windows = New-Object System.Collections.Generic.List[object]
+  [CslClaudeWin32]::EnumWindows({
+    param([IntPtr]$hWnd, [IntPtr]$extraData)
+    $processId = [uint32]0
+    [CslClaudeWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId) | Out-Null
+    $proc = Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
+    if (-not $proc -or $proc.ProcessName -ne 'claude') { return $true }
+
+    $titleBuilder = New-Object System.Text.StringBuilder 512
+    [CslClaudeWin32]::GetWindowText($hWnd, $titleBuilder, $titleBuilder.Capacity) | Out-Null
+    $classBuilder = New-Object System.Text.StringBuilder 256
+    [CslClaudeWin32]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
+    $rect = New-Object CslClaudeWin32+RECT
+    [CslClaudeWin32]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
+
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    if ($width -lt 320 -or $height -lt 240) { return $true }
+
+    $title = $titleBuilder.ToString()
+    $isInspectorPrompt = Test-ClaudeInspectorPromptCandidate $title $width $height
+    $titleScore = if ($title -match 'Claude|chat') { 8 } elseif ($title.Length -gt 0) { 2 } else { 0 }
+
+    $path = ''
+    try { $path = $proc.Path } catch { $path = '' }
+    if ($path -and $path.IndexOf('Claude', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+      return $true
+    }
+
+    $className = $classBuilder.ToString()
+    if ($className -ne 'Chrome_WidgetWin_1') { return $true }
+
+    $windows.Add([pscustomobject]@{
+      Hwnd = $hWnd
+      ProcessId = [int]$processId
+      Title = $title
+      ClassName = $className
+      Visible = [CslClaudeWin32]::IsWindowVisible($hWnd)
+      Iconic = [CslClaudeWin32]::IsIconic($hWnd)
+      IsInspectorPrompt = $isInspectorPrompt
+      TitleScore = $titleScore
+      Width = $width
+      Height = $height
+      Area = $width * $height
+    }) | Out-Null
+    return $true
+  }, [IntPtr]::Zero) | Out-Null
+
+  $mainWindows = @($windows | Where-Object { -not $_.IsInspectorPrompt })
+  if ($mainWindows.Count -eq 0) { $mainWindows = @($windows) }
+  $selected = $mainWindows |
+    Sort-Object -Property @{ Expression = { if ($_.Visible) { 1 } else { 0 } }; Descending = $true },
+                          @{ Expression = { $_.TitleScore }; Descending = $true },
+                          @{ Expression = { $_.Area }; Descending = $true },
+                          @{ Expression = { $_.ProcessId }; Descending = $true } |
+    Select-Object -First 1
+  if ($selected) {
+    Write-ClaudeDebuggerLog "Selected Claude window hwnd=[$($selected.Hwnd)] pid=[$($selected.ProcessId)] title=[$($selected.Title)] size=[$($selected.Width)x$($selected.Height)]."
+  }
+  $selected
+}
+
+function Test-ClaudeInspectorPromptCandidate([string]$title, [int]$width, [int]$height) {
+  return $title -match 'Inspector|Debugger|DevTools|Main Process|调试|偵錯|检查|檢查' -or
+    ($title.Length -eq 0 -and
+      $width -ge 480 -and $width -le 1200 -and
+      $height -ge 360 -and $height -le 900)
+}
+
+function Test-ClaudeInspectorWindowClass([string]$className) {
+  return $className -like 'Chrome_WidgetWin_*' -or $className -eq '#32770'
+}
+
+function Invoke-Element($element) {
+  $invokePattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokePattern)) {
+    try {
+      $invokePattern.Invoke()
+      return $true
+    } catch {}
+  }
+
+  $expandPattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expandPattern)) {
+    try {
+      if ($expandPattern.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Expanded) {
+        $expandPattern.Expand()
+      }
+      return $true
+    } catch {}
+  }
+
+  $togglePattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$togglePattern)) {
+    try {
+      $togglePattern.Toggle()
+      return $true
+    } catch {}
+  }
+
+  return $false
+}
+
+function Get-ClaudeAutomationRoots($window) {
+  $roots = New-Object System.Collections.Generic.List[object]
+  [CslClaudeWin32]::EnumWindows({
+    param([IntPtr]$hWnd, [IntPtr]$extraData)
+    $processId = [uint32]0
+    [CslClaudeWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId) | Out-Null
+    if ([int]$processId -ne [int]$window.ProcessId) { return $true }
+
+    $classBuilder = New-Object System.Text.StringBuilder 256
+    [CslClaudeWin32]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
+    $className = $classBuilder.ToString()
+    if ($className -notlike 'Chrome_WidgetWin_*') { return $true }
+
+    try {
+      $root = [System.Windows.Automation.AutomationElement]::FromHandle($hWnd)
+      if ($root) {
+        $roots.Add([pscustomobject]@{
+          Hwnd = $hWnd
+          Root = $root
+          IsMainWindow = $hWnd -eq $window.Hwnd
+        }) | Out-Null
+      }
+    } catch {}
+    return $true
+  }, [IntPtr]::Zero) | Out-Null
+
+  $roots |
+    Sort-Object -Property @{ Expression = { if ($_.IsMainWindow) { 1 } else { 0 } }; Descending = $true }
+}
+
+function Find-ClaudeMenuElement([string[]]$names, $window, [bool]$preferToggle, [bool]$popupOnly) {
+  $best = $null
+  $bestScore = -1
+  foreach ($rootInfo in (Get-ClaudeAutomationRoots $window)) {
+    if ($popupOnly -and $rootInfo.IsMainWindow) { continue }
+    $root = $rootInfo.Root
+    foreach ($name in $names) {
+      $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $name
+      )
+      $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+      foreach ($element in $matches) {
+        $patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+        $className = $element.Current.ClassName
+        $controlType = $element.Current.ControlType.ProgrammaticName
+        $score = 0
+        if ($className -eq 'MenuItemView') { $score += 4 }
+        if ($controlType -eq 'ControlType.MenuItem') { $score += 4 }
+        if ($controlType -eq 'ControlType.CheckBox') { $score += 4 }
+        if ($patterns -contains 'ExpandCollapsePatternIdentifiers.Pattern') { $score += 3 }
+        if ($patterns -contains 'TogglePatternIdentifiers.Pattern') { $score += 4 }
+        if ($patterns -contains 'ValuePatternIdentifiers.Pattern') { $score += 1 }
+        if (-not $rootInfo.IsMainWindow) { $score += 2 }
+        if ($preferToggle -and $patterns -notcontains 'TogglePatternIdentifiers.Pattern') { continue }
+        if ($preferToggle -and $controlType -ne 'ControlType.CheckBox') { continue }
+        if ($score -gt $bestScore) {
+          $bestScore = $score
+          $best = $element
+        }
+      }
+    }
+  }
+  $best
+}
+
+function Find-ClaudeDeveloperMenuElement([string[]]$names, $window) {
+  $best = $null
+  $bestScore = -1
+  foreach ($rootInfo in (Get-ClaudeAutomationRoots $window)) {
+    if ($rootInfo.IsMainWindow) { continue }
+    $root = $rootInfo.Root
+    foreach ($name in $names) {
+      $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $name
+      )
+      $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+      foreach ($element in $matches) {
+        $patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+        $className = $element.Current.ClassName
+        $controlType = $element.Current.ControlType.ProgrammaticName
+        if ($patterns -notcontains 'ExpandCollapsePatternIdentifiers.Pattern') { continue }
+
+        $score = 0
+        if ($controlType -eq 'ControlType.MenuItem') { $score += 8 }
+        if ($className -eq 'MenuItemView') { $score += 8 }
+        if ($className -eq 'SubmenuButton') { $score -= 4 }
+        if ($patterns -contains 'ScrollItemPatternIdentifiers.Pattern') { $score += 1 }
+        if ($score -gt $bestScore) {
+          $bestScore = $score
+          $best = $element
+        }
+      }
+    }
+  }
+  if ($best) { Write-ClaudeDebuggerLog ("Selected Developer candidate: " + (Format-ClaudeElementForLog $best)) }
+  $best
+}
+
+function Find-ClaudeDebuggerToggleElement([string[]]$names, $window) {
+  $best = $null
+  $bestScore = -1
+  foreach ($rootInfo in (Get-ClaudeAutomationRoots $window)) {
+    if ($rootInfo.IsMainWindow) { continue }
+    $root = $rootInfo.Root
+    foreach ($name in $names) {
+      $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $name
+      )
+      $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+      foreach ($element in $matches) {
+        $patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+        $className = $element.Current.ClassName
+        $controlType = $element.Current.ControlType.ProgrammaticName
+        if ($patterns -notcontains 'TogglePatternIdentifiers.Pattern') { continue }
+        if ($controlType -ne 'ControlType.CheckBox') { continue }
+
+        $score = 0
+        if ($className -eq 'MenuItemView') { $score += 8 }
+        if ($patterns -contains 'ValuePatternIdentifiers.Pattern') { $score += 1 }
+        if ($score -gt $bestScore) {
+          $bestScore = $score
+          $best = $element
+        }
+      }
+    }
+  }
+  if ($best) { Write-ClaudeDebuggerLog ("Selected debugger toggle candidate: " + (Format-ClaudeElementForLog $best)) }
+  $best
+}
+
+function Find-ClaudeMenuItems($window) {
+  $conditions = @(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ClassNameProperty,
+      'MenuItemView'
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::MenuItem
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::CheckBox
+    ))
+  )
+  $seen = @{}
+  $items = New-Object System.Collections.Generic.List[object]
+  foreach ($rootInfo in (Get-ClaudeAutomationRoots $window)) {
+    if ($rootInfo.IsMainWindow) { continue }
+    $root = $rootInfo.Root
+    foreach ($condition in $conditions) {
+      $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+      foreach ($element in $matches) {
+        $className = $element.Current.ClassName
+        if ($className -ne 'MenuItemView') { continue }
+        try {
+          $runtimeId = [string]::Join('.', $element.GetRuntimeId())
+        } catch {
+          $runtimeId = "$($element.Current.Name)|$($element.Current.ControlType.ProgrammaticName)"
+        }
+        if ($seen.ContainsKey($runtimeId)) { continue }
+        $seen[$runtimeId] = $true
+        $items.Add([pscustomobject]@{
+          Element = $element
+          ClassName = $className
+          ControlType = $element.Current.ControlType.ProgrammaticName
+          Patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+        }) | Out-Null
+      }
+    }
+  }
+  $items
+}
+
+function Test-ClaudeMenuPopupOpen($window, [string[]]$developerNames) {
+  if (Find-ClaudeDeveloperMenuElement $developerNames $window) { return $true }
+  if (Find-ClaudeDeveloperMenuByStructure $window) { return $true }
+  return $false
+}
+
+function Find-ClaudeDeveloperMenuByStructure($window) {
+  $expandable = @(Find-ClaudeMenuItems $window | Where-Object {
+    $_.ControlType -eq 'ControlType.MenuItem' -and
+    $_.Patterns -contains 'ExpandCollapsePatternIdentifiers.Pattern'
+  })
+  if ($expandable.Count -lt 4) { return $null }
+  $selected = $expandable[3].Element
+  Write-ClaudeDebuggerLog ("Selected structural Developer candidate: " + (Format-ClaudeElementForLog $selected))
+  $selected
+}
+
+function Find-ClaudeDebuggerToggleByStructure($window) {
+  $toggles = @(Find-ClaudeMenuItems $window | Where-Object {
+    $_.ClassName -eq 'MenuItemView' -and
+    $_.ControlType -eq 'ControlType.CheckBox' -and
+    $_.Patterns -contains 'TogglePatternIdentifiers.Pattern'
+  })
+  if ($toggles.Count -eq 0) { return $null }
+  $selected = $toggles[0].Element
+  Write-ClaudeDebuggerLog ("Selected structural debugger toggle candidate: " + (Format-ClaudeElementForLog $selected))
+  $selected
+}
+
+function Find-ClaudeMenuButton($window) {
+  $root = [System.Windows.Automation.AutomationElement]::FromHandle($window.Hwnd)
+  if (-not $root) { return $null }
+  $names = @('Menu', '菜单')
+  $best = $null
+  $bestScore = -1
+  foreach ($name in $names) {
+    $condition = New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      $name
+    )
+    $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+    foreach ($element in $matches) {
+      $patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+      $className = $element.Current.ClassName
+      $controlType = $element.Current.ControlType.ProgrammaticName
+      $score = 0
+      if ($controlType -eq 'ControlType.Button') { $score += 6 }
+      if ($className -match 'Button|Menu') { $score += 4 }
+      if ($patterns -contains 'InvokePatternIdentifiers.Pattern') { $score += 4 }
+      if ($patterns -contains 'TogglePatternIdentifiers.Pattern') { $score += 2 }
+      if ($score -gt $bestScore) {
+        $bestScore = $score
+        $best = $element
+      }
+    }
+  }
+  $best
+}
+
+function Open-ClaudeMenu($window, [string[]]$developerNames) {
+  if (Test-ClaudeMenuPopupOpen $window $developerNames) {
+    Write-ClaudeDebuggerLog 'Claude menu popup already appears to be open.'
+    return $true
+  }
+
+  $menuButton = Find-ClaudeMenuButton $window
+  if (-not $menuButton) {
+    Write-ClaudeDebuggerLog 'Claude in-window menu button was not found.'
+    return $false
+  }
+  Write-ClaudeDebuggerLog ("Selected menu button: " + (Format-ClaudeElementForLog $menuButton))
+
+  for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    Write-ClaudeDebuggerLog "Invoking Claude menu button attempt $($attempt + 1)."
+    if (-not (Invoke-Element $menuButton)) {
+      Write-ClaudeDebuggerLog 'Claude menu button did not expose an invokable UIA pattern.'
+      return $false
+    }
+    Start-Sleep -Milliseconds 120
+    if (Test-ClaudeMenuPopupOpen $window $developerNames) {
+      Write-ClaudeDebuggerLog 'Claude menu popup opened.'
+      return $true
+    }
+  }
+
+  Write-ClaudeDebuggerLog 'Claude menu popup did not expose Developer after menu button attempts.'
+  return $false
+}
+
+function Test-ClaudeOverlayCandidateText([string]$text) {
+  if (-not $text) { return $false }
+  return $text -match 'Upgrade|Plan|Pro|Team|Try|Trial|Subscribe|Discount|Offer|New|Announcement|Promo|Limited|Introducing|What''s new|Release' -or
+    $text -match '升级|订阅|套餐|试用|优惠|公告|新功能|推广|广告|限时|会员|计划|版本|新增'
+}
+
+function Test-ClaudeRootHasBlockingOverlayText($root) {
+  $conditions = @(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Text
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Document
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Pane
+    ))
+  )
+
+  foreach ($condition in $conditions) {
+    $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+    foreach ($element in $matches) {
+      $name = ''
+      try { $name = $element.Current.Name } catch { $name = '' }
+      if (Test-ClaudeOverlayCandidateText $name) { return $true }
+    }
+  }
+  return $false
+}
+
+function Find-ClaudeAnonymousOverlayCloseButton($root) {
+  if (-not (Test-ClaudeRootHasBlockingOverlayText $root)) { return $null }
+
+  $condition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Button
+  )
+  $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+  $best = $null
+  $bestScore = -1
+  foreach ($element in $matches) {
+    $name = ''
+    try { $name = $element.Current.Name } catch { $name = '' }
+    if ($name.Length -gt 0) { continue }
+
+    $patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+    if ($patterns -notcontains 'InvokePatternIdentifiers.Pattern') { continue }
+
+    $className = ''
+    try { $className = $element.Current.ClassName } catch { $className = '' }
+    $score = 0
+    if ($className -match 'button|close|icon|absolute|rounded|ghost') { $score += 4 }
+    if ($patterns -contains 'ScrollItemPatternIdentifiers.Pattern') { $score += 1 }
+    if ($score -gt $bestScore) {
+      $bestScore = $score
+      $best = $element
+    }
+  }
+  $best
+}
+
+function Close-ClaudeBlockingOverlayWindows($window) {
+  $closed = 0
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($window.Hwnd)
+    if (-not $root) { return 0 }
+
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+      $button = Find-ClaudeAnonymousOverlayCloseButton $root
+      if (-not $button) { break }
+      Write-ClaudeDebuggerLog ("Closing Claude blocking overlay with anonymous close button: " + (Format-ClaudeElementForLog $button))
+      if (-not (Invoke-Element $button)) { break }
+      $closed += 1
+      Start-Sleep -Milliseconds 250
+    }
+  } catch {
+    Write-ClaudeDebuggerLog "Ignoring Claude blocking overlay cleanup failure: $($_.Exception.Message)"
+  }
+  $closed
+}
+
+function Close-ClaudeInspectorPromptWindows($window) {
+  $closed = 0
+  [CslClaudeWin32]::EnumWindows({
+    param([IntPtr]$hWnd, [IntPtr]$extraData)
+    if ($hWnd -eq $window.Hwnd) { return $true }
+
+    $processId = [uint32]0
+    [CslClaudeWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId) | Out-Null
+    if ([int]$processId -ne [int]$window.ProcessId) { return $true }
+
+    $classBuilder = New-Object System.Text.StringBuilder 256
+    [CslClaudeWin32]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
+    $className = $classBuilder.ToString()
+    if (-not (Test-ClaudeInspectorWindowClass $className)) { return $true }
+
+    $titleBuilder = New-Object System.Text.StringBuilder 512
+    [CslClaudeWin32]::GetWindowText($hWnd, $titleBuilder, $titleBuilder.Capacity) | Out-Null
+    $title = $titleBuilder.ToString()
+    $rect = New-Object CslClaudeWin32+RECT
+    [CslClaudeWin32]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+
+    $looksLikeInspectorPrompt = (Test-ClaudeInspectorPromptCandidate $title $width $height) -and
+      ($width -lt ($window.Width - 80) -or $height -lt ($window.Height - 80))
+    if (-not $looksLikeInspectorPrompt) { return $true }
+
+    try {
+      $element = [System.Windows.Automation.AutomationElement]::FromHandle($hWnd)
+      $windowPattern = $null
+      if ($element -and $element.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern, [ref]$windowPattern)) {
+        $windowPattern.Close()
+      }
+    } catch {}
+    [CslClaudeWin32]::PostMessage($hWnd, $WM_CLOSE, [UIntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    $closed += 1
+    return $true
+  }, [IntPtr]::Zero) | Out-Null
+  $closed
+}
+
+function Wait-CloseClaudeInspectorPromptWindows($window, [int]$attempts = 10) {
+  $closed = 0
+  for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
+    $closed += Close-ClaudeInspectorPromptWindows $window
+    if ($closed -gt 0) {
+      Start-Sleep -Milliseconds 120
+      $closed += Close-ClaudeInspectorPromptWindows $window
+      break
+    }
+    Start-Sleep -Milliseconds 120
+  }
+  $closed
+}
+
+function Invoke-DebuggerConfirmation($window) {
+  $names = @(
+    'Continue', 'Allow', 'Open',
+    '继续', '允许', '繼續', '開く',
+    'Continuer', 'Fortfahren', 'Continuar', 'Permitir', 'Lanjutkan'
+  )
+  $button = Find-ClaudeMenuElement $names $window $false $true
+  if (-not $button) { return $false }
+  Write-ClaudeDebuggerLog ("Invoking debugger confirmation: " + (Format-ClaudeElementForLog $button))
+  Invoke-Element $button | Out-Null
+  return $true
+}
+
+Write-ClaudeDebuggerLog 'Windows Main Process Debugger automation started.'
+
+$window = $null
+$window = Get-ClaudeMainWindow
+if ($window) {
+  Write-ClaudeDebuggerLog 'Using existing Claude window before app activation.'
+} else {
+  Start-ClaudeWindowsApp
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $window = Get-ClaudeMainWindow
+    if ($window) { break }
+    if ($attempt -eq 4) { Start-ClaudeWindowsApp }
+    Start-Sleep -Milliseconds 500
+  }
+}
+if (-not $window) {
+  Write-ClaudeDebuggerLog 'Claude main window was not found after launch.'
+  throw 'Claude main window was not found after launch.'
+}
+
+[CslClaudeWin32]::ShowWindow($window.Hwnd, 9) | Out-Null
+[CslClaudeWin32]::BringWindowToTop($window.Hwnd) | Out-Null
+[CslClaudeWin32]::SetForegroundWindow($window.Hwnd) | Out-Null
+Start-Sleep -Milliseconds 100
+Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null
+Close-ClaudeBlockingOverlayWindows $window | Out-Null
+
+$developerNames = @('Developer', '开发者', '開發者')
+$debuggerNames = @(
+  'Enable Main Process Debugger',
+  'Main Process Debugger',
+  '启用主进程调试器',
+  '啟用主進程偵錯器'
+)
+
+$developer = $null
+if (-not (Open-ClaudeMenu $window $developerNames)) {
+  throw 'Claude in-window menu could not be opened through UI Automation.'
+}
+$developer = Find-ClaudeDeveloperMenuElement $developerNames $window
+if (-not $developer) {
+  $developer = Find-ClaudeDeveloperMenuByStructure $window
+}
+if (-not $developer) {
+  Write-ClaudeDebuggerLog 'Claude Developer menu was not found after opening menu popup.'
+  throw 'Claude Developer menu was not found.'
+}
+Write-ClaudeDebuggerLog ("Invoking Developer menu: " + (Format-ClaudeElementForLog $developer))
+if (-not (Invoke-Element $developer)) {
+  Write-ClaudeDebuggerLog ("Developer menu could not be opened: " + (Format-ClaudeElementForLog $developer))
+  throw 'Claude Developer menu could not be opened through UI Automation.'
+}
+Start-Sleep -Milliseconds 120
+
+$debuggerItem = Find-ClaudeDebuggerToggleElement $debuggerNames $window
+if (-not $debuggerItem) {
+  $debuggerItem = Find-ClaudeDebuggerToggleByStructure $window
+}
+if (-not $debuggerItem) {
+  Write-ClaudeDebuggerLog 'Claude Developer > Enable Main Process Debugger menu item was not found.'
+  throw 'Claude Developer > Enable Main Process Debugger menu item was not found.'
+}
+Write-ClaudeDebuggerLog ("Using debugger toggle: " + (Format-ClaudeElementForLog $debuggerItem))
+
+$valuePattern = $null
+$null = $debuggerItem.TryGetCurrentPattern(
+  [System.Windows.Automation.ValuePattern]::Pattern,
+  [ref]$valuePattern
+)
+
+$togglePattern = $null
+if ($debuggerItem.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$togglePattern)) {
+  if ($togglePattern.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::On) {
+    Write-ClaudeDebuggerLog 'Toggling Claude Main Process Debugger on.'
+    $togglePattern.Toggle()
+    Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null
+  } else {
+    Write-ClaudeDebuggerLog 'Claude Main Process Debugger toggle already appears on.'
+  }
+} else {
+  Write-ClaudeDebuggerLog 'Claude Main Process Debugger menu item did not expose TogglePattern.'
+  throw 'Claude Main Process Debugger menu item does not expose TogglePattern.'
+}
+
+for ($attempt = 0; $attempt -lt 8; $attempt++) {
+  Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null
+  if (-not (Invoke-DebuggerConfirmation $window)) { break }
+  Wait-CloseClaudeInspectorPromptWindows $window 4 | Out-Null
+}
+Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null
+Write-ClaudeDebuggerLog 'Windows Main Process Debugger automation completed.'
+"#;
+
+    run_windows_debugger_powershell_with_timeout(
+        script,
+        WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT,
+    )
+    .map(|_| ())
+    .map_err(|err| format!("Failed to request Claude main process debugger on Windows: {err}"))
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_debugger_powershell_with_timeout(
+    script: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let script = format!(
+        r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+{script}
+"#
+    );
+    let mut child = hidden_command("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .spawn()
+        .map_err(|err| format!("Failed to start PowerShell: {err}"))?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|err| format!("Failed to read PowerShell output: {err}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "PowerShell execution failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
+                return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "PowerShell debugger automation timed out after {} seconds; waiting for manual Main Process Debugger activation.",
+                        timeout.as_secs()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Failed to poll PowerShell debugger automation: {err}"
+                ));
+            }
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn ensure_macos_accessibility_trusted_or_restart_needed(
-) -> Result<MacosAccessibilityPreflight, String> {
-    macos_accessibility_preflight(Some(MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT))
-}
-
-#[cfg(target_os = "macos")]
-fn macos_accessibility_preflight(
-    restart_after_prompt: Option<Duration>,
-) -> Result<MacosAccessibilityPreflight, String> {
-    let started = Instant::now();
-    let mut prompt_started_at = None;
-    let mut attempt = 0usize;
+fn ensure_macos_accessibility_trusted_for_localized_launch() -> Result<(), String> {
     append_macos_debugger_log(format!(
         "Accessibility preflight started; {}",
         macos_accessibility_identity_summary()
     ));
-    while started.elapsed() < MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT {
-        attempt += 1;
-        if macos_accessibility_is_trusted_raw() {
-            append_macos_debugger_log(format!(
-                "Accessibility preflight check #{attempt}: AXIsProcessTrusted=true"
-            ));
-            return Ok(MacosAccessibilityPreflight::Trusted);
-        }
-        if attempt == 1 || attempt % 10 == 0 {
-            append_macos_debugger_log(format!(
-                "Accessibility preflight check #{attempt}: AXIsProcessTrusted=false; waiting for macOS TCC to update"
-            ));
-        }
-        if attempt == 1 {
-            prompt_started_at = Some(Instant::now());
-            if request_macos_accessibility_prompt("localized launch preflight") {
-                append_macos_debugger_log(
-                    "Accessibility preflight prompt returned trusted immediately",
-                );
-                return Ok(MacosAccessibilityPreflight::Trusted);
-            }
-        }
-        if let (Some(prompt_started_at), Some(restart_after_prompt)) =
-            (prompt_started_at, restart_after_prompt)
-        {
-            if prompt_started_at.elapsed() >= restart_after_prompt {
-                append_macos_debugger_log(format!(
-                    "Accessibility preflight still false {} seconds after prompting; CodeStudio Lite process restart is required for macOS TCC to refresh",
-                    restart_after_prompt.as_secs()
-                ));
-                return Ok(MacosAccessibilityPreflight::NeedsProcessRestart);
-            }
-        }
-        thread::sleep(Duration::from_millis(
-            MACOS_ACCESSIBILITY_PREFLIGHT_RETRY_MS,
-        ));
+    if macos_accessibility_is_trusted_raw() {
+        append_macos_debugger_log("Accessibility preflight check: AXIsProcessTrusted=true");
+        return Ok(());
+    }
+    append_macos_debugger_log("Accessibility preflight check: AXIsProcessTrusted=false");
+    if request_macos_accessibility_prompt("localized launch preflight") {
+        append_macos_debugger_log("Accessibility preflight prompt returned trusted immediately");
+        return Ok(());
     }
 
     Err(macos_accessibility_not_trusted_error())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn ensure_macos_accessibility_trusted_for_localized_launch() -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn ensure_macos_accessibility_trusted_or_restart_needed(
-) -> Result<MacosAccessibilityPreflight, String> {
-    Ok(MacosAccessibilityPreflight::Trusted)
-}
-
+#[cfg(target_os = "macos")]
 fn enable_macos_claude_main_process_debugger() -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Ok(());
-    }
-
     let started = Instant::now();
     let mut last_error = "Claude Node inspector endpoint was not available.".to_string();
     let mut request_count = 0usize;
@@ -1787,25 +1427,21 @@ fn enable_macos_claude_main_process_debugger() -> Result<(), String> {
     ))
 }
 
+#[cfg(target_os = "macos")]
 fn request_macos_claude_main_process_debugger_once() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        match request_macos_claude_main_process_debugger_native() {
-            Ok(()) => {
-                append_macos_debugger_log("native Accessibility request succeeded");
-                Ok(())
-            }
-            Err(err) => {
-                append_macos_debugger_log(format!("native Accessibility request failed: {err}"));
-                Err(err)
-            }
+    match request_macos_claude_main_process_debugger_native() {
+        Ok(()) => {
+            append_macos_debugger_log("native Accessibility request succeeded");
+            Ok(())
+        }
+        Err(err) => {
+            append_macos_debugger_log(format!("native Accessibility request failed: {err}"));
+            Err(err)
         }
     }
-
-    #[cfg(not(target_os = "macos"))]
-    Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn macos_debugger_log_path() -> Option<PathBuf> {
     app_paths().ok().map(|paths| {
         paths
@@ -1815,6 +1451,7 @@ fn macos_debugger_log_path() -> Option<PathBuf> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn append_macos_debugger_log(message: impl AsRef<str>) {
     let Some(path) = macos_debugger_log_path() else {
         return;
@@ -1957,6 +1594,7 @@ fn macos_accessibility_is_trusted_raw() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
+#[cfg(target_os = "macos")]
 fn macos_accessibility_not_trusted_error() -> String {
     let log_path = macos_debugger_log_path()
         .map(|path| path.display().to_string())
@@ -1970,6 +1608,7 @@ fn macos_accessibility_not_trusted_error() -> String {
     )
 }
 
+#[cfg(target_os = "macos")]
 fn macos_accessibility_identity_summary() -> String {
     let current_exe = env::current_exe()
         .map(|path| path.display().to_string())
@@ -1982,6 +1621,7 @@ fn macos_accessibility_identity_summary() -> String {
     format!("Current app bundle: {app_bundle}. Current executable: {current_exe}")
 }
 
+#[cfg(target_os = "macos")]
 fn macos_app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
     for ancestor in executable.ancestors() {
         if ancestor
@@ -2236,6 +1876,7 @@ fn ax_find_and_press_matching(
     Ok(false)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn macos_developer_menu_title_matches(title: &str) -> bool {
     let normalized = normalized_menu_title(title);
     if normalized.is_empty() {
@@ -2263,6 +1904,7 @@ fn macos_developer_menu_title_matches(title: &str) -> bool {
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn macos_main_process_debugger_menu_title_matches(title: &str) -> bool {
     let normalized = normalized_menu_title(title);
     if normalized.is_empty() {
@@ -2272,6 +1914,7 @@ fn macos_main_process_debugger_menu_title_matches(title: &str) -> bool {
     normalized_title_contains_any(&normalized, macos_main_process_debugger_menu_titles())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn macos_debugger_confirmation_title_matches(title: &str) -> bool {
     let normalized = normalized_menu_title(title);
     if normalized.is_empty() {
@@ -2345,6 +1988,7 @@ fn macos_debugger_confirmation_title_matches(title: &str) -> bool {
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn macos_main_process_debugger_menu_titles() -> &'static [&'static str] {
     const TITLES: &[&str] = &[
         "Enable Main Process Debugger",
@@ -2384,6 +2028,7 @@ fn macos_main_process_debugger_menu_titles() -> &'static [&'static str] {
     TITLES
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn normalized_title_contains_any(normalized_title: &str, candidates: &[&str]) -> bool {
     candidates.iter().any(|candidate| {
         let normalized_candidate = normalized_menu_title(candidate);
@@ -2391,6 +2036,7 @@ fn normalized_title_contains_any(normalized_title: &str, candidates: &[&str]) ->
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn normalized_title_equals_any(normalized_title: &str, candidates: &[&str]) -> bool {
     candidates.iter().any(|candidate| {
         let normalized_candidate = normalized_menu_title(candidate);
@@ -2398,6 +2044,7 @@ fn normalized_title_equals_any(normalized_title: &str, candidates: &[&str]) -> b
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn normalized_menu_title(title: &str) -> String {
     title
         .chars()
@@ -2406,6 +2053,7 @@ fn normalized_menu_title(title: &str) -> String {
         .collect()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn is_cjk_char(ch: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&ch)
 }
@@ -2545,15 +2193,14 @@ fi
 deadline=$(( $(/bin/date +%s) + 90 ))
 debugger_attempts=0
 claude_debugger_open() {
-  for port in $(/usr/bin/seq 9229 9300); do
-    /usr/bin/curl -fsS --max-time 1 "http://127.0.0.1:${port}/json" 2>/dev/null | /usr/bin/grep -E '"webSocketDebuggerUrl"[[:space:]]*:[[:space:]]*"ws://127\.0\.0\.1:' >/dev/null || continue
-    pids=$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
-    for pid in $pids; do
-      args=$(/bin/ps -p "$pid" -o args= 2>/dev/null || true)
-      case "$args" in
-        *"Claude.app/Contents/MacOS/Claude"*) return 0 ;;
-      esac
-    done
+  port=__CLAUDE_NODE_INSPECT_PORT__
+  /usr/bin/curl -fsS --max-time 1 "http://127.0.0.1:${port}/json" 2>/dev/null | /usr/bin/grep -E '"webSocketDebuggerUrl"[[:space:]]*:[[:space:]]*"ws://127\.0\.0\.1:' >/dev/null || return 1
+  pids=$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+  for pid in $pids; do
+    args=$(/bin/ps -p "$pid" -o args= 2>/dev/null || true)
+    case "$args" in
+      *"Claude.app/Contents/MacOS/Claude"*) return 0 ;;
+    esac
   done
   return 1
 }
@@ -2575,167 +2222,14 @@ echo "[claude-zh] Claude main process debugger is ready." >&2
         "__CLAUDE_LOCALIZED_LAUNCH_MARKER__",
         CLAUDE_LOCALIZED_LAUNCH_MARKER,
     )
+    .replace(
+        "__CLAUDE_NODE_INSPECT_PORT__",
+        &CLAUDE_NODE_INSPECT_PORT.to_string(),
+    )
 }
 
 fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn apply_localization_patch() -> Result<(), String> {
-    if !cfg!(target_os = "windows") {
-        return Err(
-            "Claude Desktop localization patching is only supported on Windows.".to_string(),
-        );
-    }
-    let install = resolve_claude_install_for_patch()?;
-    let paths = ClaudePatchPaths {
-        exe: install.patch_exe.clone(),
-        asar: install.asar.clone(),
-        shell_locale: install.shell_locale.clone(),
-        ion_locale: install.ion_locale.clone(),
-    };
-
-    let exe_bytes =
-        fs::read(&paths.exe).map_err(|err| format!("Failed to read Claude.exe: {err}"))?;
-    let asar_bytes =
-        fs::read(&paths.asar).map_err(|err| format!("Failed to read app.asar: {err}"))?;
-
-    let exe_needs_patch = !fuse_integrity_disabled(&exe_bytes);
-    // Re-patching an already-patched asar can self-reference MAIN_MODULE (see
-    // asar_shim_self_references); treat that as needing a rewrite too.
-    let asar_needs_patch = !asar_already_patched(&asar_bytes)
-        || asar_shim_self_references(&asar_bytes)
-        || asar_shim_needs_update(&asar_bytes);
-    let shell_locale_needs_patch =
-        !locale_file_matches(&paths.shell_locale, CLAUDE_SHELL_ZH_LOCALE);
-    let ion_locale_needs_patch = !locale_file_matches(&paths.ion_locale, CLAUDE_ION_ZH_LOCALE);
-    if !exe_needs_patch && !asar_needs_patch && !shell_locale_needs_patch && !ion_locale_needs_patch
-    {
-        return Ok(());
-    }
-
-    // Prepare patched asar bytes in memory (surgeon-style append: original
-    // file content stays at its offsets; a new package.json and the inspector
-    // shim are appended).
-    let patched_asar = build_patched_claude_asar(&asar_bytes)?;
-
-    // Prepare patched exe bytes (flip the one fuse byte).
-    let mut patched_exe = exe_bytes.clone();
-    let fuse_offset = fuse_integrity_offset(&patched_exe).ok_or_else(|| {
-        "Claude.exe Electron fuse marker was not found; cannot disable asar integrity.".to_string()
-    })?;
-    patched_exe[fuse_offset] = b'0';
-
-    // Write the patched blobs and the zh-CN locale files to a temp dir the
-    // elevated script can read. The locale files are placed in the resources
-    // directory so Claude's built-in locale selection (nqi/oqi) discovers
-    // zh-CN and the inspector shim can keep it selected.
-    let patch_dir = ensure_patch_files()?;
-    let temp_exe = patch_dir.join("Claude.patched.exe");
-    let temp_asar = patch_dir.join("app.patched.asar");
-    let temp_shell_locale = patch_dir.join(CLAUDE_SHELL_ZH_LOCALE_FILE);
-    let temp_ion_locale = patch_dir.join("ion-zh-CN.json");
-    fs::write(&temp_exe, &patched_exe)
-        .map_err(|err| format!("Failed to write patched Claude.exe: {err}"))?;
-    fs::write(&temp_asar, &patched_asar)
-        .map_err(|err| format!("Failed to write patched app.asar: {err}"))?;
-    fs::write(&temp_shell_locale, CLAUDE_SHELL_ZH_LOCALE)
-        .map_err(|err| format!("Failed to write zh-CN shell locale: {err}"))?;
-    fs::write(&temp_ion_locale, CLAUDE_ION_ZH_LOCALE)
-        .map_err(|err| format!("Failed to write zh-CN ion locale: {err}"))?;
-
-    match install.kind {
-        ClaudeInstallKind::Exe => {
-            // User-profile installs must not use UAC: writing directly keeps
-            // the normal per-user install context and returns the real IO
-            // error to the UI if Claude is still locking a file.
-            try_direct_patch_write(
-                &paths,
-                &temp_exe,
-                &temp_asar,
-                &temp_shell_locale,
-                &temp_ion_locale,
-            )?;
-        }
-        ClaudeInstallKind::Msix => {
-            // MSIX lives under WindowsApps. Try direct first in case the files
-            // are already writable; otherwise keep the existing UAC path and
-            // its explicit failure messages.
-            if try_direct_patch_write(
-                &paths,
-                &temp_exe,
-                &temp_asar,
-                &temp_shell_locale,
-                &temp_ion_locale,
-            )
-            .is_err()
-            {
-                let script_path = patch_dir.join("apply-claude-patch.ps1");
-                write_if_changed(
-                    &script_path,
-                    &elevated_patch_script(
-                        &paths.exe,
-                        &paths.asar,
-                        &temp_exe,
-                        &temp_asar,
-                        &paths.shell_locale,
-                        &temp_shell_locale,
-                        &paths.ion_locale,
-                        &temp_ion_locale,
-                    ),
-                )?;
-                if let Err(err) = run_elevated_powershell_script(&script_path) {
-                    // Some WindowsApps repairs complete the file copy but the
-                    // elevated PowerShell host still exits non-zero. Trust the
-                    // on-disk verification below when it proves the patch
-                    // landed; otherwise surface the original elevation error.
-                    verify_localization_patch_landed(&paths).map_err(|verify_err| {
-                        format!("{err}\nVerification after elevation also failed: {verify_err}")
-                    })?;
-                }
-            }
-        }
-    }
-
-    verify_localization_patch_landed(&paths)?;
-
-    // Clean up the temp blobs; the real files are patched in place.
-    let _ = fs::remove_file(&temp_exe);
-    let _ = fs::remove_file(&temp_asar);
-    let _ = fs::remove_file(&temp_shell_locale);
-    let _ = fs::remove_file(&temp_ion_locale);
-    Ok(())
-}
-
-fn verify_localization_patch_landed(paths: &ClaudePatchPaths) -> Result<(), String> {
-    // Re-read the patched files from disk and verify the patch actually
-    // landed: the elevated copy is synchronous now, but MSIX-managed
-    // WindowsApps files can still roll back or be locked, and a stale read
-    // would let the caller activate an unpatched Claude (English, no
-    // inspector). This is the last guard before activation.
-    let post_exe = fs::read(&paths.exe)
-        .map_err(|err| format!("Failed to re-read patched Claude.exe: {err}"))?;
-    let post_asar = fs::read(&paths.asar)
-        .map_err(|err| format!("Failed to re-read patched app.asar: {err}"))?;
-    if !fuse_integrity_disabled(&post_exe) {
-        return Err(
-            "Claude.exe fuse was not disabled after patching; the elevated write may have failed."
-                .to_string(),
-        );
-    }
-    if !asar_already_patched(&post_asar) {
-        return Err(
-            "Claude app.asar entry was not rewritten after patching; the elevated write may have failed."
-                .to_string(),
-        );
-    }
-    if !locale_file_matches(&paths.shell_locale, CLAUDE_SHELL_ZH_LOCALE) {
-        return Err("Claude zh-CN shell locale was not written after patching.".to_string());
-    }
-    if !locale_file_matches(&paths.ion_locale, CLAUDE_ION_ZH_LOCALE) {
-        return Err("Claude zh-CN ion locale was not written after patching.".to_string());
-    }
-    Ok(())
 }
 
 fn find_windows_claude_exe() -> Option<PathBuf> {
@@ -2773,7 +2267,7 @@ fn push_windows_claude_local_candidates(candidates: &mut Vec<PathBuf>, root: &Pa
     candidates.push(root.join("Programs").join("Claude").join("Claude.exe"));
     candidates.push(root.join("Claude").join("Claude.exe"));
     // Native electron-builder/NSIS installer (winget's Anthropic.Claude on a
-    // clean VM). Match the detector's candidate set so localization patching
+    // clean VM). Match the detector's candidate set so localized launch
     // resolves the same install detection finds.
     candidates.push(root.join("Programs").join("claude").join("Claude.exe"));
     candidates.push(
@@ -2799,14 +2293,6 @@ fn windows_shell_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
 }
 
-fn ps_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn ps_path_literal(path: &Path) -> String {
-    ps_single_quote(&path.to_string_lossy().replace('/', "\\"))
-}
-
 fn windows_launch_script(localize: bool) -> String {
     let args = "$argsList = @()".to_string();
     let localized_marker = if localize {
@@ -2818,10 +2304,9 @@ Set-Content -LiteralPath (Join-Path $markerDir 'localized-launch.flag') -Value '
         ""
     };
     // Both localized and non-localized launches activate the app by MSIX
-    // app identity (shell:AppsFolder). The localized launch does not pass
-    // debug arguments: the in-place app.asar patch makes the main process
-    // open the Node inspector itself at runtime, so identity activation is
-    // sufficient and preserves the package's user-data redirection.
+    // app identity (shell:AppsFolder). Localized launch does not pass debug
+    // arguments or rewrite Claude files; CodeStudio Lite opens Claude's
+    // official main-process debugger after launch and injects at runtime.
     let msix_launch = r#"
   $target = 'shell:AppsFolder\' + $pkg.PackageFamilyName + '!' + $appId
   Start-Process -FilePath $target
@@ -2901,10 +2386,8 @@ fn build_locale_runtime_source() -> &'static str {
 }
 
 fn inject_localization() -> Result<usize, String> {
-    // The inspector is opened by the patched app.asar entry shim itself
-    // (same code path as the in-app "Developer -> Enable Main Process
-    // Debugger" menu), so there is no cross-process signal to send and no
-    // Claude PID required: just scan for the now-open inspector and inject.
+    // The inspector is opened through Claude's official "Developer -> Enable
+    // Main Process Debugger" route; once it is available, scan and inject.
     ensure_patch_files()?;
     inject_localization_via_node_inspector()
 }
@@ -2949,12 +2432,18 @@ fn build_main_process_injection_source_for_paths(
     let ion_locale_path = serde_json::to_string(&ion_locale_path.to_string_lossy()).unwrap();
     let dynamic_locale_path =
         serde_json::to_string(&dynamic_locale_path.to_string_lossy()).unwrap();
+    let injection_signature = serde_json::to_string(&main_process_injection_signature()).unwrap();
     format!(
         r##"(async () => {{
-  const CSL_INJECTION_VERSION = 8;
-  if (globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__?.version === CSL_INJECTION_VERSION) {{
+  const CSL_INJECTION_VERSION = 9;
+  const CSL_INJECTION_SIGNATURE = {injection_signature};
+  if (globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__?.version === CSL_INJECTION_VERSION &&
+      globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__?.injectionSignature === CSL_INJECTION_SIGNATURE) {{
     const summary = await globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__.refresh();
     return {{ ok: true, reused: true, ...summary }};
+  }}
+  if (globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__) {{
+    try {{ globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__.dispose?.(); }} catch (_) {{}}
   }}
 
   const requireFromMain = process.getBuiltinModule("module").createRequire(process.execPath);
@@ -3025,12 +2514,14 @@ fn build_main_process_injection_source_for_paths(
     const url = contents.getURL?.() ?? "";
     if (!url || (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("app://") && !url.startsWith("file://"))) return false;
     const previousVersion = contents.__cslZhAttachedVersion || (contents.__cslZhAttached ? 1 : 0);
+    const previousInjectionSignature = contents.__cslZhAttachedInjectionSignature || "";
     let debuggerWasAttached = false;
     try {{ debuggerWasAttached = contents.debugger.isAttached(); }} catch (_) {{}}
-    if (previousVersion !== CSL_INJECTION_VERSION && (previousVersion || debuggerWasAttached)) {{
+    if ((previousVersion !== CSL_INJECTION_VERSION || previousInjectionSignature !== CSL_INJECTION_SIGNATURE) &&
+        (previousVersion || previousInjectionSignature || debuggerWasAttached)) {{
       try {{ contents.debugger.removeAllListeners("message"); }} catch (_) {{}}
       try {{ if (contents.debugger.isAttached()) contents.debugger.detach(); }} catch (_) {{}}
-      try {{ contents.__cslZhAttached = false; contents.__cslZhAttachedVersion = 0; }} catch (_) {{}}
+      try {{ contents.__cslZhAttached = false; contents.__cslZhAttachedVersion = 0; contents.__cslZhAttachedInjectionSignature = ""; }} catch (_) {{}}
     }}
     try {{
       if (!contents.debugger.isAttached()) {{
@@ -3078,6 +2569,7 @@ fn build_main_process_injection_source_for_paths(
       await withTimeout(contents.debugger.sendCommand("Page.reload", {{ ignoreCache: true }}), 2000);
       contents.__cslZhAttached = true;
       contents.__cslZhAttachedVersion = CSL_INJECTION_VERSION;
+      contents.__cslZhAttachedInjectionSignature = CSL_INJECTION_SIGNATURE;
       attached.add(contents);
       return true;
     }} catch (_) {{
@@ -3122,7 +2614,8 @@ fn build_main_process_injection_source_for_paths(
     lower.includes("about_window");
 
   const localWindowHotSwitchSync = true;
-  const devToolsPage = (lower) => lower.startsWith("devtools://");
+  const devToolsWindowTitleSync = true;
+  const devToolsPage = (lower) => lower.startsWith("devtools://") || lower.startsWith("chrome-devtools://");
   const aboutClaudeWindowFallback = true;
   const aboutClaudeTitle = (target) => target === "zh-CN" ? "\u5173\u4e8eClaude" : "About Claude";
   const aboutClaudePage = (lower) => lower.includes("about_window");
@@ -3198,9 +2691,40 @@ fn build_main_process_injection_source_for_paths(
     }} catch (_) {{}}
   }};
   localeChangeListeners.push(syncOpenWindowsLocale);
+  const syncDevToolsTitleLater = (contents, delay = 80) => {{
+    try {{
+      setTimeout(() => {{
+        try {{
+          if (!contents || contents.isDestroyed?.()) return;
+          const lower = String(contents.getURL?.() || "").toLowerCase();
+          if (devToolsPage(lower)) applyLocalWindowTitle(contents, currentLocale, lower);
+        }} catch (_) {{}}
+      }}, delay);
+    }} catch (_) {{}}
+  }};
+  localeChangeListeners.push(() => {{
+    try {{
+      for (const contents of allContents()) syncDevToolsTitleLater(contents, 20);
+    }} catch (_) {{}}
+  }});
 
   const macosMenuBarLocalization = true;
   const menuHardcodedZh = {{
+    "File": "\u6587\u4ef6",
+    "Edit": "\u7f16\u8f91",
+    "View": "\u89c6\u56fe",
+    "Developer": "\u5f00\u53d1\u8005",
+    "Help": "\u5e2e\u52a9",
+    "New Chat": "\u65b0\u5efa\u804a\u5929",
+    "Open MCP Log File...": "\u6253\u5f00 MCP \u65e5\u5fd7\u6587\u4ef6...",
+    "Reload MCP Configuration": "\u91cd\u65b0\u52a0\u8f7d MCP \u914d\u7f6e",
+    "Open Hardware Buddy\u2026": "\u6253\u5f00 Hardware Buddy\u2026",
+    "Configure Third-Party Inference\u2026": "\u914d\u7f6e\u7b2c\u4e09\u65b9\u63a8\u7406\u2026",
+    "Extensions": "\u6269\u5c55",
+    "Open App Config File...": "\u6253\u5f00\u5e94\u7528\u914d\u7f6e\u6587\u4ef6...",
+    "Open Developer Config File...": "\u6253\u5f00\u5f00\u53d1\u8005\u914d\u7f6e\u6587\u4ef6...",
+    "Show Dev Tools": "\u663e\u793a\u5f00\u53d1\u8005\u5de5\u5177",
+    "Show All Dev Tools": "\u663e\u793a\u6240\u6709\u5f00\u53d1\u8005\u5de5\u5177",
     "Enable Main Process Debugger": "\u542f\u7528\u4e3b\u8fdb\u7a0b\u8c03\u8bd5\u5668",
     "Record Performance Trace": "\u5f55\u5236\u6027\u80fd\u8ddf\u8e2a",
     "Write Main Process Heap Snapshot": "\u5199\u5165\u4e3b\u8fdb\u7a0b\u5806\u5feb\u7167",
@@ -3219,7 +2743,14 @@ fn build_main_process_injection_source_for_paths(
     "Enter Full Screen": "\u8fdb\u5165\u5168\u5c4f",
     "Toggle Developer Tools": "\u5207\u6362\u5f00\u53d1\u8005\u5de5\u5177",
     "Force Reload": "\u5f3a\u5236\u91cd\u65b0\u52a0\u8f7d",
-    "Check for Updates\u2026": "\u68c0\u67e5\u66f4\u65b0\u2026"
+    "Check for Updates\u2026": "\u68c0\u67e5\u66f4\u65b0\u2026",
+    "Show App": "\u663e\u793a\u5e94\u7528\u754c\u9762",
+    "Show Claude": "\u663e\u793a Claude",
+    "Open Claude": "\u6253\u5f00 Claude",
+    "Quit Claude": "\u9000\u51fa Claude",
+    "Quit": "\u9000\u51fa",
+    "Settings": "\u8bbe\u7f6e",
+    "Preferences": "\u504f\u597d\u8bbe\u7f6e"
   }};
   const installMacosMenuLocalization = () => {{
     try {{
@@ -3375,6 +2906,149 @@ fn build_main_process_injection_source_for_paths(
   }};
   installMacosMenuLocalization();
 
+  const installWindowsMenuPopupLocalization = () => {{
+    try {{
+      const windowsMenuPopupLocalization = true;
+      const windowsTrayMenuLocalization = true;
+      if (process.platform === "win32") {{
+        const Menu = electron.Menu;
+        const Tray = electron.Tray;
+        if (!Menu && !Tray) return;
+        const zhHardcodedToEn = {{}};
+        for (const key in menuHardcodedZh) zhHardcodedToEn[menuHardcodedZh[key]] = key;
+        const menuRoleZh = {{
+          undo: "\u64a4\u9500",
+          redo: "\u91cd\u505a",
+          cut: "\u526a\u5207",
+          copy: "\u590d\u5236",
+          paste: "\u7c98\u8d34",
+          pasteandmatchstyle: "\u7c98\u8d34\u5e76\u5339\u914d\u6837\u5f0f",
+          delete: "\u5220\u9664",
+          selectall: "\u5168\u9009",
+          reload: "\u91cd\u65b0\u52a0\u8f7d",
+          forcereload: "\u5f3a\u5236\u91cd\u65b0\u52a0\u8f7d",
+          toggledevtools: "\u5207\u6362\u5f00\u53d1\u8005\u5de5\u5177",
+          resetzoom: "\u5b9e\u9645\u5927\u5c0f",
+          zoomin: "\u653e\u5927",
+          zoomout: "\u7f29\u5c0f",
+          togglefullscreen: "\u8fdb\u5165\u5168\u5c4f",
+          minimize: "\u6700\u5c0f\u5316",
+          close: "\u5173\u95ed",
+          quit: "\u9000\u51fa Claude",
+          settings: "\u8bbe\u7f6e"
+        }};
+        const roleKey = (item) => {{
+          try {{ return String(item?.role || "").replace(/[^a-z0-9]/gi, "").toLowerCase(); }} catch (_) {{ return ""; }}
+        }};
+        const labelKey = (label) => {{
+          try {{ return String(label || "").replace(/&/g, "").replace(/\t.*$/, "").trim(); }} catch (_) {{ return ""; }}
+        }};
+        const translateLabel = (label, role) => {{
+          if (typeof label !== "string" || !label) return label;
+          if (role && menuRoleZh[role]) return menuRoleZh[role];
+          if (menuHardcodedZh[label]) return menuHardcodedZh[label];
+          const key = labelKey(label);
+          if (menuHardcodedZh[key]) return menuHardcodedZh[key];
+          return label;
+        }};
+        const relabelMenuItems = (menu, target) => {{
+          if (!menu || !menu.items) return;
+          for (const item of menu.items) {{
+            try {{
+              if (typeof item.label === "string") {{
+                const base = item.__cslOrig === undefined ? item.label : item.__cslOrig;
+                if (item.__cslOrig === undefined) item.__cslOrig = zhHardcodedToEn[base] || base;
+                const orig = item.__cslOrig;
+                item.label = target === "zh-CN" ? translateLabel(orig, roleKey(item)) : (zhHardcodedToEn[orig] || orig);
+              }}
+              if (item.submenu) relabelMenuItems(item.submenu, target);
+            }} catch (_) {{}}
+          }}
+        }};
+        const translateMenuItems = (menu) => {{
+          if (!menu || !menu.items || !zhActive()) return menu;
+          relabelMenuItems(menu, "zh-CN");
+          return menu;
+        }};
+        const localizeMenuForCurrentLocale = (menu) => {{
+          try {{
+            if (menu && menu.items) {{
+              relabelMenuItems(menu, currentLocale);
+              translateMenuItems(menu);
+            }}
+          }} catch (_) {{}}
+          return menu;
+        }};
+        if (Menu) {{
+          Menu.__cslLocalizeMenuForCurrentLocale = localizeMenuForCurrentLocale;
+          Menu.__cslMenuPopupLocalizationInstalled = true;
+          const origBuildFromTemplate = typeof Menu.buildFromTemplate === "function"
+            ? (Menu.__cslOrigBuildFromTemplate || Menu.buildFromTemplate.bind(Menu))
+            : null;
+          if (origBuildFromTemplate) {{
+            Menu.__cslOrigBuildFromTemplate = origBuildFromTemplate;
+            Menu.buildFromTemplate = (template) => {{
+              const menu = origBuildFromTemplate(template);
+              return Menu.__cslLocalizeMenuForCurrentLocale?.(menu) || menu;
+            }};
+          }}
+          if (typeof Menu.setApplicationMenu === "function") {{
+            const origSetApplicationMenu = Menu.__cslOrigSetApplicationMenuForPopup || Menu.setApplicationMenu.bind(Menu);
+            Menu.__cslOrigSetApplicationMenuForPopup = origSetApplicationMenu;
+            Menu.setApplicationMenu = (menu) => {{
+              try {{ Menu.__cslLocalizeMenuForCurrentLocale?.(menu); }} catch (_) {{}}
+              return origSetApplicationMenu(menu);
+            }};
+          }}
+          if (Menu.prototype && typeof Menu.prototype.popup === "function") {{
+            const origPopup = Menu.__cslOrigPopup || Menu.prototype.popup;
+            Menu.__cslOrigPopup = origPopup;
+            Menu.prototype.popup = function (...args) {{
+              try {{ Menu.__cslLocalizeMenuForCurrentLocale?.(this); }} catch (_) {{}}
+              return origPopup.call(this, ...args);
+            }};
+          }}
+          localeChangeListeners.push(() => {{
+            try {{
+              const menu = typeof Menu.getApplicationMenu === "function" ? Menu.getApplicationMenu() : null;
+              if (menu) Menu.__cslLocalizeMenuForCurrentLocale?.(menu);
+            }} catch (_) {{}}
+          }});
+          const currentMenu = typeof Menu.getApplicationMenu === "function" ? Menu.getApplicationMenu() : null;
+          if (currentMenu) Menu.__cslLocalizeMenuForCurrentLocale?.(currentMenu);
+        }}
+        if (Tray?.prototype && typeof Tray.prototype.setContextMenu === "function") {{
+          const knownTrayMenus = Tray.__cslKnownTrayMenus || new Set();
+          Tray.__cslKnownTrayMenus = knownTrayMenus;
+          const localizeTrayMenuForCurrentLocale = (menu) => {{
+            try {{
+              if (menu) knownTrayMenus.add(menu);
+              return localizeMenuForCurrentLocale(menu);
+            }} catch (_) {{}}
+            return menu;
+          }};
+          const retranslateTrayMenus = () => {{
+            try {{
+              for (const menu of Array.from(knownTrayMenus)) localizeTrayMenuForCurrentLocale(menu);
+            }} catch (_) {{}}
+          }};
+          const origSetContextMenu = Tray.prototype.__cslOrigSetContextMenu || Tray.prototype.setContextMenu;
+          Tray.prototype.__cslOrigSetContextMenu = origSetContextMenu;
+          Tray.__cslTrayMenuLocalizationInstalled = true;
+          Tray.__cslLocalizeTrayMenuForCurrentLocale = localizeTrayMenuForCurrentLocale;
+          Tray.prototype.__cslTrayMenuLocalizationInstalled = true;
+          Tray.prototype.setContextMenu = function (menu) {{
+            try {{ Tray.__cslLocalizeTrayMenuForCurrentLocale?.(menu); }} catch (_) {{}}
+            return origSetContextMenu.call(this, menu);
+          }};
+          localeChangeListeners.push(retranslateTrayMenus);
+          retranslateTrayMenus();
+        }}
+      }}
+    }} catch (_) {{}}
+  }};
+  installWindowsMenuPopupLocalization();
+
   const pollLocale = async () => {{
     try {{
       const contents = allContents();
@@ -3418,162 +3092,76 @@ fn build_main_process_injection_source_for_paths(
       try {{ syncOneWindowLocale(window.webContents, currentLocale); }} catch (_) {{}}
       attach(window.webContents).catch(() => {{}});
     }}, 50);
+    try {{
+      const contents = window?.webContents;
+      if (contents && !contents.__cslDevToolsTitleSyncInstalled) {{
+        contents.__cslDevToolsTitleSyncInstalled = true;
+        contents.on?.("page-title-updated", () => syncDevToolsTitleLater(contents, 20));
+        contents.on?.("did-finish-load", () => syncDevToolsTitleLater(contents, 20));
+        contents.on?.("devtools-opened", () => {{
+          try {{
+            const devContents = contents.devToolsWebContents;
+            if (devContents) {{
+              syncDevToolsTitleLater(devContents, 60);
+              devContents.on?.("page-title-updated", () => syncDevToolsTitleLater(devContents, 20));
+              devContents.on?.("did-finish-load", () => syncDevToolsTitleLater(devContents, 20));
+            }}
+          }} catch (_) {{}}
+        }});
+      }}
+    }} catch (_) {{}}
   }});
   const timer = setInterval(refresh, 2000);
   timer.unref?.();
   const localeTimer = setInterval(pollLocale, 1000);
   localeTimer.unref?.();
-  globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__ = {{ version: CSL_INJECTION_VERSION, refresh }};
+  const dispose = () => {{
+    try {{ clearInterval(timer); }} catch (_) {{}}
+    try {{ clearInterval(localeTimer); }} catch (_) {{}}
+  }};
+  globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__ = {{ version: CSL_INJECTION_VERSION, injectionSignature: CSL_INJECTION_SIGNATURE, refresh, dispose }};
   const summary = await refresh();
   return {{ ok: true, reused: false, ...summary }};
 }})()"##
     )
 }
 
+fn main_process_injection_signature() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(include_str!("claude_desktop_patch.rs").as_bytes());
+    hasher.update(TRANSLATION_RUNTIME.as_bytes());
+    hasher.update(CLAUDE_SHELL_ZH_LOCALE.as_bytes());
+    hasher.update(CLAUDE_ION_ZH_LOCALE.as_bytes());
+    hasher.update(CLAUDE_ION_DYNAMIC_ZH_LOCALE.as_bytes());
+    let digest = hasher.finalize();
+    format!("{digest:x}")
+}
+
 fn retry_inject_localization() -> Result<usize, String> {
-    let mut last_error = "Claude DevTools endpoint was not available.".to_string();
-    for _ in 0..CLAUDE_ZH_INJECTION_RETRY_COUNT {
+    let timeout = Duration::from_millis(
+        (CLAUDE_ZH_INJECTION_RETRY_COUNT as u64).saturating_mul(CLAUDE_ZH_INJECTION_RETRY_MS),
+    );
+    retry_inject_localization_until(timeout)
+}
+
+fn retry_inject_localization_until(timeout: Duration) -> Result<usize, String> {
+    let mut last_error: Option<String> = None;
+    let started = Instant::now();
+    while started.elapsed() < timeout {
         match inject_localization() {
             Ok(count) if count > 0 => return Ok(count),
             Ok(_) => {
-                last_error =
-                    "Claude Node inspector did not expose a matching Claude target.".to_string();
+                last_error = Some(
+                    "Claude Node inspector did not expose a matching Claude target.".to_string(),
+                );
             }
             Err(err) => {
-                last_error = err;
+                last_error = Some(err);
             }
         }
         thread::sleep(Duration::from_millis(CLAUDE_ZH_INJECTION_RETRY_MS));
     }
-    Err(last_error)
-}
-
-fn run_elevated_powershell_script(script_path: &Path) -> Result<(), String> {
-    if !cfg!(target_os = "windows") {
-        return Err("Elevated PowerShell is only supported on Windows.".to_string());
-    }
-    run_elevated_powershell_script_windows(script_path)
-}
-
-#[cfg(windows)]
-fn run_elevated_powershell_script_windows(script_path: &Path) -> Result<(), String> {
-    use std::ffi::OsStr;
-    use std::iter::once;
-    use std::mem::zeroed;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
-    use windows_sys::Win32::UI::Shell::{
-        ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
-    fn wide(value: &OsStr) -> Vec<u16> {
-        value.encode_wide().chain(once(0)).collect()
-    }
-
-    let operation = wide(OsStr::new("runas"));
-    let file = wide(OsStr::new("powershell.exe"));
-    let log_path = script_path
-        .parent()
-        .map(|p| p.join("apply-claude-patch.log"));
-    let args = format!(
-        "-NoLogo -NoProfile -ExecutionPolicy Bypass -File {}",
-        windows_shell_quote(&script_path.to_string_lossy())
-    );
-    let params = wide(OsStr::new(&args));
-
-    // Use ShellExecuteExW (not ShellExecuteW) with SEE_MASK_NOCLOSEPROCESS
-    // so we receive the elevated process handle and can wait for it to
-    // finish. The previous fire-and-forget launch returned before the
-    // elevated copy completed, so the caller could activate Claude with
-    // the still-unpatched app.asar (no inspector -> no Chinese). Waiting
-    // here makes the patch-then-activate ordering reliable.
-    let mut info: SHELLEXECUTEINFOW = unsafe { zeroed() };
-    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_NOCLOSEPROCESS;
-    info.lpVerb = operation.as_ptr();
-    info.lpFile = file.as_ptr();
-    info.lpParameters = params.as_ptr();
-    info.nShow = SW_HIDE;
-    let ok = unsafe { ShellExecuteExW(&mut info) };
-    if ok == 0 {
-        return Err(format!(
-            "ShellExecuteEx runas failed (Win32 error {}).",
-            unsafe { windows_sys::Win32::Foundation::GetLastError() }
-        ));
-    }
-    // WaitForSingleObject with INFINITE would block the UI thread if the
-    // UAC prompt is left open; poll instead so cancellation stays responsive.
-    let handle = info.hProcess;
-    if handle.is_null() {
-        return Ok(());
-    }
-    let timeout_ms = 120_000u32;
-    let mut waited = 0u32;
-    let step = 200u32;
-    loop {
-        let r = unsafe { WaitForSingleObject(handle, step) };
-        if r == WAIT_OBJECT_0 {
-            break;
-        }
-        if r == WAIT_TIMEOUT {
-            waited += step;
-            if waited >= timeout_ms {
-                unsafe { CloseHandle(handle) };
-                return Err(
-                    "Claude patch elevation timed out (UAC prompt not answered).".to_string(),
-                );
-            }
-            continue;
-        }
-        unsafe { CloseHandle(handle) };
-        return Err(format!(
-            "Waiting for elevated patch process failed (status {r})."
-        ));
-    }
-    let mut exit_code: u32 = 1;
-    let got = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-    unsafe { CloseHandle(handle) };
-    if got == 0 {
-        return Err("Could not read elevated patch process exit code.".to_string());
-    }
-    if exit_code != 0 {
-        let log_tail = log_path
-            .as_deref()
-            .and_then(read_patch_log_tail)
-            .map(|tail| format!(" Patch log: {tail}"))
-            .unwrap_or_default();
-        let hint = match exit_code {
-            2 => "a protected file copy failed after retries (Claude may still be running or WindowsApps is locked).".to_string(),
-            3 => "the elevated PowerShell script threw an error (check takeown/icacls permissions).".to_string(),
-            _ => "UAC may have been declined or the elevated process was terminated.".to_string(),
-        };
-        return Err(format!(
-            "Claude in-place patch failed with exit code {exit_code}: {hint}{log_tail}"
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn run_elevated_powershell_script_windows(_script_path: &Path) -> Result<(), String> {
-    Err("Elevated PowerShell is only supported on Windows.".to_string())
-}
-
-#[cfg(windows)]
-fn read_patch_log_tail(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    if lines.is_empty() {
-        return None;
-    }
-    let start = lines.len().saturating_sub(8);
-    Some(lines[start..].join(" | "))
+    Err(last_error.unwrap_or_else(|| "Claude DevTools endpoint was not available.".to_string()))
 }
 
 #[allow(dead_code)]
@@ -3625,23 +3213,12 @@ $ordered | ForEach-Object {{ [string]$_.Id }}
 }
 
 fn read_node_inspector_targets() -> Result<Vec<serde_json::Value>, String> {
-    let mut last_error = "Claude Node inspector endpoint was not available.".to_string();
-    let mut all_targets = Vec::new();
-    for port in CLAUDE_NODE_INSPECT_PORT..=CLAUDE_NODE_INSPECT_PORT_SCAN_END {
-        match read_node_inspector_targets_from_port(port) {
-            Ok(targets) if !targets.is_empty() => all_targets.extend(targets),
-            Ok(_) => {
-                last_error = format!("Claude Node inspector on port {port} had no targets.");
-            }
-            Err(err) => {
-                last_error = err;
-            }
-        }
-    }
-    if all_targets.is_empty() {
-        Err(last_error)
-    } else {
-        Ok(all_targets)
+    match read_node_inspector_targets_from_port(CLAUDE_NODE_INSPECT_PORT) {
+        Ok(targets) if !targets.is_empty() => Ok(targets),
+        Ok(_) => Err(format!(
+            "Claude Node inspector on port {CLAUDE_NODE_INSPECT_PORT} had no targets."
+        )),
+        Err(err) => Err(err),
     }
 }
 
@@ -4258,6 +3835,10 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
 mod tests {
     use super::*;
 
+    fn production_source(source: &str) -> &str {
+        source.split("mod tests {").next().unwrap_or(source)
+    }
+
     #[test]
     fn non_localized_command_is_unchanged() {
         assert_eq!(
@@ -4282,6 +3863,159 @@ mod tests {
     }
 
     #[test]
+    fn windows_localization_is_runtime_only_and_does_not_patch_installed_app() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let production_source = production_source(source);
+        assert!(production_source.contains("ensure_windows_claude_main_process_debugger"));
+        assert!(production_source.contains("enable_claude_main_process_debugger"));
+
+        let ensure_body = production_source
+            .split("pub fn ensure_localization_patch()")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn ensure_localized_launch_prerequisites")
+                    .next()
+            })
+            .expect("ensure_localization_patch body should exist");
+        assert!(ensure_body.contains("ensure_patch_files()?"));
+        assert!(!ensure_body.contains(concat!("apply_", "localization_patch")));
+
+        let windows_launch_body = production_source
+            .split("fn launch_windows_claude_desktop")
+            .nth(1)
+            .and_then(|tail| tail.split("fn launch_windows_claude_msix").next())
+            .expect("Windows launch body should exist");
+        assert!(windows_launch_body.contains("ensure_patch_files()?"));
+        assert!(
+            windows_launch_body
+                .find("ensure_patch_files()?")
+                .expect("Windows localized launch should prepare runtime files")
+                < windows_launch_body
+                    .find("write_localized_launch_marker()?")
+                    .expect("Windows localized launch should write zh marker")
+        );
+        assert!(windows_launch_body.contains("write_localized_launch_marker()?"));
+        assert!(windows_launch_body.contains("spawn_silent_localization_injector()"));
+        assert!(!windows_launch_body.contains("ensure_windows_claude_main_process_debugger()?"));
+        assert!(!windows_launch_body.contains("retry_inject_localization()?"));
+        assert!(!windows_launch_body.contains(concat!("apply_", "localization_patch")));
+        assert!(!windows_launch_body.contains(concat!("activate_", "localized_claude")));
+
+        for removed_symbol in [
+            concat!("resolve_", "claude_install_for_patch"),
+            concat!("resolve_", "native_claude_install_for_patch"),
+            concat!("activate_", "localized_claude"),
+            concat!("build_", "inspector_shim"),
+            concat!("build_", "patched_claude_asar"),
+            concat!("elevated_", "patch_script"),
+            concat!("try_", "direct_patch_write"),
+            concat!("verify_", "localization_patch_landed"),
+            concat!("run_", "elevated_powershell_script"),
+            concat!("fuse_", "integrity_offset"),
+            concat!("asar_", "shim_needs_update"),
+            concat!("CLAUDE_", "FUSE_MARKER"),
+            concat!("CLAUDE_", "INSPECTOR_SHIM_NAME"),
+            concat!("app.", "patched.asar"),
+            concat!("Claude.", "patched.exe"),
+            concat!("apply-claude-", "patch.ps1"),
+            concat!("Shell", "ExecuteExW"),
+            "takeown",
+            "icacls",
+        ] {
+            assert!(
+                !production_source.contains(removed_symbol),
+                "old Windows install patch symbol should be removed: {removed_symbol}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_claude_desktop_launch_spawns_background_injector_on_windows() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let production_source = production_source(source);
+        let launch_body = production_source
+            .split("pub fn launch_with_app")
+            .nth(1)
+            .and_then(|tail| tail.split("pub fn base_launch_command").next())
+            .expect("launch_with_app body should exist");
+
+        assert!(launch_body.contains("launch_windows_claude_desktop(localize)?"));
+        assert!(
+            !launch_body.contains("spawn_silent_localization_injector()"),
+            "launch_with_app should delegate Windows background injection to the Windows launch helper"
+        );
+
+        let windows_launch_body = production_source
+            .split("fn launch_windows_claude_desktop")
+            .nth(1)
+            .and_then(|tail| tail.split("fn launch_windows_claude_msix").next())
+            .expect("Windows launch body should exist");
+        assert!(
+            windows_launch_body.contains("spawn_silent_localization_injector()"),
+            "direct localized Windows launch should return after app activation and inject in the background"
+        );
+    }
+
+    #[test]
+    fn silent_windows_injector_waits_for_manual_debugger_activation() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let silent_body = source
+            .split("pub fn spawn_silent_localization_injector")
+            .nth(1)
+            .and_then(|tail| tail.split("fn ensure_patch_files").next())
+            .expect("spawn_silent_localization_injector body should exist");
+
+        assert!(silent_body.contains("manualDebuggerActivationFallback"));
+        assert!(silent_body.contains("thread::spawn(move || {"));
+        assert!(silent_body.contains("enable_claude_main_process_debugger()"));
+        assert!(silent_body.contains("retry_inject_localization_until("));
+        assert!(silent_body.contains("CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT"));
+        assert!(
+            silent_body
+                .find("thread::spawn(move || {")
+                .expect("silent injector should spawn a helper thread")
+                < silent_body
+                    .find("enable_claude_main_process_debugger()")
+                    .expect("helper thread should try to open the debugger")
+        );
+        assert!(
+            silent_body
+                .find("enable_claude_main_process_debugger()")
+                .expect("debugger helper should be present")
+                < silent_body
+                    .rfind("retry_inject_localization_until(")
+                    .expect(
+                        "extended localization retry loop should keep running after helper start"
+                    )
+        );
+    }
+
+    #[test]
+    fn terminal_windows_injector_keeps_waiting_after_debugger_automation_failure() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let spawn_body = source
+            .split("pub fn spawn_localization_injector")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("pub fn spawn_silent_localization_injector")
+                    .next()
+            })
+            .expect("spawn_localization_injector body should exist");
+
+        assert!(spawn_body.contains("manualDebuggerActivationFallback"));
+        assert!(spawn_body.contains("retry_localization_after_background_debugger_request()"));
+        assert!(!spawn_body.contains("return;"));
+        assert!(
+            spawn_body
+                .find("manualDebuggerActivationFallback")
+                .expect("terminal injector should mark manual fallback")
+                < spawn_body
+                    .find("retry_localization_after_background_debugger_request()")
+                    .expect("terminal injector should keep retrying injection")
+        );
+    }
+
+    #[test]
     fn macos_localization_uses_official_main_process_debugger_menu() {
         let source = include_str!("claude_desktop_patch.rs");
         assert!(source.contains("launch_macos_claude_desktop_localized"));
@@ -4300,13 +4034,13 @@ mod tests {
         assert!(source.contains("Current app bundle"));
         assert!(source.contains("Current executable"));
         assert!(source.contains("env::current_exe()"));
-        assert!(source.contains("Accessibility preflight check #{attempt}: AXIsProcessTrusted"));
+        assert!(source.contains("Accessibility preflight check: AXIsProcessTrusted"));
         assert!(source.contains("AXIsProcessTrustedWithOptions(prompt=true) returned"));
-        assert!(source.contains("MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT"));
-        assert!(source.contains("MacosAccessibilityPreflight::NeedsProcessRestart"));
-        assert!(source.contains("schedule_macos_accessibility_restart"));
-        assert!(source.contains("CLAUDE_MACOS_ACCESSIBILITY_RESTART_MARKER"));
-        assert!(source.contains("resume_pending_macos_localized_launch"));
+        assert!(source.contains("CLAUDE_MACOS_ACCESSIBILITY_PENDING_LAUNCH_MARKER"));
+        assert!(source.contains("take_pending_claude_desktop_launch_after_restart"));
+        assert!(source.contains("restart_claude_desktop_after_accessibility_grant"));
+        assert!(source.contains("write_macos_accessibility_pending_launch_marker"));
+        assert!(source.contains("take_macos_accessibility_pending_launch_marker"));
         assert!(source.contains("request_restart()"));
         assert!(source.contains("macos_accessibility_is_trusted_raw()"));
         assert!(source.contains("request_macos_accessibility_prompt"));
@@ -4341,10 +4075,9 @@ mod tests {
             .nth(1)
             .and_then(|tail| tail.split("pub fn spawn_localization_injector").next())
             .expect("ensure_localization_patch body should exist");
-        assert!(ensure_body.contains("apply_localization_patch()"));
         assert!(!ensure_body.contains(concat!("apply_", "macos_localization_patch()")));
         assert!(ensure_body.contains("ensure_patch_files()?"));
-        assert!(ensure_body.contains("ensure_macos_claude_desktop_developer_mode()"));
+        assert!(ensure_body.contains("ensure_claude_desktop_developer_mode()"));
 
         let macos_launch_body = source
             .split("fn launch_macos_claude_desktop_localized(")
@@ -4355,13 +4088,12 @@ mod tests {
             })
             .expect("macOS launch body should exist");
         assert!(macos_launch_body.contains("ensure_patch_files()?"));
-        assert!(macos_launch_body.contains("ensure_macos_claude_desktop_developer_mode()?"));
-        assert!(macos_launch_body.contains("allow_accessibility_restart"));
+        assert!(macos_launch_body.contains("ensure_claude_desktop_developer_mode()?"));
+        assert!(!macos_launch_body.contains("allow_accessibility_restart"));
         assert!(
-            macos_launch_body.contains("ensure_macos_accessibility_trusted_or_restart_needed()?")
+            !macos_launch_body.contains("ensure_macos_accessibility_trusted_or_restart_needed()?")
         );
-        assert!(macos_launch_body.contains("schedule_macos_accessibility_restart(app)?"));
-        assert!(macos_launch_body.contains("return Ok(())"));
+        assert!(!macos_launch_body.contains("schedule_macos_accessibility_restart"));
         assert!(
             macos_launch_body
                 .find("ensure_macos_accessibility_trusted")
@@ -4408,6 +4140,8 @@ mod tests {
         assert!(script.contains("claude_debugger_open()"));
         assert!(script.contains("lsof -nP -iTCP"));
         assert!(script.contains("/usr/bin/curl -fsS --max-time 1"));
+        assert!(script.contains("port=9229"));
+        assert!(!script.contains("/usr/bin/seq 9229 9300"));
         assert!(script.contains("\"webSocketDebuggerUrl\""));
         assert!(script.contains("Claude.app/Contents/MacOS/Claude"));
         assert!(script.contains("while ! claude_debugger_open; do"));
@@ -4423,120 +4157,6 @@ mod tests {
         assert!(!script.contains("clickDebuggerConfirmation"));
         assert!(!script.contains("clickedDebuggerMenu"));
         assert!(script.contains("localized-launch.flag"));
-    }
-
-    #[test]
-    fn localized_activation_dispatches_by_install_kind_and_supports_exe() {
-        // A winget .exe install has no MSIX identity, so the localized
-        // activation must launch the patched launcher directly rather than
-        // requiring an MSIX package. The dispatcher resolves the install
-        // kind and branches accordingly; MSIX-only errors must not surface
-        // for an .exe install.
-        let source = include_str!("claude_desktop_patch.rs");
-        assert!(source.contains("enum ClaudeInstallKind"));
-        assert!(source.contains("ClaudeInstallKind::Exe"));
-        assert!(source.contains("launch_windows_claude_exe(install.launcher_exe, &[])"));
-        // Squirrel layout: patch the app-<version> image, launch the root launcher.
-        assert!(source.contains("find_squirrel_app_version_dir"));
-        assert!(source.contains("patch_exe"));
-        assert!(source.contains("launcher_exe"));
-        // The resolver now prefers the user-profile native install first so
-        // it can patch directly without UAC, then falls back to MSIX.
-        assert!(source.contains("resolve_claude_install_for_patch"));
-        assert!(source.contains("resolve_native_claude_install_for_patch"));
-        assert!(source.contains("claude_desktop_windows_native_install_path"));
-        assert!(source.contains("resolve_patch_paths_from_detected"));
-        let resolver_body = source
-            .split("fn resolve_claude_install_for_patch()")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split("fn resolve_native_claude_install_for_patch()")
-                    .next()
-            })
-            .expect("resolver body should exist");
-        assert!(
-            resolver_body
-                .find("resolve_native_claude_install_for_patch")
-                .expect("native resolver should be referenced")
-                < resolver_body
-                    .find("detect_first_msix_package")
-                    .expect("msix resolver should still exist")
-        );
-    }
-
-    #[test]
-    fn exe_localization_patch_uses_direct_write_without_uac() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let exe_branch = source
-            .split("ClaudeInstallKind::Exe => {")
-            .nth(1)
-            .and_then(|tail| tail.split("ClaudeInstallKind::Msix => {").next())
-            .expect("exe patch branch should exist");
-
-        assert!(exe_branch.contains("try_direct_patch_write"));
-        assert!(!exe_branch.contains("run_elevated_powershell_script"));
-        assert!(!exe_branch.contains("apply-claude-patch.ps1"));
-    }
-
-    #[test]
-    fn resolve_patch_paths_from_detected_handles_app_version_layout() {
-        // Squirrel layout: detected image is <root>/app-<version>/Claude.exe.
-        // patch_exe is the image itself, resources next to it, launcher the
-        // root claude.exe.
-        let root = PathBuf::from("C")
-            .join("Users")
-            .join("A")
-            .join("AppData")
-            .join("Local")
-            .join("AnthropicClaude");
-        let app_dir = root.join("app-1.14271.0");
-        let detected = app_dir.join("Claude.exe");
-        let (patch_exe, launcher, resources) =
-            resolve_patch_paths_from_detected(&detected).expect("should resolve paths");
-        assert_eq!(patch_exe, detected);
-        assert_eq!(launcher, root.join("claude.exe"));
-        assert_eq!(resources, app_dir.join("resources"));
-    }
-
-    #[test]
-    fn resolve_patch_paths_from_detected_handles_bare_launcher() {
-        // Bare layout: detected is <root>/Claude.exe with no app-<version>
-        // parent. patch_exe and launcher are both the image; resources next to it.
-        let root = PathBuf::from("C")
-            .join("Users")
-            .join("A")
-            .join("AppData")
-            .join("Local")
-            .join("Claude");
-        let detected = root.join("Claude.exe");
-        let (patch_exe, launcher, resources) =
-            resolve_patch_paths_from_detected(&detected).expect("should resolve paths");
-        assert_eq!(patch_exe, detected);
-        assert_eq!(launcher, detected);
-        assert_eq!(resources, root.join("resources"));
-    }
-
-    #[test]
-    fn find_squirrel_app_version_dir_picks_highest_version() {
-        let root = std::env::temp_dir().join(format!("cs-squirrel-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("app-1.13576.0")).unwrap();
-        fs::create_dir_all(root.join("app-1.14271.0")).unwrap();
-        fs::create_dir_all(root.join("resources")).unwrap();
-        fs::write(root.join("claude.exe"), b"launcher").unwrap();
-        let picked = find_squirrel_app_version_dir(&root).expect("should find an app dir");
-        assert_eq!(picked, "app-1.14271.0");
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn find_squirrel_app_version_dir_returns_none_for_non_squirrel_layout() {
-        let root = std::env::temp_dir().join(format!("cs-nosquirrel-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("resources")).unwrap();
-        fs::write(root.join("Claude.exe"), b"launcher").unwrap();
-        assert_eq!(find_squirrel_app_version_dir(&root), None);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -4559,150 +4179,322 @@ mod tests {
     }
 
     #[test]
-    fn localized_launch_uses_in_place_asar_patch_without_debug_args() {
-        // Localized launch never puts debug flags on argv: the fuse
-        // `EnableNodeCliInspectArguments` is disabled and the CDP auth gate
-        // would exit. Instead the installed app.asar is patched in place so
-        // its entry shim opens the Node inspector at runtime.
+    fn localized_launch_uses_official_debugger_runtime_injection_without_debug_args() {
         assert!(claude_launch_args(true).is_empty());
         assert!(claude_launch_args(false).is_empty());
         let source = include_str!("claude_desktop_patch.rs");
-        assert!(source.contains("apply_localization_patch"));
-        assert!(source.contains("activate_localized_claude_msix"));
-        assert!(source.contains("build_inspector_shim"));
-        assert!(source.contains("CLAUDE_INSPECTOR_OPEN_PORT"));
+        let production_source = production_source(source);
+        assert!(production_source.contains("ensure_windows_claude_main_process_debugger"));
+        assert!(production_source.contains("enable_claude_main_process_debugger"));
+        assert!(production_source.contains("retry_inject_localization"));
+        assert!(!production_source.contains(concat!("apply_", "localization_patch")));
+        assert!(!production_source.contains(concat!("build_", "inspector_shim")));
     }
 
     #[test]
-    fn inspector_shim_self_contains_localization_payload_and_reload() {
-        // The asar entry shim localizes Claude on its own (no external
-        // injector, no UI toggle). Four mechanisms cooperate:
-        //   (1) renderer Fetch interception (async attach, http(s) only,
-        //       /dynamic/ fulfillment) for the claude.ai webview locale,
-        //   (2) native-menu label translation via Menu.setApplicationMenu +
-        //       Tray.setContextMenu hooks (en->zh map + hard-coded overrides)
-        //       so the tray menu and hard-coded Developer items localize,
-        //   (3) zh-CN-only Fetch fulfillment (en-US passes through so English
-        //       stays usable), and
-        //   (4) a runtime whitelist patch + one-time system-locale default so
-        //       zh-CN is a selectable language, not a forced override.
-        let shim = build_inspector_shim(".vite/build/index.pre.js");
-        assert!(shim.contains("require('node:inspector').open"));
-        assert!(shim.contains("CLAUDE_INSPECTOR_OPEN_PORT") || shim.contains("9233"));
-        // (1) Fetch interception.
-        assert!(shim.contains("localePayloadForUrl"));
-        assert!(shim.contains("Fetch.fulfillRequest"));
-        assert!(shim.contains("Fetch.enable"));
-        assert!(shim.contains("Page.addScriptToEvaluateOnNewDocument"));
-        assert!(shim.contains("contents.reload()"));
-        // /dynamic/ locale files are fulfilled with the bundled dynamic
-        // zh-CN catalog (model/thinking descriptions), not passed through.
-        assert!(shim.contains("/dynamic/"));
-        assert!(shim.contains("DYNAMIC_LOCALE"));
-        // Only http(s) webContents (claude.ai webview) are intercepted.
-        assert!(shim.contains("http://"));
-        assert!(shim.contains("https://"));
-        assert!(shim.contains("async function attach"));
-        // app:// renderers (local settings/setup pages) fetch their own locale
-        // catalog from app://localhost/i18n/*.json and must be intercepted too.
-        assert!(shim.contains(r#"lower.indexOf("app://") !== 0"#));
-        assert!(shim.contains(r#"lower.indexOf("file://") !== 0"#));
-        assert!(shim.contains("__CSL_LL"));
-        // devtools:// URLs carry "https://" in their query string; the filter
-        // must match by protocol prefix so DevTools is never hijacked.
-        assert!(!shim.contains(r#"url.indexOf("http://") < 0 && url.indexOf("https://")"#));
-        assert!(shim.contains("TITLE_ZH"));
-        assert!(shim.contains("TEXT_ZH"));
-        assert!(shim.contains("translateTextNode"));
-        assert!(shim.contains("startTextPatch"));
-        assert!(shim.contains("SETUP_TITLES"));
-        assert!(shim.contains("fixDevToolsTitles"));
-        // isDestroyed is a function, not a property: the old truthy-reference
-        // check `contents.isDestroyed` made attach() bail before Fetch enable.
-        assert!(shim.contains("function isDestroyed"));
-        assert!(shim.contains("isDestroyed(contents)"));
-        assert!(!shim.contains("|| contents.isDestroyed) return"));
-        assert!(shim.contains("browser-window-created"));
-        assert!(shim.contains("setInterval(attachAll"));
-        // (2) native-menu translation.
-        assert!(shim.contains("translateMenuItems"));
-        assert!(shim.contains("Menu.setApplicationMenu"));
-        assert!(shim.contains("Tray.prototype.setContextMenu"));
-        assert!(shim.contains("HARDCODED_ZH"));
-        assert!(shim.contains("Paste and Match Style"));
-        assert!(shim.contains("zh-CN.json"));
-        // Guards that forced zh-CN and disabled English were removed; the
-        // shim only fulfills zh-CN requests and lets en-US pass through.
-        assert!(!shim.contains("origRenameSync"));
-        assert!(!shim.contains("forceZh"));
-        // The shim detects the active locale via CJK character detection on
-        // the menu labels (menuIsZh/updateLocaleFromMenu) and spa:locale polling,
-        // then only translates to zh when zh-CN is active. No IPC forcing.
-        assert!(shim.contains("zhActive"));
-        assert!(shim.contains("currentLocale"));
-        assert!(shim.contains("menuIsZh"));
-        assert!(shim.contains("updateLocaleFromMenu"));
-        // Local/preload windows call DesktopIntl.getInitialLocale before
-        // document scripts and localStorage synchronization run, so localized
-        // launch must make Electron's initial locale zh-CN up front.
-        assert!(shim.contains("forceInitialLocale"));
-        assert!(shim.contains("localizedLaunchDefaultZh"));
-        assert!(shim.contains("localized-launch.flag"));
-        assert!(shim.contains("consumeLocalizedLaunchMarker"));
-        assert!(shim.contains("getPreferredSystemLanguages"));
-        assert!(shim.contains("getSystemLocale"));
-        assert!(shim.contains("appendSwitch(\"lang\""));
-        assert!(shim.contains("app.getLocale"));
-        assert!(shim.contains("ion-dist/i18n/en-US.json"));
-        assert!(shim.contains("currentLocale === \"zh-CN\" && isEn && localLike"));
-        // Existing local/setup windows must follow language changes too.
-        assert!(shim.contains("syncOpenWindowsLocale"));
-        assert!(shim.contains("webContents.getAllWebContents"));
-        assert!(shim.contains("CSL_WANTED_LOCALE_KEY"));
-        assert!(shim.contains(
-            "localStorage.getItem(\"__cslWantedLocale\")||localStorage.getItem(\"spa:locale\")"
-        ));
-        assert!(shim.contains("localStorage.setItem(\"__cslWantedLocale\""));
-        assert!(shim.contains("localStorage.setItem(\"spa:locale\""));
-        assert!(shim.contains("__cslLocaleReloaded"));
-        assert!(shim.contains("localeChangeListeners.push(syncOpenWindowsLocale"));
-        assert!(shim.contains("localWindowHotSwitchSync"));
-        assert!(shim.contains("devtools://"));
-        assert!(shim.contains("applyLocalWindowTitle"));
-        assert!(shim.contains("setup-desktop-3p"));
-        assert!(shim.contains("Configure Third-Party Inference"));
-        assert!(shim.contains("aboutClaudeWindowFallback"));
-        assert!(shim.contains("About Claude"));
-        assert!(shim.contains("about_window"));
-        // The zh-CN payloads are embedded so the shim is self-contained.
-        assert!(shim.contains("SHELL_LOCALE"));
-        assert!(shim.contains("ION_LOCALE"));
-        assert!(shim.contains("require('./' + MAIN_MODULE)"));
-        assert!(shim.contains(".vite/build/index.pre.js"));
-    }
-
-    #[test]
-    fn localized_shim_uses_active_locale_for_new_local_windows() {
-        let shim = build_inspector_shim(".vite/build/index.pre.js");
-
-        assert!(shim.contains("function runtimeLaunchZhFlag"));
+    fn windows_debugger_automation_uses_in_window_menu_not_alt_top_menu() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let request_body = source
+            .split("fn request_windows_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("request_windows_claude_main_process_debugger_once body should exist");
+        assert!(request_body.contains("UIAutomationClient"));
+        assert!(request_body.contains("SetProcessDPIAware"));
+        assert!(request_body.contains("shell:AppsFolder"));
+        assert!(request_body.contains("$bang = [char]33"));
+        assert!(request_body.contains("$packagePrefix = $pkg.PackageFamilyName + $bang"));
+        assert!(!request_body.contains("$($pkg.PackageFamilyName)!"));
+        assert!(request_body.contains("Developer"));
+        assert!(request_body.contains("Enable Main Process Debugger"));
+        assert!(request_body.contains("TogglePattern"));
+        assert!(request_body.contains("ValuePattern"));
+        assert!(request_body.contains("Find-ClaudeMenuButton"));
+        assert!(request_body.contains("Invoke-Element"));
+        assert!(request_body.contains("Find-ClaudeDeveloperMenuByStructure"));
+        assert!(request_body.contains("Find-ClaudeDebuggerToggleByStructure"));
+        assert!(request_body.contains("Find-ClaudeMenuItems"));
+        assert!(request_body.contains("AutomationElement]::FromHandle($window.Hwnd)"));
+        assert!(request_body.contains("Close-ClaudeInspectorPromptWindows"));
+        assert!(request_body.contains("Test-ClaudeInspectorPromptCandidate"));
+        assert!(request_body.contains("IsInspectorPrompt"));
+        assert!(request_body.contains("Where-Object { -not $_.IsInspectorPrompt }"));
         assert!(
-            shim.contains("app.getLocale = function () { return currentLocale || \"en-US\"; };")
+            request_body
+                .find("Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null")
+                .expect("inspector prompt should be closed before menu automation")
+                < request_body
+                    .find("if (-not (Open-ClaudeMenu $window $developerNames))")
+                    .expect("menu lookup should happen after prompt cleanup")
         );
-        assert!(!shim.contains("app.getLocale = function () { return \"zh-CN\"; };"));
-        assert!(!shim.contains("var __CSL_LL=\" + (localizedLaunchDefaultZh ? \"!0\" : \"!1\")"));
+        assert!(request_body.contains("WindowPattern"));
+        assert!(request_body.contains("$windowPattern.Close()"));
+        assert!(request_body.contains("PostMessage"));
+        assert!(request_body.contains("WM_CLOSE"));
+        assert!(request_body.contains("windows-main-debugger.log"));
+        assert!(request_body.contains("Write-ClaudeDebuggerLog"));
+        assert!(request_body.contains("Format-ClaudeElementForLog"));
+        assert!(request_body.contains("$menuButton = Find-ClaudeMenuButton $window"));
+        assert!(
+            request_body
+                .find("function Open-ClaudeMenu")
+                .expect("Open-ClaudeMenu function should exist")
+                < request_body
+                    .find("$menuButton = Find-ClaudeMenuButton $window")
+                    .expect("menu button lookup should still be the button fallback")
+        );
+        assert!(
+            request_body
+                .find("function Open-ClaudeMenu")
+                .and_then(|start| {
+                    request_body[start..]
+                        .find("Test-ClaudeMenuPopupOpen $window $developerNames")
+                        .map(|offset| start + offset)
+                })
+                .expect("popup Developer menu should be accepted before button fallback")
+                < request_body
+                    .find("$menuButton = Find-ClaudeMenuButton $window")
+                    .expect("menu button lookup should happen after visible menu check")
+        );
+        assert!(
+            request_body
+                .find("if (-not (Open-ClaudeMenu $window $developerNames))")
+                .expect("should open the in-window menu through UI Automation")
+                < request_body
+                    .find("$developer = Find-ClaudeDeveloperMenuByStructure $window")
+                    .expect("developer lookup should run after opening the menu")
+        );
+        assert!(
+            request_body
+                .find("Find-ClaudeDeveloperMenuElement $developerNames")
+                .expect("localized developer label lookup should remain the fast path")
+                < request_body
+                    .find("$developer = Find-ClaudeDeveloperMenuByStructure $window")
+                    .expect("structural developer fallback should run after label lookup")
+        );
+        assert!(
+            request_body
+                .find("Find-ClaudeDebuggerToggleElement $debuggerNames")
+                .expect("localized debugger label lookup should remain the fast path")
+                < request_body
+                    .find("$debuggerItem = Find-ClaudeDebuggerToggleByStructure $window")
+                    .expect("structural debugger fallback should run after label lookup")
+        );
+        assert!(
+            request_body
+                .find("for ($attempt = 0; $attempt -lt 8; $attempt++)")
+                .expect("confirmation handling should stay after toggling debugger")
+                < request_body
+                    .rfind("Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null")
+                    .expect("inspector prompt windows should be closed after debugger opens")
+        );
+        assert!(!request_body.contains(concat!("Set", "Cursor", "Pos")));
+        assert!(!request_body.contains(concat!("mouse", "_event")));
+        assert!(!request_body.contains(concat!("Click", "-Point")));
+        assert!(!request_body.contains(concat!("Click", "-Element", "Center")));
+        assert!(!request_body.contains(concat!("System.Windows", ".Forms")));
+        assert!(!request_body.contains(concat!("Bounding", "Rectangle")));
+        assert!(!request_body.contains(concat!("$window", ".Left")));
+        assert!(!request_body.contains(concat!("$window", ".Top")));
+        assert!(!request_body.contains(concat!("$window", ".Right")));
+        assert!(!request_body.contains(concat!("$window", ".Bottom")));
+        assert!(!request_body.contains(concat!("Send", "Keys")));
+        assert!(!request_body.contains("'%d'"));
+        assert!(!request_body.contains("{DOWN}{ENTER}"));
+        assert!(request_body.contains("run_windows_debugger_powershell_with_timeout"));
+        assert!(!request_body.contains("crate::core::platform::run_powershell(script)"));
+        assert!(source.contains("WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT"));
+        assert!(source.contains("child.kill()"));
     }
 
     #[test]
-    fn node_inspector_scans_runtime_attach_port_range() {
+    fn windows_debugger_automation_searches_same_claude_process_popup_menus() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let request_body = source
+            .split("fn request_windows_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("request_windows_claude_main_process_debugger_once body should exist");
+
+        assert!(request_body.contains("function Get-ClaudeAutomationRoots($window)"));
+        assert!(request_body.contains("if ([int]$processId -ne [int]$window.ProcessId)"));
+        assert!(request_body.contains("$className -notlike 'Chrome_WidgetWin_*'"));
+        assert!(request_body.contains("AutomationElement]::FromHandle($hWnd)"));
+        assert!(
+            request_body
+                .find("function Get-ClaudeAutomationRoots($window)")
+                .expect("same-process UIA root helper should be defined")
+                < request_body
+                    .find("function Find-ClaudeMenuElement")
+                    .expect("menu lookup should use same-process root helper")
+        );
+        assert!(
+            request_body
+                .find("foreach ($rootInfo in (Get-ClaudeAutomationRoots $window))")
+                .expect("menu lookup should scan same-process Claude popup roots")
+                < request_body
+                    .find("$matches = $root.FindAll")
+                    .expect("menu lookup should search each collected root")
+        );
+    }
+
+    #[test]
+    fn windows_debugger_automation_does_not_treat_main_window_submenu_as_open_menu() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let request_body = source
+            .split("fn request_windows_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("request_windows_claude_main_process_debugger_once body should exist");
+
+        assert!(request_body.contains("function Find-ClaudeDeveloperMenuElement"));
+        assert!(request_body.contains("function Find-ClaudeDebuggerToggleElement"));
+        assert!(request_body.contains("function Test-ClaudeMenuPopupOpen"));
+        assert!(request_body.contains("if ($rootInfo.IsMainWindow) { continue }"));
+        assert!(request_body.contains("$controlType -eq 'ControlType.MenuItem'"));
+        assert!(request_body.contains("$className -eq 'MenuItemView'"));
+        assert!(
+            request_body.contains("$patterns -contains 'ExpandCollapsePatternIdentifiers.Pattern'")
+        );
+        assert!(request_body.contains("$controlType -eq 'ControlType.CheckBox'"));
+        assert!(request_body.contains("$patterns -contains 'TogglePatternIdentifiers.Pattern'"));
+        assert!(!request_body.contains("Find-ClaudeMenuElement $developerNames $window $false"));
+    }
+
+    #[test]
+    fn windows_debugger_automation_closes_anonymous_blocking_overlay_before_menu() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let request_body = source
+            .split("fn request_windows_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("request_windows_claude_main_process_debugger_once body should exist");
+
+        assert!(request_body.contains("function Close-ClaudeBlockingOverlayWindows($window)"));
+        assert!(request_body.contains("function Find-ClaudeAnonymousOverlayCloseButton($root)"));
+        assert!(request_body.contains("function Test-ClaudeOverlayCandidateText([string]$text)"));
+        assert!(request_body.contains("if ($name.Length -gt 0) { continue }"));
+        assert!(request_body.contains("InvokePatternIdentifiers.Pattern"));
+        assert!(request_body.contains("ControlType.Button"));
+        assert!(request_body.contains(
+            "Upgrade|Plan|Pro|Team|Try|Trial|Subscribe|Discount|Offer|New|Announcement|Promo"
+        ));
+        assert!(request_body.contains("升级|订阅|套餐|试用|优惠|公告|新功能|推广|广告"));
+        assert!(
+            request_body
+                .find("Close-ClaudeBlockingOverlayWindows $window | Out-Null")
+                .expect("blocking overlay should be closed before menu automation")
+                < request_body
+                    .find("if (-not (Open-ClaudeMenu $window $developerNames))")
+                    .expect("menu automation should happen after overlay cleanup")
+        );
+        assert!(!request_body.contains(concat!("Set", "Cursor", "Pos")));
+        assert!(!request_body.contains(concat!("Click", "-Element", "Center")));
+        assert!(!request_body.contains(concat!("Bounding", "Rectangle")));
+    }
+
+    #[test]
+    fn windows_debugger_automation_prefers_existing_window_before_appx_activation() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let request_body = source
+            .split("fn request_windows_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("request_windows_claude_main_process_debugger_once body should exist");
+
+        let first_window_lookup = request_body
+            .find("$window = Get-ClaudeMainWindow")
+            .expect("script should look for an already-open Claude window");
+        let existing_window_branch = request_body
+            .find("if ($window) {")
+            .expect("script should branch on already-open Claude windows");
+        let fallback_activation_branch = request_body
+            .find("} else {\n  Start-ClaudeWindowsApp")
+            .expect("script should activate Claude only when no window exists");
+        let first_poll_loop = request_body
+            .find("for ($attempt = 0; $attempt -lt 20; $attempt++)")
+            .expect("script should still poll for Claude after activation");
+        assert!(
+            first_window_lookup < existing_window_branch,
+            "existing visible Claude windows should be used before slow AppX activation"
+        );
+        assert!(
+            existing_window_branch < fallback_activation_branch,
+            "existing-window path should not fall through the AppX activation branch"
+        );
+        assert!(
+            fallback_activation_branch < first_poll_loop,
+            "launch polling should only run after the fallback activation branch starts"
+        );
+        assert!(!request_body.contains("if (-not $window) { Start-ClaudeWindowsApp }"));
+        assert!(request_body.contains(
+            "Write-ClaudeDebuggerLog 'Using existing Claude window before app activation.'"
+        ));
+    }
+
+    #[test]
+    fn windows_debugger_automation_polls_to_close_inspector_prompt() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let request_body = source
+            .split("fn request_windows_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("request_windows_claude_main_process_debugger_once body should exist");
+
+        assert!(request_body.contains("function Wait-CloseClaudeInspectorPromptWindows($window"));
+        assert!(request_body.contains("Close-ClaudeInspectorPromptWindows $window"));
+        assert!(request_body.contains("Start-Sleep -Milliseconds 120"));
+        assert!(
+            request_body
+                .find("$togglePattern.Toggle()")
+                .expect("debugger toggle should be invoked")
+                < request_body
+                    .find("Wait-CloseClaudeInspectorPromptWindows $window")
+                    .expect("inspector prompt should be polled after toggling debugger")
+        );
+        assert!(
+            request_body
+                .find("for ($attempt = 0; $attempt -lt 8; $attempt++)")
+                .expect("confirmation loop should remain")
+                < request_body
+                    .rfind("Wait-CloseClaudeInspectorPromptWindows $window")
+                    .expect("inspector prompt should also be polled after confirmations")
+        );
+    }
+
+    #[test]
+    fn windows_debugger_automation_closes_native_inspector_dialog_windows() {
+        let source = include_str!("claude_desktop_patch.rs");
+        let request_body = source
+            .split("fn request_windows_claude_main_process_debugger_once()")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("request_windows_claude_main_process_debugger_once body should exist");
+
+        assert!(
+            request_body.contains("function Test-ClaudeInspectorWindowClass([string]$className)")
+        );
+        assert!(request_body.contains("'#32770'"));
+        let close_body = request_body
+            .split("function Close-ClaudeInspectorPromptWindows($window)")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("function Wait-CloseClaudeInspectorPromptWindows")
+                    .next()
+            })
+            .expect("Close-ClaudeInspectorPromptWindows body should exist");
+        assert!(close_body.contains("Test-ClaudeInspectorWindowClass $className"));
+        assert!(!close_body.contains("if ($className -ne 'Chrome_WidgetWin_1') { return $true }"));
+        assert!(close_body.contains("$closed += 1"));
+        assert!(!close_body.contains("$script:closed += 1"));
+    }
+
+    #[test]
+    fn node_inspector_uses_claude_default_port_only() {
+        let source = include_str!("claude_desktop_patch.rs");
         assert_eq!(CLAUDE_NODE_INSPECT_PORT, 9229);
-        assert!(CLAUDE_NODE_INSPECT_PORT_SCAN_END >= 9300);
-        // The patched shim opens the inspector on a dedicated port inside
-        // the scan range (avoids 9229, which other Electron apps commonly
-        // occupy).
-        assert!(CLAUDE_INSPECTOR_OPEN_PORT >= CLAUDE_NODE_INSPECT_PORT);
-        assert!(CLAUDE_INSPECTOR_OPEN_PORT <= CLAUDE_NODE_INSPECT_PORT_SCAN_END);
-        assert_ne!(CLAUDE_INSPECTOR_OPEN_PORT, 9229);
+        assert!(!source.contains(&concat!("CLAUDE_NODE_INSPECT_PORT", "_SCAN_END")));
+        assert!(!source.contains(&concat!("..=", "CLAUDE_NODE_INSPECT_PORT")));
     }
 
     #[test]
@@ -4753,7 +4545,7 @@ mod tests {
             Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
         );
 
-        assert!(source.contains("CSL_INJECTION_VERSION = 8"));
+        assert!(source.contains("CSL_INJECTION_VERSION = 9"));
         assert!(source.contains("let currentLocale"));
         assert!(source.contains("setCurrentLocale"));
         assert!(source.contains("zhActive"));
@@ -4804,6 +4596,80 @@ mod tests {
         assert!(source.contains("Hide Claude"));
         assert!(source.contains("Enable Main Process Debugger"));
         assert!(source.contains("\\u542f\\u7528\\u4e3b\\u8fdb\\u7a0b\\u8c03\\u8bd5\\u5668"));
+    }
+
+    #[test]
+    fn node_inspector_injection_localizes_windows_in_window_menu() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("windowsMenuPopupLocalization"));
+        assert!(source.contains("process.platform === \"win32\""));
+        assert!(source.contains("Menu.buildFromTemplate"));
+        assert!(source.contains("Menu.setApplicationMenu"));
+        assert!(source.contains("Menu.prototype.popup"));
+        assert!(source.contains("__cslMenuPopupLocalizationInstalled"));
+        assert!(source.contains("localizeMenuForCurrentLocale"));
+        assert!(source.contains("relabelMenuItems(menu, currentLocale"));
+        assert!(source.contains("origBuildFromTemplate(template)"));
+        assert!(source.contains("origSetApplicationMenu(menu)"));
+        assert!(source.contains("origPopup.call(this"));
+        assert!(source.contains("\"File\": \"\\u6587\\u4ef6\""));
+        assert!(source.contains("\"Edit\": \"\\u7f16\\u8f91\""));
+        assert!(source.contains("\"View\": \"\\u89c6\\u56fe\""));
+        assert!(source.contains("\"Developer\": \"\\u5f00\\u53d1\\u8005\""));
+        assert!(source.contains("\"Help\": \"\\u5e2e\\u52a9\""));
+        assert!(source.contains("\"Show Dev Tools\""));
+        assert!(source.contains("\"Open App Config File...\""));
+    }
+
+    #[test]
+    fn node_inspector_injection_syncs_windows_devtools_title_after_language_changes() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("devToolsWindowTitleSync"));
+        assert!(source.contains("lower.startsWith(\"devtools://\")"));
+        assert!(source.contains("lower.startsWith(\"chrome-devtools://\")"));
+        assert!(source.contains("syncDevToolsTitleLater"));
+        assert!(source.contains("\"page-title-updated\""));
+        assert!(source.contains("\"devtools-opened\""));
+        assert!(source.contains("\"did-finish-load\""));
+        assert!(source.contains("localeChangeListeners.push(() =>"));
+        assert!(source.contains("syncOpenWindowsLocale(currentLocale)"));
+        assert!(source.contains("\\u5f00\\u53d1\\u8005\\u5de5\\u5177"));
+    }
+
+    #[test]
+    fn node_inspector_injection_localizes_windows_tray_menu() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("windowsTrayMenuLocalization"));
+        assert!(source.contains("electron.Tray"));
+        assert!(source.contains("Tray.prototype.setContextMenu"));
+        assert!(source.contains("__cslTrayMenuLocalizationInstalled"));
+        assert!(source.contains("knownTrayMenus"));
+        assert!(source.contains("localizeTrayMenuForCurrentLocale"));
+        assert!(source.contains("localeChangeListeners.push(retranslateTrayMenus)"));
+        assert!(source.contains("Show Claude"));
+        assert!(source.contains("Show App"));
+        assert!(source.contains("Quit Claude"));
+        assert!(source.contains("\\u663e\\u793a Claude"));
+        assert!(source.contains("\\u663e\\u793a\\u5e94\\u7528\\u754c\\u9762"));
+        assert!(source.contains("\\u9000\\u51fa Claude"));
     }
 
     #[test]
@@ -4884,13 +4750,13 @@ mod tests {
             "script"
         )));
         let preflight_body = source
-            .split("#[cfg(target_os = \"macos\")]\nfn ensure_macos_accessibility_trusted_for_localized_launch()")
+            .split("fn ensure_macos_accessibility_trusted_for_localized_launch()")
             .nth(1)
             .and_then(|tail| {
-                tail.split("fn ensure_macos_accessibility_trusted_for_localized_launch()")
+                tail.split("fn enable_macos_claude_main_process_debugger")
                     .next()
             })
-            .expect("ensure_macos_accessibility_trusted_for_localized_launch body should exist");
+            .expect("Accessibility preflight body should exist");
         assert!(preflight_body.contains("macos_accessibility_is_trusted_raw()"));
         assert!(preflight_body.contains("AXIsProcessTrusted=true"));
         assert!(preflight_body.contains("AXIsProcessTrusted=false"));
@@ -4922,22 +4788,19 @@ mod tests {
         );
         assert!(!native_permission_body.contains(concat!("Privacy_", "Accessibility")));
 
-        let spawn_body = source
-            .split("pub fn spawn_localization_injector")
+        let background_retry_body = source
+            .split("fn retry_localization_after_background_debugger_request()")
             .nth(1)
-            .and_then(|tail| {
-                tail.split("pub fn spawn_silent_localization_injector")
-                    .next()
-            })
-            .expect("spawn_localization_injector body should exist");
-        assert!(spawn_body.contains("enable_macos_claude_main_process_debugger()"));
-        assert!(!spawn_body.contains("wait_for_macos_claude_main_process_debugger()"));
+            .and_then(|tail| tail.split("fn ensure_patch_files").next())
+            .expect("background retry helper body should exist");
+        assert!(background_retry_body.contains("enable_claude_main_process_debugger()"));
+        assert!(!background_retry_body.contains("wait_for_macos_claude_main_process_debugger()"));
         let silent_body = source
             .split("pub fn spawn_silent_localization_injector")
             .nth(1)
             .and_then(|tail| tail.split("fn ensure_patch_files").next())
             .expect("spawn_silent_localization_injector body should exist");
-        assert!(silent_body.contains("enable_macos_claude_main_process_debugger()"));
+        assert!(silent_body.contains("enable_claude_main_process_debugger()"));
         assert!(!silent_body.contains("wait_for_macos_claude_main_process_debugger()"));
 
         assert!(source.contains("ax_find_and_press_debugger_menu_item"));
@@ -5069,6 +4932,30 @@ mod tests {
     }
 
     #[test]
+    fn node_inspector_injection_reinstalls_when_injection_changes_without_version_bump() {
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
+
+        assert!(source.contains("CSL_INJECTION_SIGNATURE"));
+        assert!(source.contains("injectionSignature === CSL_INJECTION_SIGNATURE"));
+        assert!(source.contains("previousInjectionSignature !== CSL_INJECTION_SIGNATURE"));
+        assert!(source.contains("contents.__cslZhAttachedInjectionSignature"));
+        assert!(source.contains("dispose"));
+        assert!(
+            source
+                .find("injectionSignature === CSL_INJECTION_SIGNATURE")
+                .expect("reuse must compare injection signature")
+                < source
+                    .find("return { ok: true, reused: true, ...summary };")
+                    .expect("same-injection reuse should stay available")
+        );
+    }
+
+    #[test]
     fn node_inspector_injection_reload_is_timeout_guarded() {
         let source = build_main_process_injection_source_for_paths(
             Path::new(r"C:\CodeStudio\translation-runtime.js"),
@@ -5113,61 +5000,15 @@ mod tests {
     }
 
     #[test]
-    fn inspector_target_lookup_keeps_scanning_after_unrelated_targets() {
+    fn inspector_target_lookup_reads_only_default_claude_port() {
         let source = include_str!("claude_desktop_patch.rs");
 
-        assert!(source.contains("read_node_inspector_targets_from_port(port)"));
-        assert!(source.contains("all_targets.extend(targets)"));
-        assert!(source.contains("Ok(all_targets)"));
-    }
-
-    #[test]
-    fn windows_inspector_patch_disables_asar_integrity_fuse_in_place() {
-        // The fuse marker and integrity index resolve to a byte offset into
-        // a Claude.exe image; flipping that byte disables asar integrity.
-        let marker = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
-        let mut image = Vec::from(marker);
-        image.push(0x01); // sentinel
-        image.push(0x09); // fuse count
-        image.extend_from_slice(b"010011011"); // 9 fuse status bytes
-        let offset = fuse_integrity_offset(&image).unwrap();
-        assert_eq!(image[offset], b'1');
-        assert!(!fuse_integrity_disabled(&image));
-        image[offset] = b'0';
-        assert!(fuse_integrity_disabled(&image));
-
-        // The elevated patch script takes ownership, copies patched blobs
-        // over the originals, and restores the ACL — without ever touching
-        // argv or CDP debug ports.
-        let script = elevated_patch_script(
-            Path::new(r"C:\Program Files\WindowsApps\Claude\app\Claude.exe"),
-            Path::new(r"C:\Program Files\WindowsApps\Claude\app\resources\app.asar"),
-            Path::new(r"C:\CodeStudio\Claude.patched.exe"),
-            Path::new(r"C:\CodeStudio\app.patched.asar"),
-            Path::new(r"C:\Program Files\WindowsApps\Claude\app\resources\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(
-                r"C:\Program Files\WindowsApps\Claude\app\resources\ion-dist\i18n\zh-CN.json",
-            ),
-            Path::new(r"C:\CodeStudio\ion-zh-CN.json"),
-        );
-        assert!(script.contains("takeown"));
-        assert!(script.contains("icacls"));
-        assert!(script.contains("Copy-Item -LiteralPath"));
-        assert!(!script.contains("--inspect"));
-        assert!(!script.contains("remote-debugging-port"));
-        assert!(!script.contains("_debugProcess"));
-        assert!(script.contains("zh-CN.json"));
-        assert!(script.contains(r"ion-dist\i18n\zh-CN.json"));
-        assert!(!script.contains("ion-dist/i18n"));
-        let source = include_str!("claude_desktop_patch.rs");
-        // Elevation waits for the elevated process so the patch is written
-        // before Claude is activated; assert the synchronous variant.
-        assert!(source.contains("ShellExecuteExW"));
-        assert!(source.contains("SEE_MASK_NOCLOSEPROCESS"));
-        assert!(source.contains("OsStr::new(\"runas\")"));
-        assert!(source.contains("GetExitCodeProcess"));
-        assert!(source.contains("WaitForSingleObject"));
+        assert!(source.contains(&concat!(
+            "read_node_inspector_targets_from_port(",
+            "CLAUDE_NODE_INSPECT_PORT",
+            ")"
+        )));
+        assert!(!source.contains(&concat!("all_targets", ".extend(targets)")));
     }
 
     #[test]
@@ -5261,6 +5102,28 @@ mod tests {
     }
 
     #[test]
+    fn bundled_zh_locale_avoids_literal_task_and_shipping_translations() {
+        let ion: Value = serde_json::from_str(CLAUDE_ION_ZH_LOCALE).expect("ion zh locale json");
+        let Some(map) = ion.as_object() else {
+            panic!("ion zh locale should be an object");
+        };
+        let tedious = map
+            .get("4ahpF5N/t0")
+            .and_then(Value::as_str)
+            .expect("tedious task marketing copy");
+        let shipping = map
+            .get("ye9sGm7rX3")
+            .and_then(Value::as_str)
+            .expect("shipping features marketing copy");
+
+        assert_eq!(tedious, "推进繁琐任务");
+        assert_eq!(shipping, "发布功能，而不是堆代码行数");
+        assert!(!tedious.contains("坚持"));
+        assert!(!shipping.contains("船只"));
+        assert!(!shipping.contains("线条"));
+    }
+
+    #[test]
     fn locale_runtime_source_stays_small() {
         let source = build_locale_runtime_source();
         assert!(source.len() < 15_000);
@@ -5337,407 +5200,20 @@ mod tests {
         }
     }
     #[test]
-    fn extract_inspector_shim_to_temp_when_requested() {
-        if std::env::var("CSL_EXTRACT_SHIM").is_err() {
+    fn extract_runtime_injection_to_temp_when_requested() {
+        if std::env::var("CSL_EXTRACT_RUNTIME_INJECTION").is_err() {
             return;
         }
-        let shim = build_inspector_shim(".vite/build/index.pre.js");
+        let source = build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        );
         let dir = std::env::temp_dir().join("csldiag");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("rustshim.js");
-        std::fs::write(&path, &shim).unwrap();
-        println!("WROTE_SHIM:{}", path.display());
-    }
-
-    #[test]
-    fn recover_original_main_passes_through_non_shim_main() {
-        assert_eq!(
-            recover_original_main("ignored", ".vite/build/index.pre.js".to_string(), &[]),
-            ".vite/build/index.pre.js"
-        );
-    }
-
-    #[test]
-    fn recover_original_main_reads_original_main_field() {
-        let pkg = r#"{"main":"_csl_inspector_shim.js","originalMain":"app.js"}"#;
-        assert_eq!(
-            recover_original_main(pkg, CLAUDE_INSPECTOR_SHIM_NAME.to_string(), &[]),
-            "app.js"
-        );
-    }
-
-    #[test]
-    fn recover_original_main_probes_tree_when_original_main_clobbered() {
-        use crate::core::asar_archive;
-        let main_body = b"module.exports = {};".to_vec();
-        let pkg = br#"{"name":"claude","main":".vite/build/index.pre.js"}"#.to_vec();
-        let asar = asar_archive::build_test_asar_with_files(&[
-            (".vite/build/index.pre.js", main_body.as_slice()),
-            ("package.json", pkg.as_slice()),
-        ]);
-        // Deep re-patch: both main and originalMain are the shim name.
-        let deep_pkg = format!(
-            "{{\"main\":\"{shim}\",\"originalMain\":\"{shim}\"}}",
-            shim = CLAUDE_INSPECTOR_SHIM_NAME
-        );
-        assert_eq!(
-            recover_original_main(&deep_pkg, CLAUDE_INSPECTOR_SHIM_NAME.to_string(), &asar),
-            ".vite/build/index.pre.js"
-        );
-    }
-
-    #[test]
-    fn repatching_already_patched_asar_does_not_self_reference_main() {
-        use crate::core::asar_archive;
-        let main_body = b"module.exports = {};".to_vec();
-        let pkg = br#"{"name":"claude","main":".vite/build/index.pre.js"}"#.to_vec();
-        let asar0 = asar_archive::build_test_asar_with_files(&[
-            (".vite/build/index.pre.js", main_body.as_slice()),
-            ("package.json", pkg.as_slice()),
-        ]);
-        // First patch: shim MAIN_MODULE is the real main, not a self-reference.
-        let (pkg_text, orig_main) = asar_archive::read_package_json(&asar0).unwrap();
-        assert_eq!(orig_main, ".vite/build/index.pre.js");
-        let new_pkg = build_patched_package_json(&pkg_text, &orig_main).unwrap();
-        let shim = build_inspector_shim(&orig_main);
-        let patched = asar_archive::build_patched_asar(
-            &asar0,
-            new_pkg.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            shim.as_bytes(),
-        )
-        .unwrap();
-        assert!(!asar_shim_self_references(&patched));
-
-        // Simulate re-patching the already-patched asar: read_package_json now
-        // returns the shim as main, but recover_original_main must restore the
-        // true main from originalMain so the next shim does not require() itself.
-        let (pkg_text2, read_main2) = asar_archive::read_package_json(&patched).unwrap();
-        assert_eq!(read_main2, CLAUDE_INSPECTOR_SHIM_NAME);
-        let recovered = recover_original_main(&pkg_text2, read_main2, &patched);
-        assert_eq!(recovered, ".vite/build/index.pre.js");
-        let shim2 = build_inspector_shim(&recovered);
-        assert!(!shim2.contains("var MAIN_MODULE = \"_csl_inspector_shim.js\""));
-    }
-
-    #[test]
-    fn asar_shim_self_references_detects_self_reference() {
-        use crate::core::asar_archive;
-        let main_body = b"module.exports = {};".to_vec();
-        let pkg = br#"{"name":"claude","main":".vite/build/index.pre.js"}"#.to_vec();
-        let asar0 = asar_archive::build_test_asar_with_files(&[
-            (".vite/build/index.pre.js", main_body.as_slice()),
-            ("package.json", pkg.as_slice()),
-        ]);
-        // A shim whose MAIN_MODULE is the shim filename (the re-patch bug).
-        let bad_shim = build_inspector_shim(CLAUDE_INSPECTOR_SHIM_NAME);
-        let (pkg_text, _) = asar_archive::read_package_json(&asar0).unwrap();
-        let np = build_patched_package_json(&pkg_text, CLAUDE_INSPECTOR_SHIM_NAME).unwrap();
-        let bad = asar_archive::build_patched_asar(
-            &asar0,
-            np.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            bad_shim.as_bytes(),
-        )
-        .unwrap();
-        assert!(asar_shim_self_references(&bad));
-    }
-    #[test]
-    fn asar_shim_needs_update_flags_old_forcing_shim() {
-        use crate::core::asar_archive;
-        let main_body = b"module.exports = {};".to_vec();
-        let pkg = br#"{"name":"claude","main":".vite/build/index.pre.js"}"#.to_vec();
-        let asar0 = asar_archive::build_test_asar_with_files(&[
-            (".vite/build/index.pre.js", main_body.as_slice()),
-            ("package.json", pkg.as_slice()),
-        ]);
-        // The shim built by build_inspector_shim carries installLocaleWhitelist
-        // (the redesign), so a freshly-patched asar must NOT be flagged.
-        let shim = build_inspector_shim(".vite/build/index.pre.js");
-        assert!(shim.contains("installLocaleWhitelist"));
-        assert!(!shim.contains("forceZh"));
-        let (pkg_text, _) = asar_archive::read_package_json(&asar0).unwrap();
-        let np = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let patched = asar_archive::build_patched_asar(
-            &asar0,
-            np.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            shim.as_bytes(),
-        )
-        .unwrap();
-        assert!(!asar_shim_needs_update(&patched));
-
-        // A legacy shim that forces zh-CN (installLocalePreference + forceZh,
-        // no installLocaleWhitelist) must be flagged for re-injection. Real
-        // shims never embed their own filename, so the legacy body must not
-        // either (regression guard for the self-name gate that used to mask
-        // this case).
-        let legacy = b"(function(){var forceZh=function(){};installLocalePreference();var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np2 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let old = asar_archive::build_patched_asar(
-            &asar0,
-            np2.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            legacy.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&old));
-
-        // The real deployed pre-redesign shim carries installLocaleWhitelist
-        // (so the old name-only gate passed) but lacks the Array.prototype.map
-        // patch that appends zh-CN to the language menu. It must still be
-        // flagged so a localized launch re-injects the current shim.
-        let partial = b"(function(){installLocaleWhitelist();var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np3 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let stale = asar_archive::build_patched_asar(
-            &asar0,
-            np3.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            partial.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&stale));
-
-        // The currently deployed shim has installLocaleWhitelist and the
-        // Array.prototype.map menu patch (so zh-CN appears in the picker) but
-        // predates the account_profile/server-rejection fix: selecting zh-CN
-        // PUTs {locale:"zh-CN"} which the server rejects, so the override never
-        // lands. It must be flagged so a localized launch re-injects the
-        // persistence shim.
-        let deployed = b"(function(){installLocaleWhitelist();Array.prototype.map;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np4 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let current = asar_archive::build_patched_asar(
-            &asar0,
-            np4.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            deployed.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&current));
-
-        // The shim deployed after the PUT-rewrite fix has installLocaleWhitelist,
-        // Array.prototype.map, and account_profile (so the PUT body is rewritten
-        // and the request succeeds), but it only rewrites bootstrap responses
-        // and not the account_profile GET response that drives the language
-        // menu radio. Selecting zh-CN succeeds server-side yet the radio never
-        // checks. It must be flagged so a localized launch re-injects the
-        // withZh shim that also rewrites the GET response.
-        let putfix = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np5 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let getfix = asar_archive::build_patched_asar(
-            &asar0,
-            np5.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            putfix.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&getfix));
-
-        // The shim deployed after the GET-response rewrite has installLocaleWhitelist,
-        // Array.prototype.map, account_profile, and withZh (so the GET returns zh-CN
-        // and the intl context locale should track it), but it lacks the DOM radio
-        // fix: messagesLocale can stay en-US under a gate flag, so IntlProvider locale
-        // stays en-US and the zh-CN radio never checks. It must be flagged so a
-        // localized launch re-injects the fixLanguageRadio shim.
-        let radiofix = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np6 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let noradio = asar_archive::build_patched_asar(
-            &asar0,
-            np6.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            radiofix.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&noradio));
-        // Shim deployed after the fixLanguageRadio DOM patch: it carries all
-        // five redesign signatures but predates the overrides.json HTML-fallback
-        // fix. /i18n/zh-CN.overrides.json returns the SPA HTML shell, a.json()
-        // throws, the i18n query errors, messagesLocale never syncs to zh-CN, so
-        // the IntlProvider locale stays the previous language and the zh-CN
-        // radio never re-checks after switching away and back. Must be flagged
-        // so a localized launch re-injects the overrides-fix shim.
-        let preoverrides = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np7 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let noov = asar_archive::build_patched_asar(
-            &asar0,
-            np7.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            preoverrides.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&noov));
-
-        // Shim deployed after the overrides.json HTML-fallback fix: it carries
-        // all six redesign signatures but predates the gated_messages gate fix.
-        // The account_profile response includes gated_messages{locale:"en-US"},
-        // so the oHt gate s stays false (n===a, xi=false) for zh-CN, m=false,
-        // setGatedMessages runs with r=undefined and messagesLocale never
-        // re-syncs to zh-CN after switching away and back. The radio then tracks
-        // the stale messagesLocale and never checks zh-CN. Must be flagged so a
-        // localized launch re-injects the gated_messages-deletion shim.
-        let pregm = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np8 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let nogm = asar_archive::build_patched_asar(
-            &asar0,
-            np8.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            pregm.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&nogm));
-
-        // Shim deployed after the gated_messages fix: it carries all seven
-        // redesign signatures but predates the locale-aware menu translation.
-        // Its translateMenuItems unconditionally forces en->zh, so switching
-        // to any other language leaves the native menu stuck in Chinese (and
-        // hard-coded English labels like "Paste and Match Style" are forced to
-        // zh even in French/English mode). It must be flagged so a localized
-        // launch re-injects the zhActive shim that only translates for zh-CN.
-        let prezhactive = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np9 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let nozhactive = asar_archive::build_patched_asar(
-            &asar0,
-            np9.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            prezhactive.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&nozhactive));
-
-        // The locale-aware menu shim still predates the small DOM fallback for
-        // model cards ("currently unavailable", "For more complex tasks"). It
-        // must be flagged so users get the new runtime on localized launch.
-        let premodeledges = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np10 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let nomodeledges = asar_archive::build_patched_asar(
-            &asar0,
-            np10.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            premodeledges.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&nomodeledges));
-
-        // The immediately previous shim covered the unavailable badge but used
-        // the internal defaultMessage "Can think..." instead of the visible
-        // Opus card text "For more complex tasks". It must be replaced too.
-        let previsibletask = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;Can think for more complex tasks;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np11 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let wrongtask = asar_archive::build_patched_asar(
-            &asar0,
-            np11.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            previsibletask.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&wrongtask));
-
-        // The next shim covered "For more complex tasks", but Claude's current
-        // model menu renders the shorter visible string "For complex tasks".
-        let preshorttask = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np12 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let noshorttask = asar_archive::build_patched_asar(
-            &asar0,
-            np12.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            preshorttask.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&noshorttask));
-
-        // The next shim translated model badges, but did not synchronize
-        // already-open setup/local windows when the user changed languages.
-        let prelocalsync = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np13 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let nolocalsync = asar_archive::build_patched_asar(
-            &asar0,
-            np13.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            prelocalsync.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&nolocalsync));
-
-        // The local en-US catalog fallback shim still predates the small DOM
-        // fallback for hard-coded Gateway/GATEWAY labels in setup/account menus.
-        let preinitiallocale = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;__CSL_LL;__CSL_LL_DONE;Set.prototype;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np14 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let noinitiallocale = asar_archive::build_patched_asar(
-            &asar0,
-            np14.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            preinitiallocale.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&noinitiallocale));
-
-        // The latest local-window locale shim still predates the DOM fallback
-        // for hard-coded Gateway/GATEWAY labels in setup/account menus.
-        let pregateway = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;__CSL_LL;__CSL_LL_DONE;Set.prototype;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np15 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let nogateway = asar_archive::build_patched_asar(
-            &asar0,
-            np15.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            pregateway.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&nogateway));
-
-        // The previous runtime translated hard-coded Chat/Cowork/Code labels
-        // in one direction only. After switching away from zh-CN those text
-        // nodes stayed Chinese, and choosing zh-CN again could be ignored
-        // because the locale PUT rewrite ran before local state changed.
-        let prereversible = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np16 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let noreversible = asar_archive::build_patched_asar(
-            &asar0,
-            np16.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            prereversible.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&noreversible));
-
-        // The reversible-text runtime still did not hot-sync already-open local
-        // Claude windows such as third-party API setup and DevTools titles.
-        let prehotsync = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;reversibleTextFallback;localeRequestBodySync;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np17 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let nohotsync = asar_archive::build_patched_asar(
-            &asar0,
-            np17.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            prehotsync.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&nohotsync));
-
-        // The local-window hot-sync shim still did not cover Claude's About
-        // BrowserWindow, which uses file://about_window/about.html plus a
-        // hard-coded "About Claude" title outside the normal claude.ai page.
-        let preabout = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;reversibleTextFallback;localeRequestBodySync;localWindowHotSwitchSync;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np18 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let noabout = asar_archive::build_patched_asar(
-            &asar0,
-            np18.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            preabout.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&noabout));
-
-        // The About-window fallback still let Claude's own spa:locale value
-        // override the virtual zh-CN selection, so switching from another
-        // shipped locale back to Chinese could leave menus in that locale.
-        let prewantedlocale = b"(function(){installLocaleWhitelist();Array.prototype.map;account_profile;withZh;fixLanguageRadio;overrides.json;gated_messages;zhActive;menuIsZh;updateLocaleFromMenu;currently unavailable;For more complex tasks;For complex tasks;syncOpenWindowsLocale;localizedLaunchDefaultZh;localized-launch.flag;getSystemLocale;ion-dist/i18n/en-US.json;gatewayProviderSubstringFallback;codeUiLabelFallback;activeLocaleLaunchFlag;__CSL_LL;__CSL_LL_DONE;Set.prototype;isZhSet;skipReload;reversibleTextFallback;localeRequestBodySync;localWindowHotSwitchSync;aboutClaudeWindowFallback;var MAIN_MODULE=\".vite/build/index.pre.js\";})();";
-        let np19 = build_patched_package_json(&pkg_text, ".vite/build/index.pre.js").unwrap();
-        let nowantedlocale = asar_archive::build_patched_asar(
-            &asar0,
-            np19.as_bytes(),
-            CLAUDE_INSPECTOR_SHIM_NAME,
-            prewantedlocale.as_slice(),
-        )
-        .unwrap();
-        assert!(asar_shim_needs_update(&nowantedlocale));
+        let path = dir.join("runtime-injection.js");
+        std::fs::write(&path, &source).unwrap();
+        println!("WROTE_RUNTIME_INJECTION:{}", path.display());
     }
 }

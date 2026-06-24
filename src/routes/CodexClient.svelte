@@ -27,29 +27,31 @@
   } from "../types";
 
   $: view = $codexClientView;
-  $: state = view.state;
+  $: installKinds = view.installKinds;
+  $: selectedKind = view.selectedKind;
+  $: effectiveSelectedKind = selectedKind;
+  $: kindView = view.kindViews[effectiveSelectedKind];
+  $: state = kindView.state;
   $: settingsDraft = view.settingsDraft;
-  $: busyAction = view.busyAction;
+  $: busyAction = kindView.busyAction;
   $: error = view.error;
   $: success = view.success;
-  $: stageReport = view.stageReport;
-  $: operationResult = view.operationResult;
-  $: progress = view.progress;
+  $: stageReport = kindView.stageReport;
+  $: operationResult = kindView.operationResult;
+  $: progress = kindView.progress;
   $: confirmUninstall = view.confirmUninstall;
   $: installed = state?.installed ?? null;
   $: plan = state?.plan ?? null;
   $: release = state?.release ?? null;
-  $: planRefreshing = view.planRefreshing;
-  $: planUnavailable = planRefreshing || view.planStale;
-  $: planUnavailableText = planRefreshing ? $t("codexClient.planRefreshing") : $t("codexClient.planStale");
+  $: planRefreshing = kindView.planRefreshing;
+  $: planUnavailable = kindView.planStale;
+  $: planUnavailableText = $t("codexClient.planStale");
+  $: planRefreshText = $t("codexClient.planRefreshing");
   $: effectivePlan = planUnavailable ? null : plan;
   $: effectiveRelease = planUnavailable ? null : release;
-  $: isWindows = state?.platform === "windows";
-  $: installKinds = view.installKinds;
-  $: selectedKind = view.selectedKind;
-  $: portableKindInstalled = Boolean(installKinds?.portable?.installed);
-  $: effectiveSelectedKind = selectedKind === "portable" && !portableKindInstalled ? "msix" : selectedKind;
-  $: isMacos = state?.platform === "macos";
+  $: platform = state?.platform ?? view.kindViews.msix.state?.platform ?? view.kindViews.portable.state?.platform;
+  $: isWindows = platform === "windows";
+  $: isMacos = platform === "macos";
   $: statusLabel = installed ? $t("common.installed") : $t("common.missing");
   $: statusTone = (installed ? "ok" : "warning") as Severity;
   $: canStage = Boolean(effectivePlan && !effectivePlan.upToDate && effectivePlan.route !== "unsupported");
@@ -165,9 +167,9 @@
         <AppIcon name="play" size={16} />
         {$t(isRunning ? "codexClient.restart" : "codexClient.launch")}
       </button>
-      <button class="secondary-button" disabled={view.loading || busyAction !== null} on:click={refreshCodex}>
-        <AppIcon name={view.loading ? "loading" : "refresh"} size={16} class={view.loading ? "spin" : ""} />
-        {$t(view.loading ? "common.refreshing" : "common.refresh")}
+      <button class="secondary-button" disabled={kindView.loading || busyAction !== null} on:click={refreshCodex}>
+        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? "spin" : ""} />
+        {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
   </section>
@@ -240,7 +242,7 @@
       <div>
         <span>{$t("codexClient.latestVersion")}</span>
         <strong>{effectiveRelease?.version ?? $t("common.unknown")}</strong>
-        <small>{planUnavailable ? planUnavailableText : effectiveRelease?.packageMoniker ?? $t("codexClient.planNotLoaded")}</small>
+        <small>{planUnavailable ? planUnavailableText : planRefreshing && effectiveRelease ? planRefreshText : effectiveRelease?.packageMoniker ?? $t("codexClient.planNotLoaded")}</small>
       </div>
       <div>
         <span>{$t("codexClient.packageSize")}</span>
@@ -290,13 +292,16 @@
     <div class="section-heading">
       <div>
         <h2>{$t("codexClient.planTitle")}</h2>
-        <p>{planUnavailable ? planUnavailableText : effectiveRelease?.manifestUrl ?? $t("codexClient.planNotLoaded")}</p>
+        <p>{planUnavailable ? planUnavailableText : planRefreshing && effectivePlan ? planRefreshText : effectiveRelease?.manifestUrl ?? $t("codexClient.planNotLoaded")}</p>
       </div>
       <div class="section-actions">
         {#if planUnavailable}
           <StatusPill status="info" label={planUnavailableText} />
         {:else if effectivePlan}
           <StatusPill status={effectivePlan.upToDate ? "ok" : "warning"} label={effectivePlan.upToDate ? $t("codexClient.upToDate") : $t("codexClient.updateAvailable")} />
+          {#if planRefreshing}
+            <StatusPill status="info" label={planRefreshText} />
+          {/if}
         {/if}
       </div>
     </div>
@@ -307,6 +312,12 @@
           {planUnavailableText}
         </div>
       {:else if effectivePlan}
+        {#if planRefreshing}
+          <div class="empty-row">
+            <AppIcon name="loading" class="spin" size={18} />
+            {planRefreshText}
+          </div>
+        {/if}
         <div>
           <strong>{$t("codexClient.downloadUrl")}</strong>
           <span>{effectivePlan.packageUrl}</span>
@@ -360,6 +371,12 @@
           {planUnavailableText}
         </div>
       {:else}
+        {#if planRefreshing && effectivePlan}
+          <div class="empty-row">
+            <AppIcon name="loading" class="spin" size={18} />
+            {planRefreshText}
+          </div>
+        {/if}
         {#each effectivePlan?.capabilities ?? [] as capability}
           <div class="doctor-row">
             <StatusPill status={capability.status} label={$t(`status.${capability.status}` as Parameters<typeof $t>[0])} />

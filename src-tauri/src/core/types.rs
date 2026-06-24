@@ -114,6 +114,8 @@ pub struct ToolInstallRequest {
     pub tool_id: String,
     pub confirm: bool,
     #[serde(default)]
+    pub install_kind: Option<String>,
+    #[serde(default)]
     pub install_prerequisites: bool,
 }
 
@@ -136,6 +138,22 @@ pub struct ToolInstallProgress {
     pub tool_name: String,
     pub stage: String,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloaded: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_total: Option<u32>,
     pub stream: String,
     pub chunk: String,
     pub done: bool,
@@ -965,6 +983,14 @@ pub struct DesktopInstallKindInfo {
 pub struct ClaudeDesktopInstallKinds {
     pub msix: DesktopInstallKindInfo,
     pub exe: DesktopInstallKindInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeDesktopPendingLaunch {
+    pub action: String,
+    pub localize: bool,
+    pub requested_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

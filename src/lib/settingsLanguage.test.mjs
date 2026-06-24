@@ -22,3 +22,14 @@ test("settings language options use stable self-labels instead of locale diction
     assert.doesNotMatch(dictionary, /"settings\.language\.(zhCN|zhTW|enUS)"/);
   }
 });
+
+test("settings page ignores stale initial loads after local edits", () => {
+  const settings = read("src/routes/Settings.svelte");
+
+  assert.match(settings, /let settingsEditRevision = 0/);
+  assert.match(settings, /const loadRevision = settingsEditRevision/);
+  assert.match(settings, /if \(loadRevision !== settingsEditRevision\) \{[\s\S]*return;[\s\S]*\}/);
+  assert.match(settings, /settingsEditRevision \+= 1;[\s\S]*language = nextLanguage/);
+  assert.match(settings, /settingsEditRevision \+= 1;[\s\S]*theme = nextTheme/);
+  assert.match(settings, /settingsEditRevision \+= 1;[\s\S]*preserveCodexOfficialAuth = nextValue/);
+});

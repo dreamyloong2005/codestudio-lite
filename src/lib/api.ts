@@ -7,6 +7,7 @@ import type {
   ApplyProfileResult,
   BackupManifest,
   ClaudeDesktopLaunchRequest,
+  ClaudeDesktopPendingLaunch,
   ClaudeDesktopInstallKinds,
   ClearEnvironmentVariablesRequest,
   ClearEnvironmentVariablesResult,
@@ -19,6 +20,8 @@ import type {
   CodexClientStageReport,
   CodexClientState,
   CodexClientUninstallRequest,
+  PlanCodexClientUpdateRequest,
+  StageCodexClientUpdateRequest,
   DeleteProfileDraftRequest,
   DetectionSnapshot,
   DoctorReport,
@@ -230,7 +233,8 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
       toolId: prerequisite.toolId,
       toolName: prerequisite.toolName,
       stage: "prerequisite",
-      command: prerequisite.command
+      command: prerequisite.command,
+      installKind: request.installKind
     });
     markMockToolUpdated(prerequisite.toolId);
     if (prerequisite.toolId === "node") {
@@ -253,7 +257,8 @@ export async function installTool(request: ToolInstallRequest): Promise<ToolInst
     toolId: plan.toolId,
     toolName: plan.toolName,
     stage: "target",
-    command: plan.commands.find((command) => command.stage === "target")?.command ?? plan.command
+    command: plan.commands.find((command) => command.stage === "target")?.command ?? plan.command,
+    installKind: request.installKind
   });
   markMockToolUpdated(request.toolId);
   if (request.toolId === "node") {
@@ -351,7 +356,8 @@ export async function updateTool(request: ToolInstallRequest): Promise<ToolInsta
     toolId: status.id,
     toolName: status.name,
     stage: "update",
-    command: status.updateCommand
+    command: status.updateCommand,
+    installKind: request.installKind
   });
   markMockToolUpdated(request.toolId);
   const currentStatus = mockFindToolStatus(request.toolId);
@@ -426,7 +432,8 @@ export async function uninstallTool(request: ToolUninstallRequest): Promise<Tool
     toolId: status.id,
     toolName: status.name,
     stage: "uninstall",
-    command
+    command,
+    installKind: request.installKind
   });
   mockInstalledToolIds.delete(request.toolId);
   const currentStatus = mockFindToolStatus(request.toolId);
@@ -812,26 +819,31 @@ export async function loadCachedCodexClientState(): Promise<CodexClientState | n
   return null;
 }
 
-export async function planCodexClientUpdate(): Promise<CodexClientState> {
+export async function planCodexClientUpdate(
+  request: PlanCodexClientUpdateRequest = {}
+): Promise<CodexClientState> {
   if (isTauri()) {
-    return invoke("plan_codex_client_update");
+    return invoke("plan_codex_client_update", { request });
   }
-  return mockCodexClientState(true);
+  return mockCodexClientState(true, undefined, request.installKind);
 }
 
-export async function stageCodexClientUpdate(): Promise<CodexClientStageReport> {
+export async function stageCodexClientUpdate(
+  request: StageCodexClientUpdateRequest
+): Promise<CodexClientStageReport> {
   if (isTauri()) {
-    return invoke("stage_codex_client_update");
+    return invoke("stage_codex_client_update", { request });
   }
+  const installKind = mockCodexClientInstallKind(request.installKind);
   await simulateCodexClientProgress([
-    { phase: "preparing", message: "codexClient.progressStageReading", downloaded: null, total: null, percent: null, step: 1, stepTotal: 4 },
-    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 46000000, total: 552187367, percent: 8.3, step: 2, stepTotal: 4 },
-    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 178000000, total: 552187367, percent: 32.2, step: 2, stepTotal: 4 },
-    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 394000000, total: 552187367, percent: 71.3, step: 2, stepTotal: 4 },
-    { phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 4 },
-    { phase: "done", message: "codexClient.progressStageDone", downloaded: 552187367, total: 552187367, percent: 100, step: 4, stepTotal: 4 }
+    { installKind, phase: "preparing", message: "codexClient.progressStageReading", downloaded: null, total: null, percent: null, step: 1, stepTotal: 4 },
+    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 46000000, total: 552187367, percent: 8.3, step: 2, stepTotal: 4 },
+    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 178000000, total: 552187367, percent: 32.2, step: 2, stepTotal: 4 },
+    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 394000000, total: 552187367, percent: 71.3, step: 2, stepTotal: 4 },
+    { installKind, phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 4 },
+    { installKind, phase: "done", message: "codexClient.progressStageDone", downloaded: 552187367, total: 552187367, percent: 100, step: 4, stepTotal: 4 }
   ]);
-  return mockCodexClientStageReport();
+  return mockCodexClientStageReport(installKind);
 }
 
 export async function installCodexClient(
@@ -843,35 +855,37 @@ export async function installCodexClient(
   if (!request.confirm) {
     throw new Error("explicit confirmation is required");
   }
+  const installKind = mockCodexClientInstallKind(request.installKind);
   await simulateCodexClientProgress([
-    { phase: "preparing", message: "codexClient.progressInstallConfirming", downloaded: null, total: null, percent: null, step: 1, stepTotal: 7 },
-    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 220000000, total: 552187367, percent: 39.8, step: 2, stepTotal: 7 },
-    { phase: "downloading", message: "codexClient.progressDownloading", downloaded: 552187367, total: 552187367, percent: 100, step: 2, stepTotal: 7 },
-    { phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 7 },
-    { phase: "extracting", message: "codexClient.progressExtractingMsix", downloaded: 38, total: 120, percent: 31.7, step: 4, stepTotal: 7 },
-    { phase: "copying", message: "codexClient.progressCopyingPortable", downloaded: null, total: null, percent: null, step: 5, stepTotal: 7 },
-    { phase: "writing", message: "codexClient.progressWritingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
-    { phase: "finalizing", message: "codexClient.progressFinalizingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
-    { phase: "done", message: "codexClient.progressInstallDone", downloaded: 1, total: 1, percent: 100, step: 7, stepTotal: 7 }
+    { installKind, phase: "preparing", message: "codexClient.progressInstallConfirming", downloaded: null, total: null, percent: null, step: 1, stepTotal: 7 },
+    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 220000000, total: 552187367, percent: 39.8, step: 2, stepTotal: 7 },
+    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 552187367, total: 552187367, percent: 100, step: 2, stepTotal: 7 },
+    { installKind, phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 7 },
+    { installKind, phase: "extracting", message: "codexClient.progressExtractingMsix", downloaded: 38, total: 120, percent: 31.7, step: 4, stepTotal: 7 },
+    { installKind, phase: "copying", message: "codexClient.progressCopyingPortable", downloaded: null, total: null, percent: null, step: 5, stepTotal: 7 },
+    { installKind, phase: "writing", message: "codexClient.progressWritingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
+    { installKind, phase: "finalizing", message: "codexClient.progressFinalizingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
+    { installKind, phase: "done", message: "codexClient.progressInstallDone", downloaded: 1, total: 1, percent: 100, step: 7, stepTotal: 7 }
   ]);
   mockCodexClientInstalled = {
-    path: mockCodexClientSettings.windowsInstallMode === "portable"
+    path: installKind === "portable"
       ? mockCodexClientSettings.installRoot
       : "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0",
     version: "26.609.4994.0",
     arch: "x64",
-    source: mockCodexClientSettings.windowsInstallMode === "portable" ? "portable" : "msix",
-    packageFamilyName: mockCodexClientSettings.windowsInstallMode === "portable"
+    source: installKind === "portable" ? "portable" : "msix",
+    packageFamilyName: installKind === "portable"
       ? null
       : "OpenAI.Codex_2p2nqsd0c76g0",
     installedAt: new Date().toISOString()
   };
   return {
+    installKind,
     success: true,
     action: mockCodexClientInstalled.source === "portable" ? "portable-fallback" : "msix-sideload",
     message: `Codex is ready: ${mockCodexClientInstalled.version}`,
     installed: mockCodexClientInstalled,
-    stage: mockCodexClientStageReport(),
+    stage: mockCodexClientStageReport(installKind),
     notes: ["browser-dev mock: install path is simulated."]
   };
 }
@@ -885,8 +899,10 @@ export async function uninstallCodexClient(
   if (!request.confirm) {
     throw new Error("explicit confirmation is required");
   }
+  const installKind = mockCodexClientInstallKind(request.installKind);
   mockCodexClientInstalled = null;
   return {
+    installKind,
     success: true,
     action: "remove-portable",
     message: "Codex uninstalled.",
@@ -905,6 +921,21 @@ export async function launchCodexClient(): Promise<void> {
 export async function launchClaudeDesktop(request: ClaudeDesktopLaunchRequest = {}): Promise<void> {
   if (isTauri()) {
     return invoke("launch_claude_desktop", { localize: request.localize });
+  }
+}
+
+export async function takePendingClaudeDesktopLaunchAfterRestart(): Promise<ClaudeDesktopPendingLaunch | null> {
+  if (isTauri()) {
+    return invoke("take_pending_claude_desktop_launch_after_restart");
+  }
+  return null;
+}
+
+export async function restartClaudeDesktopAfterAccessibilityGrant(
+  request: ClaudeDesktopLaunchRequest = {}
+): Promise<void> {
+  if (isTauri()) {
+    return invoke("restart_claude_desktop_after_accessibility_grant", { localize: request.localize });
   }
 }
 
@@ -2740,7 +2771,23 @@ function buildMockInstallSteps(
   return steps;
 }
 
-function mockCodexClientState(includeNetwork: boolean, installClass = mockCodexClientInstalled ? "managed" : "none"): CodexClientState {
+function mockCodexClientInstallKind(
+  value?: "msix" | "portable" | null
+): "msix" | "portable" {
+  return value === "portable" ? "portable" : "msix";
+}
+
+function mockCodexClientState(
+  includeNetwork: boolean,
+  installClass = mockCodexClientInstalled ? "managed" : "none",
+  installKind?: "msix" | "portable" | null
+): CodexClientState {
+  const kind = mockCodexClientInstallKind(installKind);
+  const settings = {
+    ...mockCodexClientSettings,
+    windowsInstallMode: kind
+  };
+  const installed = mockCodexClientInstalled?.source === kind ? mockCodexClientInstalled : null;
   const release = {
     version: "26.609.4994.0",
     packageMoniker: "OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0",
@@ -2757,26 +2804,27 @@ function mockCodexClientState(includeNetwork: boolean, installClass = mockCodexC
     macosArm64Version: "26.609.41114",
     macosX64Version: "26.609.41114"
   };
-  const upToDate = mockCodexClientInstalled?.version === release.version;
+  const upToDate = installed?.version === release.version;
   return {
+    installKind: kind,
     generatedAt: new Date().toISOString(),
     platform: "windows",
-    settings: mockCodexClientSettings,
-    installed: mockCodexClientInstalled,
-    installClass,
+    settings,
+    installed,
+    installClass: installed ? installClass : "none",
     release: includeNetwork ? release : null,
     plan: includeNetwork
       ? {
           upToDate,
-          currentVersion: mockCodexClientInstalled?.version ?? null,
+          currentVersion: installed?.version ?? null,
           latestVersion: release.version,
-          route: mockCodexClientSettings.windowsInstallMode === "portable" ? "portable-fallback" : "msix-sideload",
+          route: kind === "portable" ? "portable-fallback" : "msix-sideload",
           packageUrl: release.packageUrl,
           downloadSize: release.contentLength,
           sha256: release.sha256,
           stagedPath: null,
-          installRoot: mockCodexClientSettings.installRoot,
-          warnings: mockCodexClientSettings.windowsInstallMode === "portable"
+          installRoot: settings.installRoot,
+          warnings: kind === "portable"
             ? ["The current plan will install the portable build and register Start menu and uninstall entries."]
             : [],
           capabilities: [
@@ -2804,15 +2852,18 @@ function mockCodexClientState(includeNetwork: boolean, installClass = mockCodexC
   };
 }
 
-function mockCodexClientStageReport(): CodexClientStageReport {
+function mockCodexClientStageReport(
+  installKind: "msix" | "portable" = "msix"
+): CodexClientStageReport {
   return {
+    installKind,
     upToDate: false,
     stagedPath: "~/.codestudio-lite/downloads/codex-client/OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0.Msix",
     packageMoniker: "OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0",
     downloadSize: 552187367,
     sha256: "547618a744149221078a27febdfff65c924b46ff85ab2fe1595180e128be8d85",
     hashVerified: true,
-    route: mockCodexClientSettings.windowsInstallMode === "portable" ? "portable-fallback" : "msix-sideload",
+    route: installKind === "portable" ? "portable-fallback" : "msix-sideload",
     notes: ["Installer downloaded and passed SHA-256 verification."]
   };
 }
@@ -2830,6 +2881,7 @@ async function emitMockToolInstallProgress(stage: {
   toolName: string;
   stage: string;
   command: string;
+  installKind?: "msix" | "exe" | null;
 }) {
   const lines = [
     `> ${stage.command}`,

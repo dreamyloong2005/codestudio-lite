@@ -90,6 +90,7 @@ export interface ToolInstallPlan {
 export interface ToolInstallRequest {
   toolId: string;
   confirm: boolean;
+  installKind?: "msix" | "exe" | null;
   installPrerequisites?: boolean;
 }
 
@@ -105,6 +106,14 @@ export interface ToolInstallProgress {
   toolName: string;
   stage: string;
   command: string;
+  installKind?: "msix" | "exe" | null;
+  phase?: string | null;
+  message?: string | null;
+  downloaded?: number | null;
+  total?: number | null;
+  percent?: number | null;
+  step?: number | null;
+  stepTotal?: number | null;
   stream: "stdout" | "stderr" | "status" | string;
   chunk: string;
   done: boolean;
@@ -155,6 +164,12 @@ export interface StopInstallTerminalRequest {
 
 export interface ClaudeDesktopLaunchRequest {
   localize?: boolean | null;
+}
+
+export interface ClaudeDesktopPendingLaunch {
+  action: "launch";
+  localize: boolean;
+  requestedAt: string | null;
 }
 
 export interface InstallTerminalOutput {
@@ -682,6 +697,14 @@ export interface UpdateCodexClientSettingsRequest {
   patchForcePluginUnlock?: boolean | null;
 }
 
+export interface PlanCodexClientUpdateRequest {
+  installKind?: "msix" | "portable" | null;
+}
+
+export interface StageCodexClientUpdateRequest {
+  installKind?: "msix" | "portable" | null;
+}
+
 export interface InstalledCodexClient {
   path: string;
   version: string;
@@ -730,6 +753,7 @@ export interface CodexClientPlan {
 }
 
 export interface CodexClientState {
+  installKind: "msix" | "portable";
   generatedAt: string;
   platform: string;
   settings: CodexClientSettings;
@@ -743,6 +767,7 @@ export interface CodexClientState {
 }
 
 export interface CodexClientStageReport {
+  installKind: "msix" | "portable";
   upToDate: boolean;
   stagedPath: string | null;
   packageMoniker: string;
@@ -754,6 +779,7 @@ export interface CodexClientStageReport {
 }
 
 export interface CodexClientProgress {
+  installKind: "msix" | "portable";
   phase: string;
   message: string;
   downloaded: number | null;
@@ -778,6 +804,7 @@ export interface CodexClientUninstallRequest {
 }
 
 export interface CodexClientOperationResult {
+  installKind: "msix" | "portable";
   success: boolean;
   action: string;
   message: string;

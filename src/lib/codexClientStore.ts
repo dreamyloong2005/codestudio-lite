@@ -22,49 +22,68 @@ import type {
 } from "../types";
 import type { TranslationKey } from "./i18n";
 
+export type CodexClientInstallKind = "msix" | "portable";
+
 export type CodexClientNoticeMessage =
   | string
   | { key: TranslationKey; values?: Record<string, string | number> };
 
-interface CodexClientViewState {
+interface CodexClientKindViewState {
   state: CodexClientState | null;
-  settingsDraft: CodexClientSettings | null;
-  settingsSaveStatus: "idle" | "dirty" | "saving" | "saved" | "error";
   planRefreshing: boolean;
   planStale: boolean;
   loading: boolean;
   loaded: boolean;
   busyAction: string | null;
-  error: string | null;
-  success: CodexClientNoticeMessage | null;
   stageReport: CodexClientStageReport | null;
   operationResult: CodexClientOperationResult | null;
   progress: CodexClientProgress | null;
+}
+
+interface CodexClientViewState {
+  kindViews: Record<CodexClientInstallKind, CodexClientKindViewState>;
+  settingsDraft: CodexClientSettings | null;
+  settingsSaveStatus: "idle" | "dirty" | "saving" | "saved" | "error";
+  loaded: boolean;
+  error: string | null;
+  success: CodexClientNoticeMessage | null;
   confirmUninstall: boolean;
   // Per-kind install detection (MSIX vs portable) for the page tabs.
   installKinds: CodexClientInstallKinds | null;
   // Which install-kind tab is selected: "msix" (Windows App) or "portable".
-  selectedKind: "msix" | "portable";
+  selectedKind: CodexClientInstallKind;
+}
+
+const INSTALL_KINDS: CodexClientInstallKind[] = ["msix", "portable"];
+
+function emptyKindView(): CodexClientKindViewState {
+  return {
+    state: null,
+    planRefreshing: false,
+    planStale: false,
+    loading: false,
+    loaded: false,
+    busyAction: null,
+    stageReport: null,
+    operationResult: null,
+    progress: null
+  };
 }
 
 const initialState: CodexClientViewState = {
-  state: null,
+  kindViews: {
+    msix: emptyKindView(),
+    portable: emptyKindView()
+  },
   // Pre-seeded with backend defaults so the launch options section renders and
   // is editable before the first scan completes. applyState replaces this with
   // the real settings once loaded, while preserving any pre-scan edits to the
   // launch-option fields.
   settingsDraft: defaultCodexClientSettings(),
   settingsSaveStatus: "idle",
-  planRefreshing: false,
-  planStale: false,
-  loading: false,
   loaded: false,
-  busyAction: null,
   error: null,
   success: null,
-  stageReport: null,
-  operationResult: null,
-  progress: null,
   confirmUninstall: false,
   installKinds: null,
   selectedKind: "msix"
@@ -105,6 +124,54 @@ function patch(next: Partial<CodexClientViewState>) {
   codexClientView.update((current) => ({ ...current, ...next }));
 }
 
+function patchKind(
+  kind: CodexClientInstallKind,
+  next: Partial<CodexClientKindViewState>
+) {
+  codexClientView.update((current) => ({
+    ...current,
+    kindViews: {
+      ...current.kindViews,
+      [kind]: {
+        ...current.kindViews[kind],
+        ...next
+      }
+    }
+  }));
+}
+
+function patchAllKinds(
+  mapper: (view: CodexClientKindViewState) => CodexClientKindViewState
+) {
+  codexClientView.update((current) => ({
+    ...current,
+    kindViews: {
+      msix: mapper(current.kindViews.msix),
+      portable: mapper(current.kindViews.portable)
+    }
+  }));
+}
+
+function selectedKindView(view = get(codexClientView)) {
+  return view.kindViews[view.selectedKind];
+}
+
+function hasBusyAction(view = get(codexClientView)) {
+  return INSTALL_KINDS.some((kind) => Boolean(view.kindViews[kind].busyAction));
+}
+
+function hasLoadingView(view = get(codexClientView)) {
+  return INSTALL_KINDS.some((kind) => view.kindViews[kind].loading);
+}
+
+function normalizeInstallKind(value: string | null | undefined): CodexClientInstallKind {
+  return value === "portable" ? "portable" : "msix";
+}
+
+function stateInstallKind(state: CodexClientState): CodexClientInstallKind {
+  return normalizeInstallKind(state.installKind);
+}
+
 function settingsKey(settings: CodexClientSettings) {
   return JSON.stringify({
     source: settings.source,
@@ -130,36 +197,62 @@ function planAffectingSettingsChanged(
     || before.installRoot !== after.installRoot;
 }
 
-function applyState(state: CodexClientState) {
-  const current = get(codexClientView);
+function mergeScannedSettings(
+  stateSettings: CodexClientSettings,
+  current: CodexClientViewState
+) {
   const draft = current.settingsDraft;
-  // If the user edited a launch option before the scan completed, keep their
-  // choice instead of clobbering it with the scanned value. Only the two
-  // launch-option toggles are preserved this way; other settings always reflect
-  // the authoritative scanned state.
   const preserveLaunchOptions = !current.loaded && Boolean(draft);
-  const mergedSettings: CodexClientSettings = preserveLaunchOptions && draft
-    ? {
-        ...state.settings,
-        syncHistoryOnLaunch: draft.syncHistoryOnLaunch,
-        patchForcePluginUnlock: draft.patchForcePluginUnlock
-      }
-    : state.settings;
-  lastSavedSettingsKey = settingsKey(mergedSettings);
-  lastSavedSettings = { ...mergedSettings };
-  patch({
-    state,
-    settingsDraft: { ...mergedSettings },
+  return {
+    ...stateSettings,
+    syncHistoryOnLaunch: preserveLaunchOptions && draft
+      ? draft.syncHistoryOnLaunch
+      : stateSettings.syncHistoryOnLaunch,
+    patchForcePluginUnlock: preserveLaunchOptions && draft
+      ? draft.patchForcePluginUnlock
+      : stateSettings.patchForcePluginUnlock
+  };
+}
+
+type ApplyStateOptions = {
+  preserveDraft?: boolean;
+};
+
+function applyState(
+  state: CodexClientState,
+  kind: CodexClientInstallKind = stateInstallKind(state),
+  options: ApplyStateOptions = {}
+) {
+  const current = get(codexClientView);
+  const mergedSettings = mergeScannedSettings(state.settings, current);
+  const preserveDraft = Boolean(options.preserveDraft && current.settingsDraft);
+  if (!preserveDraft) {
+    lastSavedSettingsKey = settingsKey(mergedSettings);
+    lastSavedSettings = { ...mergedSettings };
+  }
+  codexClientView.update((existing) => ({
+    ...existing,
+    settingsDraft: preserveDraft && existing.settingsDraft ? existing.settingsDraft : { ...mergedSettings },
     loaded: true,
-    planRefreshing: false,
-    planStale: false,
-    settingsSaveStatus: "idle"
-  });
+    settingsSaveStatus: preserveDraft ? existing.settingsSaveStatus : "idle",
+    kindViews: {
+      ...existing.kindViews,
+      [kind]: {
+        ...existing.kindViews[kind],
+        state,
+        loaded: true,
+        loading: false,
+        planRefreshing: false,
+        planStale: preserveDraft ? existing.kindViews[kind].planStale : false
+      }
+    }
+  }));
 }
 
 function applyInstallResult(result: CodexClientOperationResult) {
+  const kind = normalizeInstallKind(result.installKind);
   const current = get(codexClientView);
-  const state = current.state;
+  const state = current.kindViews[kind].state;
   if (!state || !result.installed) {
     return;
   }
@@ -173,7 +266,7 @@ function applyInstallResult(result: CodexClientOperationResult) {
       }
     : state.plan;
 
-  patch({
+  patchKind(kind, {
     state: {
       ...state,
       generatedAt: new Date().toISOString(),
@@ -181,13 +274,18 @@ function applyInstallResult(result: CodexClientOperationResult) {
       installClass: "managed",
       plan: nextPlan
     },
-    stageReport: result.stage,
-    settingsDraft: { ...state.settings }
+    stageReport: result.stage
   });
 }
 
-function progressSeed(message: string, total?: number | null, stepTotal?: number | null): CodexClientProgress {
+function progressSeed(
+  installKind: CodexClientInstallKind,
+  message: string,
+  total?: number | null,
+  stepTotal?: number | null
+): CodexClientProgress {
   return {
+    installKind,
     phase: "preparing",
     message,
     downloaded: null,
@@ -204,7 +302,7 @@ export function startCodexClientProgressListener() {
   }
   progressListenerStarted = true;
   listenCodexClientProgress((progress) => {
-    patch({ progress });
+    patchKind(progress.installKind, { progress });
   }).catch((err) => {
     progressListenerStarted = false;
     patch({ error: err instanceof Error ? err.message : String(err) });
@@ -220,10 +318,11 @@ async function hydrateCodexClientFromCache(): Promise<boolean> {
   try {
     const cached = await loadCachedCodexClientState();
     if (cached) {
+      const kind = stateInstallKind(cached);
       // Pre-mark loaded so applyState uses the cached settings verbatim
       // instead of preserving the default-seeded draft launch options.
       patch({ loaded: true });
-      applyState(cached);
+      applyState(cached, kind);
       // Restore per-kind install detection from the cached detection snapshot
       // so the tabs render instantly before the async re-scan completes.
       try {
@@ -245,13 +344,13 @@ async function hydrateCodexClientFromCache(): Promise<boolean> {
 export async function ensureCodexClientLoaded() {
   startCodexClientProgressListener();
   const snapshot = get(codexClientView);
-  if (snapshot.loaded || snapshot.loading || snapshot.busyAction) {
+  if (hasBusyAction(snapshot)) {
     return;
   }
   // Hydrate from the on-disk cache first so the page renders instantly with
   // a prior session plan, then kick off an async re-fetch to stay current.
-  const hydrated = await hydrateCodexClientFromCache();
-  if (!loadPromise && !get(codexClientView).loading && !get(codexClientView).busyAction) {
+  const hydrated = snapshot.loaded ? true : await hydrateCodexClientFromCache();
+  if (!loadPromise && !hasLoadingView() && !hasBusyAction()) {
     if (hydrated) {
       // We already have a full cached state; only re-fetch the network plan
       // when auto-check is enabled, and skip the plan-less local inspect so
@@ -270,43 +369,56 @@ export async function ensureCodexClientLoaded() {
   }
 }
 
-export async function refreshCodexClient(withNetwork = true, force = false) {
+export async function refreshCodexClient(
+  withNetwork = true,
+  force = false,
+  installKind: CodexClientInstallKind = get(codexClientView).selectedKind
+) {
   startCodexClientProgressListener();
-  if (get(codexClientView).busyAction && !force) {
+  if (get(codexClientView).kindViews[installKind].busyAction && !force) {
     return;
   }
-  patch({ loading: true, error: null, planRefreshing: withNetwork });
+  const refreshSettingsRevision = settingsSaveRevision;
+  patchKind(installKind, { loading: true, planRefreshing: withNetwork });
+  patch({ error: null });
   try {
-    let nextState = withNetwork ? await planCodexClientUpdate() : await inspectCodexClient();
-    applyState(nextState);
+    let nextState = withNetwork
+      ? await planCodexClientUpdate({ installKind })
+      : await inspectCodexClient();
+    const preserveDraft = () => settingsSaveRevision !== refreshSettingsRevision;
+    applyState(nextState, withNetwork ? installKind : stateInstallKind(nextState), { preserveDraft: preserveDraft() });
     if (!withNetwork && nextState.settings.autoCheck) {
-      patch({ planRefreshing: true });
-      nextState = await planCodexClientUpdate();
-      applyState(nextState);
+      patchKind(installKind, { planRefreshing: true });
+      nextState = await planCodexClientUpdate({ installKind });
+      applyState(nextState, installKind, { preserveDraft: preserveDraft() });
     }
     const installKinds = await detectCodexInstallKinds().catch(() => null);
     patch({ installKinds });
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });
   } finally {
-    patch({ loading: false, planRefreshing: false });
+    patchKind(installKind, { loading: false, planRefreshing: false });
   }
 }
 
 async function runAction<T>(
+  kind: CodexClientInstallKind,
   name: string,
   action: () => Promise<T>,
   onSuccess?: (value: T) => void | Promise<void>
 ) {
   startCodexClientProgressListener();
-  patch({ busyAction: name, error: null, success: null });
+  patchKind(kind, { busyAction: name });
+  patch({ error: null, success: null });
   try {
     const result = await action();
     await onSuccess?.(result);
+    return result;
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });
+    return null;
   } finally {
-    patch({ busyAction: null });
+    patchKind(kind, { busyAction: null });
   }
 }
 
@@ -319,21 +431,30 @@ export function updateCodexClientDraft(patchValue: Partial<CodexClientSettings>)
     }
     nextDraft = { ...current.settingsDraft, ...patchValue };
     const unchanged = lastSavedSettingsKey === settingsKey(nextDraft);
-    const changedPlanField = current.loaded
-      && !unchanged
-      && planAffectingSettingsChanged(current.settingsDraft, nextDraft);
     planDirty = current.loaded
       && !unchanged
       && (lastSavedSettings
         ? planAffectingSettingsChanged(lastSavedSettings, nextDraft)
-        : changedPlanField);
+        : INSTALL_KINDS.some((kind) => Boolean(current.kindViews[kind].state?.plan)));
     return {
       ...current,
       settingsDraft: nextDraft,
-      planRefreshing: current.loading ? current.planRefreshing : planDirty,
-      planStale: planDirty,
-      stageReport: changedPlanField ? null : current.stageReport,
-      operationResult: changedPlanField ? null : current.operationResult,
+      kindViews: {
+        msix: {
+          ...current.kindViews.msix,
+          planRefreshing: current.kindViews.msix.loading ? current.kindViews.msix.planRefreshing : planDirty,
+          planStale: planDirty,
+          stageReport: planDirty ? null : current.kindViews.msix.stageReport,
+          operationResult: planDirty ? null : current.kindViews.msix.operationResult
+        },
+        portable: {
+          ...current.kindViews.portable,
+          planRefreshing: current.kindViews.portable.loading ? current.kindViews.portable.planRefreshing : planDirty,
+          planStale: planDirty,
+          stageReport: planDirty ? null : current.kindViews.portable.stageReport,
+          operationResult: planDirty ? null : current.kindViews.portable.operationResult
+        }
+      },
       settingsSaveStatus: unchanged ? "saved" : "dirty"
     };
   });
@@ -353,8 +474,13 @@ export function setCodexClientConfirmUninstall(confirmUninstall: boolean) {
 }
 
 /// Select the install-kind tab ("msix" or "portable") on the Codex client page.
-export function setCodexClientSelectedKind(kind: "msix" | "portable") {
+export function setCodexClientSelectedKind(kind: CodexClientInstallKind) {
   patch({ selectedKind: kind });
+  const view = get(codexClientView);
+  const kindView = view.kindViews[kind];
+  if ((!kindView.loaded || kindView.planStale) && !kindView.loading && !kindView.busyAction && view.loaded) {
+    void refreshCodexClient(true, false, kind);
+  }
 }
 
 function scheduleSettingsAutoSave() {
@@ -378,7 +504,7 @@ async function flushCodexClientSettingsDraft() {
   if (!draft) {
     return;
   }
-  if (snapshot.busyAction) {
+  if (hasBusyAction(snapshot)) {
     scheduleSettingsAutoSave();
     return;
   }
@@ -387,26 +513,35 @@ async function flushCodexClientSettingsDraft() {
   const draftKey = settingsKey(draft);
   const planNeedsRefresh = lastSavedSettings
     ? planAffectingSettingsChanged(lastSavedSettings, draft)
-    : Boolean(snapshot.state?.plan);
+    : INSTALL_KINDS.some((kind) => Boolean(snapshot.kindViews[kind].state?.plan));
   if (draftKey === lastSavedSettingsKey) {
-    patch({ settingsSaveStatus: "saved", planRefreshing: false, planStale: false });
+    patchAllKinds((view) => ({
+      ...view,
+      planRefreshing: false,
+      planStale: false
+    }));
+    patch({ settingsSaveStatus: "saved" });
     return;
   }
 
   settingsSaveInFlight = true;
   patch({
     settingsSaveStatus: "saving",
-    error: null,
+    error: null
+  });
+  patchAllKinds((view) => ({
+    ...view,
     planRefreshing: planNeedsRefresh,
     planStale: planNeedsRefresh
-  });
+  }));
   try {
     const settings = await updateCodexClientSettings(draft);
     lastSavedSettingsKey = settingsKey(settings);
     lastSavedSettings = { ...settings };
-    const nextState = await planCodexClientUpdate();
+    const installKind = get(codexClientView).selectedKind;
+    const nextState = await planCodexClientUpdate({ installKind });
     if (settingsSaveRevision === revision) {
-      applyState(nextState);
+      applyState(nextState, installKind);
       patch({ settingsSaveStatus: "saved" });
     } else {
       scheduleSettingsAutoSave();
@@ -414,9 +549,12 @@ async function flushCodexClientSettingsDraft() {
   } catch (err) {
     patch({
       settingsSaveStatus: "error",
-      planRefreshing: false,
       error: err instanceof Error ? err.message : String(err)
     });
+    patchAllKinds((view) => ({
+      ...view,
+      planRefreshing: false
+    }));
   } finally {
     settingsSaveInFlight = false;
     const current = get(codexClientView);
@@ -432,31 +570,37 @@ async function flushCodexClientSettingsDraft() {
 
 export async function stageCodexClientPackage() {
   const snapshot = get(codexClientView);
-  patch({
+  const installKind = snapshot.selectedKind;
+  const kindView = selectedKindView(snapshot);
+  patchKind(installKind, {
     progress: progressSeed(
+      installKind,
       "codexClient.progressStagePreparing",
-      snapshot.state?.plan?.downloadSize ?? snapshot.state?.release?.contentLength,
+      kindView.state?.plan?.downloadSize ?? kindView.state?.release?.contentLength,
       4
     )
   });
-  await runAction("stage", stageCodexClientUpdate, (report) => {
-    patch({
-      stageReport: report,
-      success: { key: "codexClient.stageComplete" }
-    });
-  });
+  await runAction(
+    installKind,
+    "stage",
+    () => stageCodexClientUpdate({ installKind }),
+    (report) => {
+      patchKind(report.installKind, { stageReport: report });
+      patch({ success: { key: "codexClient.stageComplete" } });
+    }
+  );
 }
 
 export async function installOrUpdateCodexClient() {
   const snapshot = get(codexClientView);
-  const plan = snapshot.state?.plan ?? null;
-  patch({
-    progress: progressSeed("codexClient.progressInstallPreparing", plan?.downloadSize, 7)
-  });
-  // Drive the install route from the page-tab selection rather than the
-  // persisted windows_install_mode setting.
   const installKind = snapshot.selectedKind;
-  await runAction(
+  const kindView = selectedKindView(snapshot);
+  const plan = kindView.state?.plan ?? null;
+  patchKind(installKind, {
+    progress: progressSeed(installKind, "codexClient.progressInstallPreparing", plan?.downloadSize, 7)
+  });
+  return runAction(
+    installKind,
     "install",
     () => installCodexClient({
       confirm: true,
@@ -467,14 +611,14 @@ export async function installOrUpdateCodexClient() {
     }),
     async (result) => {
       applyInstallResult(result);
+      patchKind(result.installKind, { operationResult: result });
       patch({
-        operationResult: result,
         success: result.installed
           ? { key: "codexClient.ready", values: { version: result.installed.version } }
           : result.message
       });
       window.setTimeout(() => {
-        void refreshCodexClient(true, true);
+        void refreshCodexClient(true, true, result.installKind);
       }, 0);
     }
   );
@@ -483,13 +627,9 @@ export async function installOrUpdateCodexClient() {
 export async function removeCodexClient() {
   const snapshot = get(codexClientView);
   const draft = snapshot.settingsDraft;
-  // Uninstall the install kind the user is currently viewing on the page
-  // tab. Fall back to the detected kind if the selected tab has no install.
-  let installKind = snapshot.selectedKind;
-  if (installKind === "portable" && !snapshot.installKinds?.portable?.installed) {
-    installKind = "msix";
-  }
-  await runAction(
+  const installKind = snapshot.selectedKind;
+  return runAction(
+    installKind,
     "uninstall",
     () => uninstallCodexClient({
       confirm: true,
@@ -497,20 +637,32 @@ export async function removeCodexClient() {
       installKind
     }),
     async (result) => {
-      patch({
+      patchKind(result.installKind, {
         operationResult: result,
+        state: result.installed
+          ? get(codexClientView).kindViews[result.installKind].state
+          : get(codexClientView).kindViews[result.installKind].state
+            ? {
+                ...get(codexClientView).kindViews[result.installKind].state!,
+                installed: null,
+                installClass: "none"
+              }
+            : null
+      });
+      patch({
         confirmUninstall: false,
         success: { key: "codexClient.uninstallComplete" }
       });
-      await refreshCodexClient(true, true);
+      await refreshCodexClient(true, true, result.installKind);
     }
   );
 }
 
 export async function launchManagedCodexClient() {
-  await runAction("launch", launchCodexClient, async () => {
+  const installKind = get(codexClientView).selectedKind;
+  await runAction(installKind, "launch", launchCodexClient, async () => {
     patch({ success: { key: "codexClient.launchRequested" } });
     await new Promise((resolve) => setTimeout(resolve, 2500));
-    await refreshCodexClient(false, true);
+    await refreshCodexClient(false, true, installKind);
   });
 }

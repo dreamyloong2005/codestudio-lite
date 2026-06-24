@@ -20,6 +20,7 @@
   let preserveCodexOfficialAuth = true;
   let saving = false;
   let error: string | null = null;
+  let settingsEditRevision = 0;
 
   onMount(() => {
     void loadSettings();
@@ -29,8 +30,12 @@
   });
 
   async function loadSettings() {
+    const loadRevision = settingsEditRevision;
     try {
       settings = await loadAppSettings();
+      if (loadRevision !== settingsEditRevision) {
+        return;
+      }
       language = settings.language;
       theme = settings.theme;
       preserveCodexOfficialAuth = settings.preserveCodexOfficialAuth;
@@ -42,18 +47,21 @@
   }
 
   async function changeLanguage(nextLanguage: Locale) {
+    settingsEditRevision += 1;
     language = nextLanguage;
     setLocale(nextLanguage);
     await saveSettings({ language: nextLanguage });
   }
 
   async function changeTheme(nextTheme: AppSettings["theme"]) {
+    settingsEditRevision += 1;
     theme = nextTheme;
     applyTheme(nextTheme);
     await saveSettings({ theme: nextTheme });
   }
 
   async function changePreserveCodexOfficialAuth(nextValue: boolean) {
+    settingsEditRevision += 1;
     preserveCodexOfficialAuth = nextValue;
     await saveSettings({ preserveCodexOfficialAuth: nextValue });
   }

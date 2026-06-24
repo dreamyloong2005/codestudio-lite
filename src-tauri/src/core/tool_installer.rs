@@ -2,13 +2,16 @@ use crate::core::activity_log;
 use crate::core::app_paths::app_paths;
 use crate::core::detector;
 use crate::core::env_health;
-use crate::core::platform::{hidden_command, hidden_command_with_args, package, resolve_command};
+use crate::core::platform::{
+    hidden_command, hidden_command_with_args, package, resolve_command, run_powershell,
+};
 use crate::core::process_control;
 use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
-    InstallState, RepairToolPathRequest, RepairToolPathResult, Severity, ToolInstallCommand,
-    ToolInstallPlan, ToolInstallPrerequisite, ToolInstallProgress, ToolInstallRequest,
-    ToolInstallResult, ToolInstallStageResult, ToolInstallStep, ToolStatus, ToolUninstallRequest,
+    ClaudeDesktopInstallKinds, InstallState, RepairToolPathRequest, RepairToolPathResult, Severity,
+    ToolInstallCommand, ToolInstallPlan, ToolInstallPrerequisite, ToolInstallProgress,
+    ToolInstallRequest, ToolInstallResult, ToolInstallStageResult, ToolInstallStep, ToolStatus,
+    ToolUninstallRequest,
 };
 use serde::Deserialize;
 use std::env;
@@ -17,7 +20,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 enum InstallAction {
@@ -30,6 +33,7 @@ enum InstallAction {
         bundle_identifier: &'static str,
         destination: &'static str,
     },
+    ClaudeDesktopWindowsMsix,
     // Reserved install action for a bundled PowerShell script. The match arms
     // across plan/run/preview already handle it; no tool currently constructs
     // it, so it is intentionally dead until a tool opts in.
@@ -67,6 +71,11 @@ struct InstallProgressContext<'a> {
     tool_name: &'a str,
     stage: &'a str,
     command: &'a str,
+    install_kind: Option<&'a str>,
+    progress_phase: Option<&'a str>,
+    progress_message: Option<&'a str>,
+    progress_step: Option<u32>,
+    progress_step_total: Option<u32>,
     progress: Option<&'a ToolInstallProgressEmitter>,
 }
 
@@ -171,6 +180,11 @@ pub fn install_tool_with_progress(
             tool_name: &prerequisite.tool_name,
             stage: "prerequisite",
             command: &command,
+            install_kind: request.install_kind.as_deref(),
+            progress_phase: None,
+            progress_message: None,
+            progress_step: None,
+            progress_step_total: None,
             progress,
         };
         let output = run_install_action(&prerequisite_definition.action, Some(&context))?;
@@ -240,6 +254,11 @@ pub fn install_tool_with_progress(
         tool_name: definition.tool.name,
         stage: "target",
         command: &command,
+        install_kind: request.install_kind.as_deref(),
+        progress_phase: None,
+        progress_message: None,
+        progress_step: None,
+        progress_step_total: None,
         progress,
     };
     let output = run_install_action(&definition.action, Some(&context))?;
@@ -385,6 +404,14 @@ pub fn update_tool_with_progress(
         tool_name: definition.tool.name,
         stage: "update",
         command: &command,
+        install_kind: request
+            .install_kind
+            .as_deref()
+            .or_else(|| before.as_ref().and_then(|s| s.install_kind.as_deref())),
+        progress_phase: None,
+        progress_message: None,
+        progress_step: None,
+        progress_step_total: None,
         progress,
     };
     let output = run_update_action_for_tool(&tool_id, &definition.action, Some(&context))?;
@@ -523,19 +550,34 @@ pub fn uninstall_tool_with_progress(
         tool_name: definition.tool.name,
         stage: "uninstall",
         command: &command,
+        install_kind: request
+            .install_kind
+            .as_deref()
+            .or_else(|| before.as_ref().and_then(|s| s.install_kind.as_deref())),
+        progress_phase: None,
+        progress_message: None,
+        progress_step: None,
+        progress_step_total: None,
         progress,
     };
     // Prefer the install kind the caller selected (per the page tab) over the
     // detected one, so uninstalling targets the version the user is viewing.
-    let install_kind = request
+    let requested_install_kind = request
         .install_kind
         .as_deref()
         .or_else(|| before.as_ref().and_then(|s| s.install_kind.as_deref()));
-    let output = if tool_id == "claude-desktop"
-        && cfg!(target_os = "windows")
-        && install_kind == Some("exe")
+    let claude_windows_install_kind = if tool_id == "claude-desktop" && cfg!(target_os = "windows")
     {
-        run_claude_desktop_exe_uninstall(Some(&context))?
+        let install_kinds = detector::claude_desktop_install_kinds();
+        resolve_claude_desktop_windows_uninstall_kind(requested_install_kind, &install_kinds)
+    } else {
+        requested_install_kind.map(ToString::to_string)
+    };
+    let output = if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        run_claude_desktop_windows_uninstall(
+            claude_windows_install_kind.as_deref(),
+            Some(&context),
+        )?
     } else {
         run_uninstall_action_for_tool(&tool_id, &definition.action, Some(&context))?
     };
@@ -545,12 +587,29 @@ pub fn uninstall_tool_with_progress(
 
     detector::invalidate_update_cache();
     let after = current_status_for_missing_command(output.missing_command.as_deref(), &tool_id);
-    let uninstalled = after
-        .as_ref()
-        .map(|status| status.install_state != InstallState::Installed)
-        .unwrap_or(true);
+    let uninstalled = if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        let install_kinds = detector::claude_desktop_install_kinds();
+        claude_desktop_windows_uninstall_verified(
+            claude_windows_install_kind.as_deref(),
+            &install_kinds,
+            detector::claude_desktop_windows_registered_msix_installed(),
+        )
+    } else {
+        after
+            .as_ref()
+            .map(|status| status.install_state != InstallState::Installed)
+            .unwrap_or(true)
+    };
     let success = output.success && uninstalled;
-    let message = if success {
+    let message = if success && tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        let install_kinds = detector::claude_desktop_install_kinds();
+        claude_desktop_windows_uninstall_success_message(
+            definition.tool.name,
+            claude_windows_install_kind.as_deref(),
+            &install_kinds,
+            detector::claude_desktop_windows_registered_msix_installed(),
+        )
+    } else if success {
         format!("{} uninstalled.", definition.tool.name)
     } else if output.success {
         format!(
@@ -626,7 +685,7 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
                     destination: CLAUDE_DESKTOP_MACOS_DESTINATION,
                 }
             } else if cfg!(target_os = "windows") {
-                InstallAction::Winget("Anthropic.Claude")
+                InstallAction::ClaudeDesktopWindowsMsix
             } else {
                 InstallAction::CustomUnsupported("Claude Desktop has no built-in Linux installer.")
             }
@@ -843,6 +902,35 @@ fn build_plan(
             } else if !macos_dmg_dependencies_available() {
                 blocker = Some(
                     "hdiutil or ditto is unavailable, so the official DMG cannot be installed."
+                        .to_string(),
+                );
+                can_install = false;
+            }
+        }
+        InstallAction::ClaudeDesktopWindowsMsix => {
+            steps.push(ToolInstallStep {
+                label: "Download official MSIX".to_string(),
+                detail: "Download the latest Claude Desktop Windows App package from claude.ai."
+                    .to_string(),
+            });
+            steps.push(ToolInstallStep {
+                label: "Install MSIX".to_string(),
+                detail: "Install Claude.msix with Add-AppxPackage.".to_string(),
+            });
+            steps.push(ToolInstallStep {
+                label: "Verify Windows App".to_string(),
+                detail: "After installation, verify the Claude Desktop MSIX package registration."
+                    .to_string(),
+            });
+            if !cfg!(target_os = "windows") {
+                blocker = Some(
+                    "The official Claude Desktop MSIX installer is only supported on Windows."
+                        .to_string(),
+                );
+                can_install = false;
+            } else if !powershell_available() {
+                blocker = Some(
+                    "PowerShell is not available, so Claude Desktop MSIX cannot be installed."
                         .to_string(),
                 );
                 can_install = false;
@@ -1211,6 +1299,9 @@ fn dependency_satisfied(action: &InstallAction) -> bool {
         InstallAction::MacosDmgApp { .. } => {
             cfg!(target_os = "macos") && macos_dmg_dependencies_available()
         }
+        InstallAction::ClaudeDesktopWindowsMsix => {
+            cfg!(target_os = "windows") && powershell_available()
+        }
         InstallAction::PowerShellScript(_, _) => powershell_available(),
         InstallAction::ShellScript(_, _) | InstallAction::InteractiveShellScript(_, _) => {
             command_available("bash") || cfg!(target_os = "windows")
@@ -1254,6 +1345,9 @@ fn run_install_action(
             Path::new(destination),
             progress,
         ),
+        InstallAction::ClaudeDesktopWindowsMsix => {
+            run_claude_desktop_windows_msix_install(progress)
+        }
         InstallAction::PowerShellScript(_, script) => run_action_command(
             "powershell",
             &[
@@ -1325,6 +1419,9 @@ fn run_update_action(
             Path::new(destination),
             progress,
         ),
+        InstallAction::ClaudeDesktopWindowsMsix => {
+            run_claude_desktop_windows_msix_install(progress)
+        }
         InstallAction::PowerShellScript(_, script) => run_action_command(
             "powershell",
             &[
@@ -1368,17 +1465,7 @@ fn run_update_action_for_tool(
         return run_update_action(&InstallAction::NpmGlobal("npm"), progress);
     }
     if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
-        return run_action_command(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                CLAUDE_DESKTOP_WINDOWS_UPDATE_SCRIPT,
-            ],
-            progress,
-        );
+        return run_update_action(action, progress);
     }
     run_update_action(action, progress)
 }
@@ -1412,6 +1499,7 @@ fn run_uninstall_action_for_tool(
             run_action_command("npm", &["uninstall", "-g", package], progress)
         }
         InstallAction::PowerShellScript(_, _)
+        | InstallAction::ClaudeDesktopWindowsMsix
         | InstallAction::ShellScript(_, _)
         | InstallAction::InteractiveShellScript(_, _)
         | InstallAction::ProvidedByTool(_)
@@ -1421,8 +1509,18 @@ fn run_uninstall_action_for_tool(
     }
 }
 
+const CLAUDE_DESKTOP_WINDOWS_UNINSTALL_COMMAND: &str =
+    "Remove the detected Claude Desktop Windows package directly";
+const CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX: &str = "pzs8sxrjxfjjc";
+const CLAUDE_DESKTOP_WINDOWS_BACKGROUND_SERVICE: &str = "CoworkVMService";
+const CLAUDE_DESKTOP_WINDOWS_BACKGROUND_PROCESS: &str = "cowork-svc";
+const WINGET_MULTIPLE_PACKAGES_EXIT_CODE: i32 = -1978335210;
+const WINGET_MULTIPLE_PACKAGES_HEX: &str = "0x8A150016";
+
+const CLAUDE_DESKTOP_WINDOWS_MSIX_URL: &str =
+    "https://claude.ai/api/desktop/win32/x64/msix/latest/redirect";
 const CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND: &str =
-    "Download and run the latest Claude Desktop installer from downloads.claude.ai";
+    "Download and install the latest Claude Desktop MSIX from https://claude.ai/api/desktop/win32/x64/msix/latest/redirect with Add-AppxPackage -Path";
 
 const CLAUDE_DESKTOP_LATEST_MACOS_URL: &str =
     "https://downloads.claude.ai/releases/darwin/universal/.latest";
@@ -1435,32 +1533,87 @@ const BUN_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://bun.sh/install | bash
 const GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND: &str = "xcode-select --install";
 const NODE_MACOS_OFFICIAL_PKG_INSTALL_COMMAND: &str = r#"set -e; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"lts":"[^"]*"' | sed -E 's/.*"version":"([^"]+)".*/\1/')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /"#;
 
-const CLAUDE_DESKTOP_WINDOWS_UPDATE_SCRIPT: &str = r#"
+const CLAUDE_DESKTOP_WINDOWS_MSIX_INSTALL_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$latest = Invoke-RestMethod -Uri 'https://downloads.claude.ai/releases/win32/x64/.latest' -Headers @{ 'User-Agent' = 'CodeStudio Lite' }
-$version = [string]$latest.version
-$hash = [string]$latest.hash
-if ([string]::IsNullOrWhiteSpace($version) -or [string]::IsNullOrWhiteSpace($hash)) {
-  throw 'Claude Desktop latest metadata is incomplete.'
+if (-not $env:CODESTUDIO_CLAUDE_MSIX_PATH) {
+  throw "CODESTUDIO_CLAUDE_MSIX_PATH is required."
 }
-$url = "https://downloads.claude.ai/releases/win32/x64/$version/Claude-$hash.exe"
-$target = Join-Path $env:TEMP "Claude-$version.exe"
-Write-Output "Downloading Claude Desktop $version"
-Invoke-WebRequest -Uri $url -OutFile $target -Headers @{ 'User-Agent' = 'CodeStudio Lite' }
+$target = $env:CODESTUDIO_CLAUDE_MSIX_PATH
 if (-not (Test-Path -LiteralPath $target)) {
-  throw "Claude Desktop installer was not downloaded."
+  throw "Claude Desktop MSIX was not downloaded."
 }
 $item = Get-Item -LiteralPath $target
 if ($item.Length -le 0) {
-  throw "Claude Desktop installer is empty."
+  throw "Claude Desktop MSIX is empty."
 }
-Write-Output "Starting Claude Desktop installer"
-$process = Start-Process -FilePath $target -WorkingDirectory ([System.IO.Path]::GetDirectoryName($target)) -Wait -PassThru
-$exitCode = $process.ExitCode
-Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-if ($null -ne $exitCode -and $exitCode -ne 0) {
-  exit $exitCode
+Write-Output "Installing Claude Desktop MSIX with Add-AppxPackage"
+Add-AppxPackage -Path $target -ForceApplicationShutdown -ErrorAction Stop
+"#;
+
+const CLAUDE_DESKTOP_WINDOWS_STALE_EXE_UNINSTALL_CLEANUP_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+$roots = @(
+  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+function Test-ClaudeExeInstallAlive {
+  param([string]$InstallLocation)
+  if ([string]::IsNullOrWhiteSpace($InstallLocation)) { return $false }
+  try {
+    $full = [System.IO.Path]::GetFullPath($InstallLocation)
+  } catch {
+    return $false
+  }
+  if (-not (Test-Path -LiteralPath $full)) { return $false }
+  $directExe = Join-Path $full 'Claude.exe'
+  $directAsar = Join-Path $full 'resources\app.asar'
+  if ((Test-Path -LiteralPath $directExe) -and (Test-Path -LiteralPath $directAsar)) {
+    return $true
+  }
+  $appDir = Get-ChildItem -LiteralPath $full -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending |
+    Select-Object -First 1
+  if ($appDir) {
+    $appExe = Join-Path $appDir.FullName 'Claude.exe'
+    $appAsar = Join-Path $appDir.FullName 'resources\app.asar'
+    if ((Test-Path -LiteralPath $appExe) -and (Test-Path -LiteralPath $appAsar)) {
+      return $true
+    }
+  }
+  return $false
+}
+$removed = @()
+foreach ($root in $roots) {
+  $props = Get-ItemProperty $root -ErrorAction SilentlyContinue
+  foreach ($prop in $props) {
+    $displayName = [string]$prop.DisplayName
+    $publisher = [string]$prop.Publisher
+    $keyName = if ($prop.PSChildName) { [string]$prop.PSChildName } else { '' }
+    $isClaudeExeEntry =
+      $keyName -eq 'AnthropicClaude' -or
+      (($displayName -like '*Claude*') -and ($publisher -like '*Anthropic*')) -or
+      (($displayName -like '*Claude*') -and ([string]$prop.UninstallString -like '*AnthropicClaude*'))
+    if (-not $isClaudeExeEntry) { continue }
+    $installLocation = [string]$prop.InstallLocation
+    if (Test-ClaudeExeInstallAlive $installLocation) {
+      Write-Output "Keeping live Claude Desktop EXE uninstall entry: $keyName"
+      continue
+    }
+    if ($prop.PSPath) {
+      try {
+        Remove-Item -LiteralPath $prop.PSPath -Recurse -Force -ErrorAction Stop
+        $removed += if ($installLocation) { "$keyName ($installLocation)" } else { $keyName }
+      } catch {
+        Write-Output "Unable to remove stale Claude Desktop EXE uninstall entry $keyName: $($_.Exception.Message)"
+      }
+    }
+  }
+}
+if ($removed.Count -gt 0) {
+  Write-Output "Removed stale Claude Desktop EXE uninstall entries: $($removed -join ', ')"
+} else {
+  Write-Output "No stale Claude Desktop EXE uninstall entries found."
 }
 "#;
 
@@ -1472,11 +1625,40 @@ $roots = @(
   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
 )
 $entry = $null
+$installRoots = @()
+function Add-ClaudeInstallRoot {
+  param([string]$Path)
+  if (-not $script:installRoots) { $script:installRoots = @() }
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  try {
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+  } catch {
+    return
+  }
+  $leaf = [System.IO.Path]::GetFileName($full)
+  $localAppData = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd('\')
+  $programFiles = if ($env:ProgramFiles) { [System.IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\') } else { '' }
+  $programFilesX86 = if (${env:ProgramFiles(x86)}) { [System.IO.Path]::GetFullPath(${env:ProgramFiles(x86)}).TrimEnd('\') } else { '' }
+  $underAllowedRoot =
+    $full.StartsWith($localAppData + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
+    ($programFiles -and $full.StartsWith($programFiles + '\', [System.StringComparison]::OrdinalIgnoreCase)) -or
+    ($programFilesX86 -and $full.StartsWith($programFilesX86 + '\', [System.StringComparison]::OrdinalIgnoreCase))
+  $looksLikeClaudeRoot =
+    $leaf -like '*Claude*' -or
+    $leaf -like '*Anthropic*' -or
+    (Test-Path -LiteralPath (Join-Path $full 'Claude.exe')) -or
+    (Test-Path -LiteralPath (Join-Path $full 'Update.exe')) -or
+    (Get-ChildItem -LiteralPath $full -Directory -Filter 'app-*' -ErrorAction SilentlyContinue | Select-Object -First 1)
+  if ($underAllowedRoot -and $looksLikeClaudeRoot -and -not $installRoots.Contains($full)) {
+    $script:installRoots += $full
+  }
+}
 foreach ($root in $roots) {
   $props = Get-ItemProperty $root -ErrorAction SilentlyContinue
   foreach ($prop in $props) {
     if ($prop.DisplayName -and $prop.DisplayName -like '*Claude*') {
       $entry = $prop
+      Add-ClaudeInstallRoot ([string]$prop.InstallLocation)
       break
     }
   }
@@ -1512,25 +1694,46 @@ if ($entry -and $entry.UninstallString) {
   } else {
     Write-Output "Uninstaller not found at $exe, attempting direct removal"
   }
+  if ($entry.PSPath) {
+    Remove-Item -LiteralPath $entry.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+  }
 } else {
   Write-Output "No registry uninstall entry found, attempting direct removal"
 }
 $claudeDir = Join-Path $env:LOCALAPPDATA 'AnthropicClaude'
-if (Test-Path -LiteralPath $claudeDir) {
-  Write-Output "Removing $claudeDir"
-  Remove-Item -LiteralPath $claudeDir -Recurse -Force -ErrorAction SilentlyContinue
-}
+Add-ClaudeInstallRoot $claudeDir
+$programsClaudeDir = Join-Path $env:LOCALAPPDATA 'Programs\Claude'
+Add-ClaudeInstallRoot $programsClaudeDir
 $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Claude.lnk'
 if (Test-Path -LiteralPath $startMenu) {
   Remove-Item -LiteralPath $startMenu -Force -ErrorAction SilentlyContinue
 }
-Write-Output "Done"
+$remainingRoots = @()
+foreach ($root in $installRoots) {
+  if (Test-Path -LiteralPath $root) {
+    Write-Output "Removing $root"
+    try {
+      Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+    } catch {
+      Write-Output ("Failed to remove {0}: {1}" -f $root, [string]$_.Exception.Message)
+    }
+  }
+  if (Test-Path -LiteralPath $root) {
+    $remainingRoots += [string]$root
+  }
+}
+if ($remainingRoots.Count -gt 0) {
+  Write-Error ('Claude Desktop remaining install roots: ' + ($remainingRoots -join '; '))
+  exit 1
+}
+Write-Output "Done; Claude Desktop install files removed and verified."
 "#;
 
 fn run_claude_desktop_exe_uninstall(
     progress: Option<&InstallProgressContext>,
 ) -> Result<InstallCommandOutput, String> {
-    run_action_command(
+    stop_claude_desktop_windows_background_services(progress)?;
+    let mut output = run_action_command(
         "powershell",
         &[
             "-NoProfile",
@@ -1540,7 +1743,393 @@ fn run_claude_desktop_exe_uninstall(
             CLAUDE_DESKTOP_WINDOWS_EXE_UNINSTALL_SCRIPT,
         ],
         progress,
+    )?;
+    let service_output = remove_claude_desktop_windows_background_services(progress)?;
+    output.success = output.success && service_output.success;
+    output.exit_code = if output.success { Some(0) } else { Some(1) };
+    append_output_tail(&mut output.stdout_tail, &service_output.stdout_tail);
+    append_output_tail(&mut output.stderr_tail, &service_output.stderr_tail);
+    Ok(output)
+}
+
+fn run_claude_desktop_windows_uninstall(
+    install_kind: Option<&str>,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(failed_output(
+            "Claude Desktop Windows uninstall is only supported on Windows.",
+        ));
+    }
+
+    match install_kind {
+        Some("exe") => run_claude_desktop_exe_uninstall(progress),
+        Some("msix") => run_claude_desktop_msix_uninstall(progress),
+        _ => {
+            if detector::claude_desktop_install_kinds().exe.installed {
+                run_claude_desktop_exe_uninstall(progress)
+            } else {
+                run_claude_desktop_msix_uninstall(progress)
+            }
+        }
+    }
+}
+
+fn resolve_claude_desktop_windows_uninstall_kind(
+    requested: Option<&str>,
+    install_kinds: &ClaudeDesktopInstallKinds,
+) -> Option<String> {
+    match requested {
+        Some("exe") | Some("msix") => requested.map(ToString::to_string),
+        _ if install_kinds.exe.installed => Some("exe".to_string()),
+        _ if install_kinds.msix.installed => Some("msix".to_string()),
+        _ => requested.map(ToString::to_string),
+    }
+}
+
+fn claude_desktop_windows_uninstall_verified(
+    install_kind: Option<&str>,
+    install_kinds: &ClaudeDesktopInstallKinds,
+    registered_msix_installed: bool,
+) -> bool {
+    match install_kind {
+        Some("exe") => !install_kinds.exe.installed,
+        Some("msix") => !registered_msix_installed,
+        _ => !install_kinds.exe.installed && !registered_msix_installed,
+    }
+}
+
+fn claude_desktop_windows_uninstall_success_message(
+    tool_name: &str,
+    install_kind: Option<&str>,
+    install_kinds: &ClaudeDesktopInstallKinds,
+    registered_msix_installed: bool,
+) -> String {
+    match install_kind {
+        Some("msix") if install_kinds.exe.installed => {
+            format!("{tool_name} MSIX install removed. Native EXE install is still present.")
+        }
+        Some("exe") if registered_msix_installed => {
+            format!("{tool_name} native EXE install removed. MSIX install is still present.")
+        }
+        Some("exe") if install_kinds.msix.installed => {
+            format!("{tool_name} native EXE install removed. MSIX/AppX residue is still detected.")
+        }
+        Some("msix") => format!("{tool_name} MSIX install removed."),
+        Some("exe") => format!("{tool_name} native EXE install removed."),
+        _ => format!("{tool_name} uninstalled."),
+    }
+}
+
+fn run_claude_desktop_msix_uninstall(
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    emit_install_progress(
+        progress,
+        "stdout",
+        "Removing Claude Desktop MSIX/AppX package directly...\n".to_string(),
+        None,
+        false,
+    );
+    stop_claude_desktop_windows_background_services(progress)?;
+    let report = match package::remove_first_msix_package(
+        detector::claude_desktop_windows_package_identities(),
+    ) {
+        Ok(report) => report,
+        Err(err) => return Ok(failed_output_with_progress(&err, progress)),
+    };
+    for note in &report.notes {
+        emit_install_progress(progress, "stdout", format!("{note}\n"), None, false);
+    }
+    let mut notes = report.notes.clone();
+    let mut message = report.message.clone();
+    let mut success = report.success;
+    if report.success {
+        emit_install_progress(
+            progress,
+            "stdout",
+            "Removing Claude Desktop MSIX/AppX package files...\n".to_string(),
+            None,
+            false,
+        );
+        let cleanup = match package::remove_claude_msix_payloads(
+            detector::claude_desktop_windows_package_identities(),
+            CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX,
+        ) {
+            Ok(cleanup) => cleanup,
+            Err(err) => return Ok(failed_output_with_progress(&err, progress)),
+        };
+        for note in &cleanup.notes {
+            emit_install_progress(progress, "stdout", format!("{note}\n"), None, false);
+        }
+        message = format!("{} {}", report.message, cleanup.message);
+        notes.extend(cleanup.notes);
+        if !cleanup.removed_payloads.is_empty() {
+            notes.push(format!(
+                "Removed Claude Desktop MSIX/AppX package files: {}",
+                cleanup.removed_payloads.join("; ")
+            ));
+        }
+        if !cleanup.remaining_payloads.is_empty() {
+            notes.push(format!(
+                "Claude Desktop MSIX/AppX package files remain: {}",
+                cleanup.remaining_payloads.join("; ")
+            ));
+        }
+        success = cleanup.success;
+    }
+    let service_output = remove_claude_desktop_windows_background_services(progress)?;
+    if !service_output.stdout_tail.is_empty() {
+        notes.push(service_output.stdout_tail.clone());
+        message = format!("{} {}", message, service_output.stdout_tail);
+    }
+    if !service_output.stderr_tail.is_empty() {
+        notes.push(service_output.stderr_tail.clone());
+    }
+    success = success && service_output.success;
+    let exit_code = if success { 0 } else { 1 };
+    emit_install_progress(progress, "status", String::new(), Some(exit_code), true);
+    Ok(InstallCommandOutput {
+        success,
+        exit_code: Some(exit_code),
+        stdout_tail: message,
+        stderr_tail: if success {
+            String::new()
+        } else if notes
+            .iter()
+            .any(|note| note.contains("MSIX/AppX package files remain"))
+        {
+            notes.join("\n")
+        } else if notes.iter().any(|note| note.contains("CoworkVMService")) {
+            notes.join("\n")
+        } else {
+            "Claude Desktop MSIX uninstall failed.".to_string()
+        },
+        missing_command: None,
+    })
+}
+
+fn stop_claude_desktop_windows_background_services(
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(InstallCommandOutput {
+            success: true,
+            exit_code: Some(0),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            missing_command: None,
+        });
+    }
+    emit_install_progress(
+        progress,
+        "stdout",
+        "Stopping Claude Desktop background services...\n".to_string(),
+        None,
+        false,
+    );
+    let script = r#"
+$ErrorActionPreference = 'Continue'
+$serviceName = __SERVICE_NAME__
+$processName = __PROCESS_NAME__
+$notes = @()
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($service -and $service.Status -ne 'Stopped') {
+  try {
+    Stop-Service -Name $serviceName -Force -ErrorAction Stop
+    $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(12))
+    $notes += "Stopped $serviceName."
+  } catch {
+    $notes += ("Failed to stop {0}: {1}" -f $serviceName, [string]$_.Exception.Message)
+  }
+}
+Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
+  try {
+    Stop-Process -Id $_.Id -Force -ErrorAction Stop
+    $notes += ("Stopped process {0} ({1})." -f $processName, $_.Id)
+  } catch {
+    $notes += ("Failed to stop process {0} ({1}): {2}" -f $processName, $_.Id, [string]$_.Exception.Message)
+  }
+}
+Start-Sleep -Milliseconds 500
+$stillService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$stillProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
+$success = (($null -eq $stillProcess) -and (($null -eq $stillService) -or $stillService.Status -eq 'Stopped'))
+[pscustomobject]@{
+  success = [bool]$success
+  message = if ($success) { 'Claude Desktop background services stopped.' } else { 'Claude Desktop background services are still running.' }
+  notes = @($notes)
+} | ConvertTo-Json -Compress -Depth 4
+"#
+    .replace(
+        "__SERVICE_NAME__",
+        &ps_single_quote(CLAUDE_DESKTOP_WINDOWS_BACKGROUND_SERVICE),
     )
+    .replace(
+        "__PROCESS_NAME__",
+        &ps_single_quote(CLAUDE_DESKTOP_WINDOWS_BACKGROUND_PROCESS),
+    );
+    run_claude_desktop_windows_service_script(&script, progress)
+}
+
+fn remove_claude_desktop_windows_background_services(
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(InstallCommandOutput {
+            success: true,
+            exit_code: Some(0),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            missing_command: None,
+        });
+    }
+    emit_install_progress(
+        progress,
+        "stdout",
+        "Removing Claude Desktop background service registration...\n".to_string(),
+        None,
+        false,
+    );
+    let script = r#"
+$ErrorActionPreference = 'Continue'
+$serviceName = __SERVICE_NAME__
+$processName = __PROCESS_NAME__
+$notes = @()
+Get-Process -Name $processName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+if ($service) {
+  if ($service.Status -ne 'Stopped') {
+    Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+  }
+  $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
+  if (Test-Path -LiteralPath $sc) {
+    & $sc delete $serviceName | Out-String | ForEach-Object { if ($_.Trim()) { $notes += $_.Trim() } }
+  } else {
+    $notes += 'sc.exe was not found.'
+  }
+}
+Start-Sleep -Seconds 1
+$remainingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$remainingProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
+if ($remainingService) {
+  $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  if (-not (Test-Path -LiteralPath $powershell)) { $powershell = 'powershell.exe' }
+  $elevatedScript = @"
+`$ErrorActionPreference = 'Continue'
+`$serviceName = '$serviceName'
+`$processName = '$processName'
+Get-Process -Name `$processName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+`$svc = Get-Service -Name `$serviceName -ErrorAction SilentlyContinue
+if (`$svc -and `$svc.Status -ne 'Stopped') {
+  Stop-Service -Name `$serviceName -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 1
+}
+`$sc = Join-Path `$env:SystemRoot 'System32\sc.exe'
+if (Test-Path -LiteralPath `$sc) {
+  & `$sc delete `$serviceName | Out-Null
+}
+"@
+  try {
+    $process = Start-Process -FilePath $powershell -ArgumentList @(
+      '-NoLogo',
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      $elevatedScript
+    ) -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) {
+      $notes += ('Elevated CoworkVMService delete exited with code ' + $process.ExitCode)
+    }
+  } catch {
+    $notes += ('Failed to run elevated CoworkVMService delete: ' + [string]$_.Exception.Message)
+  }
+  Start-Sleep -Seconds 1
+  $remainingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+}
+$remainingProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
+$success = ($null -eq $remainingService -and $null -eq $remainingProcess)
+[pscustomobject]@{
+  success = [bool]$success
+  message = if ($success) { 'CoworkVMService removed and verified.' } else { 'CoworkVMService or cowork-svc is still present.' }
+  notes = @($notes)
+} | ConvertTo-Json -Compress -Depth 4
+"#
+    .replace(
+        "__SERVICE_NAME__",
+        &ps_single_quote(CLAUDE_DESKTOP_WINDOWS_BACKGROUND_SERVICE),
+    )
+    .replace(
+        "__PROCESS_NAME__",
+        &ps_single_quote(CLAUDE_DESKTOP_WINDOWS_BACKGROUND_PROCESS),
+    );
+    run_claude_desktop_windows_service_script(&script, progress)
+}
+
+fn run_claude_desktop_windows_service_script(
+    script: &str,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    let json = match run_powershell(script) {
+        Ok(json) => json,
+        Err(err) => {
+            emit_install_progress(progress, "stderr", format!("{err}\n"), None, false);
+            emit_install_progress(progress, "status", String::new(), Some(1), true);
+            return Ok(failed_output(err));
+        }
+    };
+    let report: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse Claude Desktop service cleanup result: {err}"))?;
+    let success = report
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let message = report
+        .get("message")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Claude Desktop service cleanup completed.")
+        .to_string();
+    let notes = report
+        .get("notes")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let mut stdout_tail = message;
+    append_output_tail(&mut stdout_tail, &notes);
+    emit_install_progress(progress, "stdout", format!("{stdout_tail}\n"), None, false);
+    emit_install_progress(
+        progress,
+        "status",
+        String::new(),
+        Some(if success { 0 } else { 1 }),
+        true,
+    );
+    Ok(InstallCommandOutput {
+        success,
+        exit_code: Some(if success { 0 } else { 1 }),
+        stdout_tail,
+        stderr_tail: if success { String::new() } else { notes },
+        missing_command: None,
+    })
+}
+
+fn append_output_tail(target: &mut String, addition: &str) {
+    if addition.trim().is_empty() {
+        return;
+    }
+    if !target.trim().is_empty() {
+        target.push('\n');
+    }
+    target.push_str(addition.trim());
 }
 
 #[derive(Debug, Deserialize)]
@@ -1792,6 +2381,154 @@ fn failed_output_with_progress(
     failed_output(message)
 }
 
+fn claude_desktop_msix_temp_dir() -> PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "codestudio-claude-msix-{}-{suffix}",
+        std::process::id()
+    ))
+}
+
+fn run_claude_desktop_windows_msix_install(
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(failed_output(
+            "Claude Desktop Windows App install is only supported on Windows.",
+        ));
+    }
+    if !powershell_available() {
+        return Ok(missing_command_output("powershell"));
+    }
+
+    remove_stale_claude_desktop_windows_exe_uninstall_entries(progress)?;
+
+    let temp_root = claude_desktop_msix_temp_dir();
+    let target = temp_root.join("Claude.msix");
+    let download_context = progress.map(|context| InstallProgressContext {
+        root_tool_id: context.root_tool_id,
+        tool_id: context.tool_id,
+        tool_name: context.tool_name,
+        stage: context.stage,
+        command: context.command,
+        install_kind: context.install_kind,
+        progress_phase: Some("downloading"),
+        progress_message: Some("claudeDesktop.progressDownloading"),
+        progress_step: Some(2),
+        progress_step_total: Some(3),
+        progress: context.progress,
+    });
+
+    emit_install_progress(
+        progress,
+        "stdout",
+        "Downloading Claude Desktop MSIX...\n".to_string(),
+        None,
+        false,
+    );
+    if let Err(err) = download_url_to_file(
+        CLAUDE_DESKTOP_WINDOWS_MSIX_URL,
+        &target,
+        download_context.as_ref(),
+    ) {
+        let _ = fs::remove_dir_all(&temp_root);
+        return Ok(failed_output_with_progress(&err, progress));
+    }
+
+    let install_context = progress.map(|context| InstallProgressContext {
+        root_tool_id: context.root_tool_id,
+        tool_id: context.tool_id,
+        tool_name: context.tool_name,
+        stage: context.stage,
+        command: context.command,
+        install_kind: context.install_kind,
+        progress_phase: Some("installing"),
+        progress_message: Some("claudeDesktop.progressInstalling"),
+        progress_step: Some(3),
+        progress_step_total: Some(3),
+        progress: context.progress,
+    });
+
+    emit_install_progress(
+        install_context.as_ref(),
+        "stdout",
+        "Installing Claude Desktop MSIX with Add-AppxPackage...\n".to_string(),
+        None,
+        false,
+    );
+    let Some(resolved) = resolve_command("powershell") else {
+        let _ = fs::remove_dir_all(&temp_root);
+        return Ok(missing_command_output("powershell"));
+    };
+    let mut command = hidden_command_with_args(
+        &resolved,
+        &[
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            CLAUDE_DESKTOP_WINDOWS_MSIX_INSTALL_SCRIPT,
+        ],
+    );
+    command.env("CODESTUDIO_CLAUDE_MSIX_PATH", &target);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = run_streaming_command(command, "powershell", install_context.as_ref());
+    let _ = fs::remove_dir_all(&temp_root);
+    output
+}
+
+fn remove_stale_claude_desktop_windows_exe_uninstall_entries(
+    progress: Option<&InstallProgressContext>,
+) -> Result<(), String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(());
+    }
+    emit_install_progress(
+        progress,
+        "stdout",
+        "Checking stale Claude Desktop EXE uninstall registry entries...\n".to_string(),
+        None,
+        false,
+    );
+    let Some(resolved) = resolve_command("powershell") else {
+        return Err(
+            "PowerShell is required to clean stale Claude Desktop EXE entries.".to_string(),
+        );
+    };
+    let mut command = hidden_command_with_args(
+        &resolved,
+        &[
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            CLAUDE_DESKTOP_WINDOWS_STALE_EXE_UNINSTALL_CLEANUP_SCRIPT,
+        ],
+    );
+    let output = command
+        .output()
+        .map_err(|err| format!("Failed to clean stale Claude Desktop EXE entries: {err}"))?;
+    let stdout = decode(&output.stdout);
+    if !stdout.trim().is_empty() {
+        emit_install_progress(progress, "stdout", stdout.clone(), None, false);
+    }
+    let stderr = decode(&output.stderr);
+    if !stderr.trim().is_empty() {
+        emit_install_progress(progress, "stderr", stderr.clone(), None, false);
+    }
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to clean stale Claude Desktop EXE uninstall entries: {}",
+            tail(&stderr)
+        ))
+    }
+}
+
 fn read_claude_desktop_latest_metadata(url: &str) -> Result<ClaudeDesktopLatestMetadata, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -1892,10 +2629,10 @@ fn download_url_to_file(
     let mut response = client
         .get(url)
         .send()
-        .map_err(|err| format!("Failed to download Claude Desktop DMG: {err}"))?;
+        .map_err(|err| format!("Failed to download installer: {err}"))?;
     if !response.status().is_success() {
         return Err(format!(
-            "Failed to download Claude Desktop DMG: HTTP {}",
+            "Failed to download installer: HTTP {}",
             response.status()
         ));
     }
@@ -1908,14 +2645,15 @@ fn download_url_to_file(
     loop {
         let size = response
             .read(&mut buffer)
-            .map_err(|err| format!("Failed while downloading Claude Desktop DMG: {err}"))?;
+            .map_err(|err| format!("Failed while downloading installer: {err}"))?;
         if size == 0 {
             break;
         }
         file.write_all(&buffer[..size])
-            .map_err(|err| format!("Failed to write Claude Desktop DMG: {err}"))?;
+            .map_err(|err| format!("Failed to write installer: {err}"))?;
         downloaded += size as u64;
         if last_emit.elapsed() >= Duration::from_millis(750) {
+            emit_install_download_progress(progress, downloaded, total);
             emit_install_progress(
                 progress,
                 "stdout",
@@ -1927,8 +2665,9 @@ fn download_url_to_file(
         }
     }
     file.flush()
-        .map_err(|err| format!("Failed to finish Claude Desktop DMG download: {err}"))?;
-    fs::rename(&temp, path).map_err(|err| format!("Failed to save Claude Desktop DMG: {err}"))?;
+        .map_err(|err| format!("Failed to finish installer download: {err}"))?;
+    fs::rename(&temp, path).map_err(|err| format!("Failed to save downloaded file: {err}"))?;
+    emit_install_download_progress(progress, downloaded, total);
     emit_install_progress(
         progress,
         "stdout",
@@ -1937,6 +2676,41 @@ fn download_url_to_file(
         false,
     );
     Ok(())
+}
+
+fn emit_install_download_progress(
+    context: Option<&InstallProgressContext>,
+    downloaded: u64,
+    total: Option<u64>,
+) {
+    let Some(context) = context else {
+        return;
+    };
+    let Some(progress) = context.progress else {
+        return;
+    };
+    let percent = total.and_then(|total| {
+        (total > 0).then(|| ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0))
+    });
+    progress(ToolInstallProgress {
+        root_tool_id: context.root_tool_id.to_string(),
+        tool_id: context.tool_id.to_string(),
+        tool_name: context.tool_name.to_string(),
+        stage: context.stage.to_string(),
+        command: context.command.to_string(),
+        install_kind: context.install_kind.map(ToString::to_string),
+        phase: context.progress_phase.map(ToString::to_string),
+        message: context.progress_message.map(ToString::to_string),
+        downloaded: Some(downloaded),
+        total,
+        percent,
+        step: context.progress_step,
+        step_total: context.progress_step_total,
+        stream: "status".to_string(),
+        chunk: String::new(),
+        done: false,
+        exit_code: None,
+    });
 }
 
 fn format_download_progress(downloaded: u64, total: Option<u64>) -> String {
@@ -2092,14 +2866,31 @@ fn run_streaming_command(
     let status = child
         .wait()
         .map_err(|err| format!("Failed to wait for install command: {err}"))?;
-    emit_install_progress(progress, "status", String::new(), status.code(), true);
+    let exit_code = status.code();
+    emit_install_progress(progress, "status", String::new(), exit_code, true);
     Ok(InstallCommandOutput {
         success: status.success(),
-        exit_code: status.code(),
+        exit_code,
         stdout_tail: tail(&stdout),
-        stderr_tail: tail(&stderr),
+        stderr_tail: describe_command_failure(missing_command_name, exit_code, &stderr),
         missing_command: None,
     })
+}
+
+fn describe_command_failure(command_name: &str, exit_code: Option<i32>, stderr: &str) -> String {
+    let stderr_tail = tail(stderr);
+    if command_name.eq_ignore_ascii_case("winget")
+        && exit_code == Some(WINGET_MULTIPLE_PACKAGES_EXIT_CODE)
+    {
+        let note = format!(
+            "winget returned {WINGET_MULTIPLE_PACKAGES_HEX}: Multiple packages match the uninstall query. Refresh detection and uninstall the specific Claude Desktop install kind from CodeStudio Lite, or remove the matching Claude package from Windows Settings."
+        );
+        if stderr_tail.is_empty() {
+            return note;
+        }
+        return format!("{stderr_tail}\n{note}");
+    }
+    stderr_tail
 }
 
 fn read_stream_chunks<R: Read + Send + 'static>(
@@ -2141,6 +2932,14 @@ fn emit_install_progress(
         tool_name: context.tool_name.to_string(),
         stage: context.stage.to_string(),
         command: context.command.to_string(),
+        install_kind: context.install_kind.map(ToString::to_string),
+        phase: context.progress_phase.map(ToString::to_string),
+        message: context.progress_message.map(ToString::to_string),
+        downloaded: None,
+        total: None,
+        percent: None,
+        step: context.progress_step,
+        step_total: context.progress_step_total,
         stream: stream.to_string(),
         chunk,
         done,
@@ -2243,6 +3042,7 @@ fn manager_label(action: &InstallAction) -> &'static str {
         InstallAction::NpmGlobal(_) => "npm",
         InstallAction::Winget(_) => "winget",
         InstallAction::MacosDmgApp { .. } => "official-dmg",
+        InstallAction::ClaudeDesktopWindowsMsix => "official-msix",
         InstallAction::PowerShellScript(_, _) => "powershell",
         InstallAction::ShellScript(_, _) => "shell",
         InstallAction::InteractiveShellScript(_, _) => "terminal",
@@ -2262,6 +3062,11 @@ fn command_preview(action: &InstallAction) -> String {
         }
         InstallAction::MacosDmgApp { label, .. } => {
             format!("Download and install the latest {label} from downloads.claude.ai")
+        }
+        InstallAction::ClaudeDesktopWindowsMsix => {
+            format!(
+                "Download and install the latest Claude Desktop MSIX from {CLAUDE_DESKTOP_WINDOWS_MSIX_URL} with Add-AppxPackage -Path"
+            )
         }
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
@@ -2291,6 +3096,11 @@ fn update_command_preview(action: &InstallAction) -> String {
         InstallAction::MacosDmgApp { label, .. } => {
             format!("Download and install the latest {label} from downloads.claude.ai")
         }
+        InstallAction::ClaudeDesktopWindowsMsix => {
+            format!(
+                "Download and install the latest Claude Desktop MSIX from {CLAUDE_DESKTOP_WINDOWS_MSIX_URL} with Add-AppxPackage -Path"
+            )
+        }
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
         }
@@ -2319,6 +3129,7 @@ fn uninstall_supported_for_tool(tool_id: &str, action: &InstallAction) -> bool {
         InstallAction::NpmGlobal(_)
             | InstallAction::Winget(_)
             | InstallAction::MacosDmgApp { .. }
+            | InstallAction::ClaudeDesktopWindowsMsix
             | InstallAction::VsCodeExtension(_)
     )
 }
@@ -2333,7 +3144,10 @@ fn update_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> Str
     update_command_preview(action)
 }
 
-fn uninstall_command_preview_for_tool(_tool_id: &str, action: &InstallAction) -> String {
+fn uninstall_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> String {
+    if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
+        return CLAUDE_DESKTOP_WINDOWS_UNINSTALL_COMMAND.to_string();
+    }
     match action {
         InstallAction::NpmGlobal(package) => format!("npm uninstall -g {package}"),
         InstallAction::Winget(package_id) => {
@@ -2346,6 +3160,7 @@ fn uninstall_command_preview_for_tool(_tool_id: &str, action: &InstallAction) ->
             format!("code --uninstall-extension {extension_id}")
         }
         InstallAction::PowerShellScript(_, _)
+        | InstallAction::ClaudeDesktopWindowsMsix
         | InstallAction::ShellScript(_, _)
         | InstallAction::InteractiveShellScript(_, _)
         | InstallAction::ProvidedByTool(_)
@@ -2359,6 +3174,7 @@ fn action_requires_admin(action: &InstallAction) -> bool {
     match action {
         InstallAction::Winget(_) => true,
         InstallAction::MacosDmgApp { destination, .. } => destination.starts_with("/Applications/"),
+        InstallAction::ClaudeDesktopWindowsMsix => false,
         InstallAction::ShellScript(_, script) => script.contains("sudo "),
         InstallAction::InteractiveShellScript(_, script) => script.contains("sudo "),
         _ => false,
@@ -2482,7 +3298,7 @@ fn tail(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::{ConfigState, ToolCategory};
+    use crate::core::types::{ConfigState, DesktopInstallKindInfo, ToolCategory};
 
     #[test]
     fn npm_tool_plan_is_whitelisted() {
@@ -2657,11 +3473,213 @@ mod tests {
         let command = update_command_preview_for_tool("claude-desktop", &definition.action);
 
         if cfg!(target_os = "windows") {
-            assert!(command.contains("downloads.claude.ai"));
+            assert!(command.contains("claude.ai/api/desktop/win32/x64/msix/latest/redirect"));
+            assert!(command.contains("Add-AppxPackage -Path"));
             assert!(!command.contains("winget"));
+            assert!(!command.contains("win32/x64/.latest"));
+            assert!(!command.contains("Claude-$hash.exe"));
         } else {
             assert_eq!(command, update_command_preview(&definition.action));
         }
+    }
+
+    #[test]
+    fn claude_desktop_windows_msix_install_cleans_stale_exe_registry_entries_first() {
+        let source = include_str!("tool_installer.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let install_function = production
+            .split("fn run_claude_desktop_windows_msix_install")
+            .nth(1)
+            .and_then(|body| {
+                body.split("fn remove_stale_claude_desktop_windows_exe_uninstall_entries")
+                    .next()
+            })
+            .expect("MSIX install function");
+        let cleanup_script = CLAUDE_DESKTOP_WINDOWS_STALE_EXE_UNINSTALL_CLEANUP_SCRIPT;
+
+        let cleanup_index = install_function
+            .find("remove_stale_claude_desktop_windows_exe_uninstall_entries")
+            .expect("MSIX install should clean stale EXE uninstall entries");
+        let download_index = install_function
+            .find("download_url_to_file")
+            .expect("MSIX install should download the official package");
+        assert!(
+            cleanup_index < download_index,
+            "stale EXE registry cleanup must happen before downloading/installing the MSIX"
+        );
+        assert!(cleanup_script.contains("AnthropicClaude"));
+        assert!(cleanup_script.contains("InstallLocation"));
+        assert!(cleanup_script.contains("Test-ClaudeExeInstallAlive"));
+        assert!(cleanup_script.contains("resources\\app.asar"));
+        assert!(cleanup_script.contains("Keeping live Claude Desktop EXE uninstall entry"));
+        assert!(cleanup_script.contains("Remove-Item -LiteralPath $prop.PSPath"));
+    }
+
+    #[test]
+    fn claude_desktop_windows_uninstall_uses_specific_package_removal() {
+        let definition = install_definition("claude-desktop").expect("definition");
+        let command = uninstall_command_preview_for_tool("claude-desktop", &definition.action);
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(command, CLAUDE_DESKTOP_WINDOWS_UNINSTALL_COMMAND);
+            assert!(!command.contains("winget"));
+        } else {
+            assert!(!command.is_empty());
+        }
+    }
+
+    #[test]
+    fn claude_desktop_windows_uninstall_scripts_delete_and_verify_install_files() {
+        let exe_script = CLAUDE_DESKTOP_WINDOWS_EXE_UNINSTALL_SCRIPT;
+
+        assert!(exe_script.contains("InstallLocation"));
+        assert!(exe_script.contains("$installRoots"));
+        assert!(exe_script.contains("Remove-Item -LiteralPath $root -Recurse -Force"));
+        assert!(exe_script.contains("Test-Path -LiteralPath $root"));
+        assert!(exe_script.contains("remaining install roots"));
+
+        let source = include_str!("tool_installer.rs");
+        assert!(source.contains("remove_claude_msix_payloads"));
+        assert!(source.contains("remaining_payloads"));
+        assert!(source.contains("MSIX/AppX package files remain"));
+    }
+
+    #[test]
+    fn claude_desktop_windows_uninstall_stops_cowork_service_before_file_cleanup() {
+        let source = include_str!("tool_installer.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        let remove_service_function = production
+            .split("fn remove_claude_desktop_windows_background_services")
+            .nth(1)
+            .and_then(|body| {
+                body.split("fn run_claude_desktop_windows_service_script")
+                    .next()
+            })
+            .expect("service removal function");
+
+        assert!(production.contains("CoworkVMService"));
+        assert!(production.contains("cowork-svc"));
+        assert!(production.contains("stop_claude_desktop_windows_background_services"));
+        assert!(production.contains("remove_claude_desktop_windows_background_services"));
+        assert!(remove_service_function.contains("sc.exe"));
+        assert!(remove_service_function.contains("delete"));
+        assert!(remove_service_function.contains("Start-Process"));
+        assert!(remove_service_function.contains("-Verb RunAs"));
+    }
+
+    #[test]
+    fn claude_desktop_windows_uninstall_verifies_selected_install_kind_only() {
+        let after_msix_uninstall = ClaudeDesktopInstallKinds {
+            msix: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
+            exe: DesktopInstallKindInfo {
+                installed: true,
+                version: Some("1.14271.0".to_string()),
+                path: Some(r"C:\Users\test\AppData\Local\AnthropicClaude\Claude.exe".to_string()),
+            },
+        };
+        assert!(claude_desktop_windows_uninstall_verified(
+            Some("msix"),
+            &after_msix_uninstall,
+            false
+        ));
+
+        let after_exe_uninstall = ClaudeDesktopInstallKinds {
+            msix: DesktopInstallKindInfo {
+                installed: true,
+                version: Some("1.14271.0".to_string()),
+                path: Some(
+                    r"C:\Program Files\WindowsApps\Claude_1.14271.0.0_x64__pzs8sxrjxfjjc"
+                        .to_string(),
+                ),
+            },
+            exe: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
+        };
+        assert!(claude_desktop_windows_uninstall_verified(
+            Some("exe"),
+            &after_exe_uninstall,
+            true
+        ));
+    }
+
+    #[test]
+    fn claude_desktop_windows_uninstall_message_mentions_remaining_other_kind() {
+        let after_msix_uninstall = ClaudeDesktopInstallKinds {
+            msix: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
+            exe: DesktopInstallKindInfo {
+                installed: true,
+                version: Some("1.14271.0".to_string()),
+                path: Some(r"C:\Users\test\AppData\Local\AnthropicClaude\Claude.exe".to_string()),
+            },
+        };
+
+        assert_eq!(
+            claude_desktop_windows_uninstall_success_message(
+                "Claude Desktop",
+                Some("msix"),
+                &after_msix_uninstall,
+                false,
+            ),
+            "Claude Desktop MSIX install removed. Native EXE install is still present."
+        );
+    }
+
+    #[test]
+    fn claude_desktop_windows_uninstall_message_separates_stale_msix_residue() {
+        let after_exe_uninstall = ClaudeDesktopInstallKinds {
+            msix: DesktopInstallKindInfo {
+                installed: true,
+                version: Some("1.14271.0".to_string()),
+                path: Some(
+                    r"C:\Program Files\WindowsApps\Claude_1.14271.0.0_x64__pzs8sxrjxfjjc"
+                        .to_string(),
+                ),
+            },
+            exe: DesktopInstallKindInfo {
+                installed: false,
+                version: None,
+                path: None,
+            },
+        };
+
+        assert_eq!(
+            claude_desktop_windows_uninstall_success_message(
+                "Claude Desktop",
+                Some("exe"),
+                &after_exe_uninstall,
+                false,
+            ),
+            "Claude Desktop native EXE install removed. MSIX/AppX residue is still detected."
+        );
+    }
+
+    #[test]
+    fn winget_multiple_package_exit_code_gets_explained() {
+        let stderr = describe_command_failure(
+            "winget",
+            Some(WINGET_MULTIPLE_PACKAGES_EXIT_CODE),
+            "No installed package found matching input criteria.",
+        );
+
+        assert!(stderr.contains(WINGET_MULTIPLE_PACKAGES_HEX));
+        assert!(stderr.contains("Multiple packages match"));
     }
 
     #[test]
@@ -2680,6 +3698,11 @@ mod tests {
             tool_name: "Node.js LTS",
             stage: "prerequisite",
             command: "winget install OpenJS.NodeJS.LTS",
+            install_kind: None,
+            progress_phase: None,
+            progress_message: None,
+            progress_step: None,
+            progress_step_total: None,
             progress: Some(&progress),
         };
 

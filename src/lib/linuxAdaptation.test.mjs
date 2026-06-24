@@ -18,10 +18,11 @@ test("Linux detection and UI do not expose desktop client panels", () => {
   assert.match(detector, /fn supports_claude_desktop_client_for_platform\(platform: &str\) -> bool/);
   assert.match(detector, /linux_platform_does_not_track_claude_desktop_client/);
   assert.match(detector, /tool\.id != "claude-desktop" \|\| supports_claude_desktop_client\(\)/);
- assert.match(app, /desktopClientPagesAvailable/);
+  assert.match(app, /desktopClientPagesAvailable/);
   assert.match(app, /desktopClientPagesAvailable = \["windows", "macos"\]\.includes\(snapshot\?\.platform \?\? ""\)/);
   assert.match(app, /!\["codexClient", "claudeDesktop"\]\.includes\(item\.id\) \|\| desktopClientPagesAvailable/);
-  assert.match(app, /\["codexClient", "claudeDesktop"\]\.includes\(route\) && !desktopClientPagesAvailable/);
+  assert.match(app, /function desktopClientRouteAllowed\(currentRoute: Route\)/);
+  assert.match(app, /\["codexClient", "claudeDesktop"\]\.includes\(route\) && !desktopClientRouteAllowed\(route\)/);
   assert.match(dashboard, /tool\.id === "codex-app"/);
 });
 

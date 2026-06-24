@@ -13,11 +13,15 @@
     restartGateway,
     startGateway,
     stopGateway,
+    takePendingClaudeDesktopLaunchAfterRestart,
     updateGatewaySettings
   } from "./lib/api";
   import { appUpdateState, checkForAppUpdate } from "./lib/appUpdateStore";
-  import { refreshClaudeDesktop } from "./lib/claudeDesktopStore";
-  import { refreshCodexClient } from "./lib/codexClientStore";
+  import {
+    ensureClaudeDesktopLoaded,
+    setClaudeDesktopPendingLaunchAfterRestart
+  } from "./lib/claudeDesktopStore";
+  import { ensureCodexClientLoaded } from "./lib/codexClientStore";
   import { setLocale, t } from "./lib/i18n";
   import { applyTheme } from "./lib/theme";
 import { disposeTerminalSession } from "./lib/terminalSessionStore";
@@ -53,6 +57,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
   let dashboardRefreshRunId = 0;
   let visibleRefreshRunId: number | null = null;
   let lastRouteRefreshRoute: Route = route;
+  let pendingClaudeDesktopRouteRestore = false;
 
   // detect_environment now returns local detection immediately and kicks off
   // update checks in the background (npm outdated / winget / claude.ai release).
@@ -74,7 +79,10 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
 
   $: desktopClientPagesAvailable = ["windows", "macos"].includes(snapshot?.platform ?? "");
   $: visibleNavItems = navItems.filter((item) => !["codexClient", "claudeDesktop"].includes(item.id) || desktopClientPagesAvailable);
-  $: if (["codexClient", "claudeDesktop"].includes(route) && !desktopClientPagesAvailable) {
+  $: if (snapshot && pendingClaudeDesktopRouteRestore) {
+    pendingClaudeDesktopRouteRestore = false;
+  }
+  $: if (["codexClient", "claudeDesktop"].includes(route) && !desktopClientRouteAllowed(route)) {
     route = "dashboard";
   }
   $: if (route !== lastRouteRefreshRoute) {
@@ -98,6 +106,10 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
       wizardPrefill = null;
     }
     route = nextRoute;
+  }
+
+  function desktopClientRouteAllowed(currentRoute: Route) {
+    return desktopClientPagesAvailable || (currentRoute === "claudeDesktop" && pendingClaudeDesktopRouteRestore);
   }
 
   function openTerminal() {
@@ -201,6 +213,20 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     });
   }
 
+  async function restorePendingClaudeDesktopLaunch() {
+    try {
+      const pending = await takePendingClaudeDesktopLaunchAfterRestart();
+      if (!pending) {
+        return;
+      }
+      setClaudeDesktopPendingLaunchAfterRestart(pending);
+      pendingClaudeDesktopRouteRestore = true;
+      route = "claudeDesktop";
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   async function refreshSettings() {
     try {
       const settings = await loadAppSettings();
@@ -242,9 +268,9 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     if (currentRoute === "dashboard") {
       await refreshDashboard({ quiet: true, scheduleFollowup: false });
     } else if (currentRoute === "codexClient") {
-      await refreshCodexClient();
+      await ensureCodexClientLoaded();
     } else if (currentRoute === "claudeDesktop") {
-      await refreshClaudeDesktop();
+      await ensureClaudeDesktopLoaded();
     } else if (currentRoute === "profiles" || currentRoute === "gateway") {
       await refreshAfterProfileChange();
     } else if (currentRoute === "settings") {
@@ -327,6 +353,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     applyTheme("system");
     void refreshSettings();
     void loadDashboardWithCache();
+    void restorePendingClaudeDesktopLaunch();
     void checkForAppUpdate();
   });
 

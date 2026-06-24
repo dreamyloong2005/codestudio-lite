@@ -1,7 +1,8 @@
 use crate::core::codex_client::{
     self, CodexClientInstallRequest, CodexClientOperationResult, CodexClientProgress,
     CodexClientSettings, CodexClientStageReport, CodexClientState, CodexClientUninstallRequest,
-    UpdateCodexClientSettingsRequest, CODEX_CLIENT_PROGRESS_EVENT,
+    PlanCodexClientUpdateRequest, StageCodexClientUpdateRequest, UpdateCodexClientSettingsRequest,
+    CODEX_CLIENT_PROGRESS_EVENT,
 };
 use tauri::Emitter;
 
@@ -22,8 +23,10 @@ pub async fn load_cached_codex_client_state() -> Result<Option<CodexClientState>
 }
 
 #[tauri::command]
-pub async fn plan_codex_client_update() -> Result<CodexClientState, String> {
-    tauri::async_runtime::spawn_blocking(codex_client::plan_update)
+pub async fn plan_codex_client_update(
+    request: PlanCodexClientUpdateRequest,
+) -> Result<CodexClientState, String> {
+    tauri::async_runtime::spawn_blocking(move || codex_client::plan_update(request))
         .await
         .map_err(|err| err.to_string())?
 }
@@ -31,9 +34,10 @@ pub async fn plan_codex_client_update() -> Result<CodexClientState, String> {
 #[tauri::command]
 pub async fn stage_codex_client_update(
     app: tauri::AppHandle,
+    request: StageCodexClientUpdateRequest,
 ) -> Result<CodexClientStageReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        codex_client::stage_update_with_progress(|progress| emit_progress(&app, progress))
+        codex_client::stage_update_with_progress(request, |progress| emit_progress(&app, progress))
     })
     .await
     .map_err(|err| err.to_string())?

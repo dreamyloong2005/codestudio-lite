@@ -17,7 +17,10 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering as AtomicOrdering},
+    Mutex, OnceLock,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use zip::ZipArchive;
@@ -40,6 +43,7 @@ const CODEX_CLIENT_MARKER_STATE_KEY: &str = "codex_client.managed_marker";
 const CODEX_PATCH_INJECTION_RETRY_COUNT: usize = 30;
 const CODEX_PATCH_INJECTION_RETRY_MS: u64 = 500;
 pub const CODEX_CLIENT_PROGRESS_EVENT: &str = "codex-client://progress";
+static DOWNLOAD_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +143,7 @@ pub struct CodexClientPlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexClientState {
+    pub install_kind: String,
     pub generated_at: String,
     pub platform: String,
     pub settings: CodexClientSettings,
@@ -155,6 +160,7 @@ pub struct CodexClientState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexClientStageReport {
+    pub install_kind: String,
     pub up_to_date: bool,
     pub staged_path: Option<String>,
     pub package_moniker: String,
@@ -168,6 +174,7 @@ pub struct CodexClientStageReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexClientProgress {
+    pub install_kind: String,
     pub phase: String,
     pub message: String,
     pub downloaded: Option<u64>,
@@ -180,6 +187,7 @@ pub struct CodexClientProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexClientOperationResult {
+    pub install_kind: String,
     pub success: bool,
     pub action: String,
     pub message: String,
@@ -213,6 +221,20 @@ pub struct CodexClientInstallRequest {
     /// Which install kind to use ("msix" or "portable"). Overrides the
     /// persisted windows_install_mode setting so the page tab selection drives
     /// the install route. When None, the persisted setting is used as before.
+    #[serde(default)]
+    pub install_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanCodexClientUpdateRequest {
+    #[serde(default)]
+    pub install_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StageCodexClientUpdateRequest {
     #[serde(default)]
     pub install_kind: Option<String>,
 }
@@ -384,16 +406,25 @@ pub fn load_cached_state() -> Option<CodexClientState> {
 }
 
 pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> {
+    inspect_state_for_install_kind(include_network, None)
+}
+
+fn inspect_state_for_install_kind(
+    include_network: bool,
+    install_kind: Option<&str>,
+) -> Result<CodexClientState, String> {
     let settings = load_settings()?;
-    let installed = detect_installed(&settings);
+    let install_kind = normalize_install_kind(install_kind, &settings);
+    let route_settings = settings_for_install_kind(settings.clone(), &install_kind);
+    let installed = detect_installed_for_kind(&route_settings, &install_kind);
     let release = if include_network {
-        Some(load_release(&settings)?)
+        Some(load_release(&route_settings)?)
     } else {
         None
     };
     let plan = release
         .as_ref()
-        .map(|release| build_plan(&settings, installed.as_ref(), release))
+        .map(|release| build_plan(&route_settings, installed.as_ref(), release))
         .transpose()?;
     let install_class = install_class(installed.as_ref());
     let mut notes = vec![
@@ -410,6 +441,7 @@ pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> 
     }
 
     let state = CodexClientState {
+        install_kind: install_kind.clone(),
         generated_at: Utc::now().to_rfc3339(),
         platform: platform_label(),
         settings,
@@ -427,20 +459,27 @@ pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> 
     Ok(state)
 }
 
-pub fn plan_update() -> Result<CodexClientState, String> {
-    inspect_state(true)
+pub fn plan_update(request: PlanCodexClientUpdateRequest) -> Result<CodexClientState, String> {
+    inspect_state_for_install_kind(true, request.install_kind.as_deref())
 }
 
 pub fn stage_update() -> Result<CodexClientStageReport, String> {
-    stage_update_with_progress(|_| {})
+    stage_update_with_progress(StageCodexClientUpdateRequest::default(), |_| {})
 }
 
-pub fn stage_update_with_progress<F>(on_progress: F) -> Result<CodexClientStageReport, String>
+pub fn stage_update_with_progress<F>(
+    request: StageCodexClientUpdateRequest,
+    on_progress: F,
+) -> Result<CodexClientStageReport, String>
 where
     F: Fn(CodexClientProgress),
 {
+    let mut settings = load_settings()?;
+    let install_kind = normalize_install_kind(request.install_kind.as_deref(), &settings);
+    settings = settings_for_install_kind(settings, &install_kind);
     emit_step_progress(
         &on_progress,
+        &install_kind,
         "preparing",
         "Reading mirror manifest and checksums...",
         None,
@@ -448,11 +487,10 @@ where
         Some(1),
         Some(4),
     );
-    let settings = load_settings()?;
     let release = load_release(&settings)?;
-    let installed = detect_installed(&settings);
+    let installed = detect_installed_for_kind(&settings, &install_kind);
     let plan = build_plan(&settings, installed.as_ref(), &release)?;
-    stage_from_plan(&release, &plan, &on_progress)
+    stage_from_plan(&install_kind, &release, &plan, &on_progress)
 }
 
 pub fn install_or_update(
@@ -474,8 +512,12 @@ where
         );
     }
 
+    let mut settings = load_settings()?;
+    let install_kind = normalize_install_kind(request.install_kind.as_deref(), &settings);
+    settings = settings_for_install_kind(settings, &install_kind);
     emit_step_progress(
         &on_progress,
+        &install_kind,
         "preparing",
         "Confirming install state and update plan...",
         None,
@@ -483,17 +525,9 @@ where
         Some(1),
         Some(7),
     );
-    let mut settings = load_settings()?;
     validate_install_target(&settings)?;
-    // Let the page-tab selection drive the install route instead of the
-    // persisted windows_install_mode setting.
-    if let Some(kind) = request.install_kind.as_deref() {
-        if kind == "portable" || kind == "msix" {
-            settings.windows_install_mode = kind.to_string();
-        }
-    }
     let release = load_release(&settings)?;
-    let installed_before = detect_installed(&settings);
+    let installed_before = detect_installed_for_kind(&settings, &install_kind);
     let plan = build_plan(&settings, installed_before.as_ref(), &release)?;
 
     if let Some(expected) = request.expected_current_version.as_deref() {
@@ -525,6 +559,7 @@ where
     if plan.up_to_date {
         emit_step_progress(
             &on_progress,
+            &install_kind,
             "done",
             "codexClient.progressAlreadyUpToDate",
             Some(1),
@@ -533,6 +568,7 @@ where
             Some(7),
         );
         return Ok(CodexClientOperationResult {
+            install_kind,
             success: true,
             action: "none".to_string(),
             message: "Codex is already up to date.".to_string(),
@@ -542,7 +578,7 @@ where
         });
     }
 
-    let mut stage = stage_from_plan(&release, &plan, &on_progress)?;
+    let mut stage = stage_from_plan(&install_kind, &release, &plan, &on_progress)?;
     let staged_path = stage
         .staged_path
         .as_ref()
@@ -586,6 +622,7 @@ where
     let installed = if action == "portable-fallback" {
         emit_step_progress(
             &on_progress,
+            &install_kind,
             "installing",
             "codexClient.progressInstallingPortable",
             None,
@@ -596,6 +633,7 @@ where
         let report = install_portable(
             &staged_path,
             &expand_env_path(&settings.install_root)?,
+            &install_kind,
             &on_progress,
         )?;
         notes.extend(report.notes);
@@ -603,6 +641,7 @@ where
     } else if action == "macos-dmg" {
         emit_step_progress(
             &on_progress,
+            &install_kind,
             "installing",
             "codexClient.progressInstallingMacos",
             None,
@@ -621,6 +660,7 @@ where
     } else {
         emit_step_progress(
             &on_progress,
+            &install_kind,
             "msix-installing",
             "codexClient.progressInstallingMsix",
             None,
@@ -641,6 +681,7 @@ where
                 notes.push("Automatically switched to portable installation.".to_string());
                 emit_step_progress(
                     &on_progress,
+                    &install_kind,
                     "portable-fallback",
                     "codexClient.progressMsixPortableFallback",
                     None,
@@ -651,6 +692,7 @@ where
                 let portable = install_portable(
                     &staged_path,
                     &expand_env_path(&settings.install_root)?,
+                    &install_kind,
                     &on_progress,
                 )?;
                 notes.extend(portable.notes);
@@ -664,6 +706,7 @@ where
                 notes.push("Automatically switched to portable installation.".to_string());
                 emit_step_progress(
                     &on_progress,
+                    &install_kind,
                     "portable-fallback",
                     "codexClient.progressMsixExecutionPortableFallback",
                     None,
@@ -674,6 +717,7 @@ where
                 let portable = install_portable(
                     &staged_path,
                     &expand_env_path(&settings.install_root)?,
+                    &install_kind,
                     &on_progress,
                 )?;
                 notes.extend(portable.notes);
@@ -682,7 +726,7 @@ where
         }
     };
 
-    let installed = installed.or_else(|| detect_installed(&settings));
+    let installed = installed.or_else(|| detect_installed_for_kind(&settings, &install_kind));
     if installed.is_some() {
         cleanup_staged_package(&mut stage, &mut notes);
     }
@@ -712,6 +756,7 @@ where
 
     emit_step_progress(
         &on_progress,
+        &install_kind,
         "done",
         "codexClient.progressInstallDone",
         Some(1),
@@ -721,6 +766,7 @@ where
     );
 
     Ok(CodexClientOperationResult {
+        install_kind,
         success: installed.is_some(),
         action,
         message: installed
@@ -745,18 +791,15 @@ pub fn uninstall(
         return Err("The current platform does not provide an executable Codex desktop client uninstall path yet.".to_string());
     }
 
-    let settings = load_settings()?;
+    let mut settings = load_settings()?;
+    let install_kind = normalize_install_kind(request.install_kind.as_deref(), &settings);
+    settings = settings_for_install_kind(settings, &install_kind);
     // When the caller specifies an install kind (from the page tab), detect
     // only that kind so uninstalling targets the version the user is viewing.
-    let installed = match request.install_kind.as_deref() {
-        Some("portable") => expand_env_path(&settings.install_root)
-            .ok()
-            .and_then(|root| detect_portable_install(&root)),
-        Some("msix") => package::detect_msix_package(PACKAGE_IDENTITY).map(installed_from_msix),
-        _ => detect_installed(&settings),
-    };
+    let installed = detect_installed_for_kind(&settings, &install_kind);
     let Some(installed_before) = installed else {
         return Ok(CodexClientOperationResult {
+            install_kind,
             success: true,
             action: "none".to_string(),
             message: "No uninstallable Codex was detected.".to_string(),
@@ -821,6 +864,7 @@ pub fn uninstall(
     let _ = activity_log::append(Severity::Ok, "Uninstalled Codex.");
 
     Ok(CodexClientOperationResult {
+        install_kind,
         success: true,
         action: action.to_string(),
         message: "Codex uninstalled.".to_string(),
@@ -1054,6 +1098,7 @@ fn select_install_route(
 }
 
 fn stage_from_plan<F>(
+    install_kind: &str,
     release: &CodexClientRelease,
     plan: &CodexClientPlan,
     on_progress: &F,
@@ -1064,6 +1109,7 @@ where
     if plan.up_to_date {
         emit_step_progress(
             on_progress,
+            install_kind,
             "done",
             "codexClient.progressStageAlreadyUpToDate",
             Some(1),
@@ -1072,6 +1118,7 @@ where
             Some(4),
         );
         return Ok(CodexClientStageReport {
+            install_kind: install_kind.to_string(),
             up_to_date: true,
             staged_path: None,
             package_moniker: release.package_moniker.clone(),
@@ -1083,32 +1130,36 @@ where
         });
     }
 
-    let path = staged_package_path(release)?;
-    if !path.exists() || sha256_file(&path).ok().as_deref() != Some(release.sha256.as_str()) {
-        if path.exists() {
-            let _ = fs::remove_file(&path);
+    let mut path = staged_package_path(release)?;
+    match staged_package_target(&path, &release.sha256)? {
+        StagedPackageTarget::Reuse => {
+            let size = fs::metadata(&path).map_err(|err| err.to_string())?.len();
+            emit_step_progress(
+                on_progress,
+                install_kind,
+                "verifying",
+                "codexClient.progressFoundStaged",
+                Some(size),
+                Some(size),
+                Some(3),
+                Some(4),
+            );
         }
-        download_to_file(
-            &release.package_url,
-            &path,
-            release.content_length,
-            on_progress,
-        )?;
-    } else {
-        let size = fs::metadata(&path).map_err(|err| err.to_string())?.len();
-        emit_step_progress(
-            on_progress,
-            "verifying",
-            "codexClient.progressFoundStaged",
-            Some(size),
-            Some(size),
-            Some(3),
-            Some(4),
-        );
+        StagedPackageTarget::Download(target) => {
+            path = target;
+            download_to_file(
+                &release.package_url,
+                &path,
+                release.content_length,
+                install_kind,
+                on_progress,
+            )?;
+        }
     }
 
     emit_step_progress(
         on_progress,
+        install_kind,
         "verifying",
         "codexClient.progressVerifying",
         None,
@@ -1131,6 +1182,7 @@ where
     );
     emit_step_progress(
         on_progress,
+        install_kind,
         "done",
         "codexClient.progressStageDone",
         Some(size),
@@ -1140,6 +1192,7 @@ where
     );
 
     Ok(CodexClientStageReport {
+        install_kind: install_kind.to_string(),
         up_to_date: false,
         staged_path: Some(display_path(&path)),
         package_moniker: release.package_moniker.clone(),
@@ -1349,6 +1402,49 @@ fn detect_installed(settings: &CodexClientSettings) -> Option<InstalledCodexClie
     }
 }
 
+fn normalize_install_kind(requested: Option<&str>, settings: &CodexClientSettings) -> String {
+    if cfg!(target_os = "windows") {
+        match requested {
+            Some("portable") => "portable".to_string(),
+            Some("msix") => "msix".to_string(),
+            _ if settings.windows_install_mode == "portable" => "portable".to_string(),
+            _ => "msix".to_string(),
+        }
+    } else {
+        "msix".to_string()
+    }
+}
+
+fn settings_for_install_kind(
+    mut settings: CodexClientSettings,
+    install_kind: &str,
+) -> CodexClientSettings {
+    if cfg!(target_os = "windows") {
+        settings.windows_install_mode = if install_kind == "portable" {
+            "portable"
+        } else {
+            "msix"
+        }
+        .to_string();
+    }
+    settings
+}
+
+fn detect_installed_for_kind(
+    settings: &CodexClientSettings,
+    install_kind: &str,
+) -> Option<InstalledCodexClient> {
+    if cfg!(target_os = "windows") {
+        if install_kind == "portable" {
+            return expand_env_path(&settings.install_root)
+                .ok()
+                .and_then(|root| detect_portable_install(&root));
+        }
+        return package::detect_msix_package(PACKAGE_IDENTITY).map(installed_from_msix);
+    }
+    detect_installed(settings)
+}
+
 fn installed_from_msix(package: package::InstalledMsixPackage) -> InstalledCodexClient {
     InstalledCodexClient {
         installed_at: path_mtime(&PathBuf::from(&package.path)),
@@ -1410,6 +1506,7 @@ struct PortableInstallReport {
 fn install_portable<F>(
     msix_path: &Path,
     install_root: &Path,
+    install_kind: &str,
     on_progress: &F,
 ) -> Result<PortableInstallReport, String>
 where
@@ -1417,6 +1514,7 @@ where
 {
     emit_step_progress(
         on_progress,
+        install_kind,
         "installing",
         "codexClient.progressPreparingPortableDir",
         None,
@@ -1448,7 +1546,7 @@ where
     fs::create_dir_all(&extracted)
         .map_err(|err| format!("Failed to create staging directory: {err}"))?;
 
-    let manifest_xml = extract_msix(msix_path, &extracted, on_progress)?;
+    let manifest_xml = extract_msix(msix_path, &extracted, install_kind, on_progress)?;
     let identity = parse_msix_identity(&manifest_xml)?;
     if identity.name != PACKAGE_IDENTITY {
         notes.push(format!(
@@ -1468,6 +1566,7 @@ where
         .ok_or_else(|| "Codex.exe has no parent directory.".to_string())?;
     emit_step_progress(
         on_progress,
+        install_kind,
         "copying",
         "codexClient.progressCopyingPortable",
         None,
@@ -1482,6 +1581,7 @@ where
 
     emit_step_progress(
         on_progress,
+        install_kind,
         "writing",
         "codexClient.progressWritingInstall",
         None,
@@ -1510,6 +1610,7 @@ where
 
     emit_step_progress(
         on_progress,
+        install_kind,
         "finalizing",
         "codexClient.progressFinalizingInstall",
         None,
@@ -1532,6 +1633,7 @@ where
     let _ = fs::remove_dir_all(&work);
     emit_step_progress(
         on_progress,
+        install_kind,
         "finalizing",
         "codexClient.progressPortableWritten",
         Some(1),
@@ -1553,7 +1655,12 @@ where
     })
 }
 
-fn extract_msix<F>(msix_path: &Path, dest: &Path, on_progress: &F) -> Result<String, String>
+fn extract_msix<F>(
+    msix_path: &Path,
+    dest: &Path,
+    install_kind: &str,
+    on_progress: &F,
+) -> Result<String, String>
 where
     F: Fn(CodexClientProgress),
 {
@@ -1565,6 +1672,7 @@ where
     let total = total_entries as u64;
     emit_step_progress(
         on_progress,
+        install_kind,
         "extracting",
         "codexClient.progressExtractingMsix",
         Some(0),
@@ -1610,6 +1718,7 @@ where
         if index == 0 || index + 1 == total_entries || index % 25 == 0 {
             emit_step_progress(
                 on_progress,
+                install_kind,
                 "extracting",
                 "codexClient.progressExtractingMsix",
                 Some((index + 1) as u64),
@@ -1756,16 +1865,29 @@ fn package_filename(url: &str) -> Option<String> {
 }
 
 fn checksum_for_windows(text: &str, package_moniker: &str) -> Option<String> {
-    text.lines().find_map(|line| {
+    let package_name = format!("{package_moniker}.Msix");
+    checksum_for_name(text, &package_name)
+        .or_else(|| checksum_for_name(text, package_moniker))
+        .or_else(|| unique_windows_msix_checksum(text))
+}
+
+fn unique_windows_msix_checksum(text: &str) -> Option<String> {
+    let mut matches = text.lines().filter_map(|line| {
         let mut parts = line.split_whitespace();
         let hash = parts.next()?;
-        let name = parts.next()?;
-        if name.contains(package_moniker) || name.ends_with(".Msix") {
+        let name = parts.next()?.trim_start_matches('*');
+        if name.to_ascii_lowercase().ends_with(".msix") {
             Some(hash.to_string())
         } else {
             None
         }
-    })
+    });
+    let hash = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(hash)
+    }
 }
 
 fn checksum_for_name(text: &str, expected_name: &str) -> Option<String> {
@@ -1800,6 +1922,7 @@ fn download_to_file<F>(
     url: &str,
     path: &Path,
     expected_total: Option<u64>,
+    install_kind: &str,
     on_progress: &F,
 ) -> Result<(), String>
 where
@@ -1809,12 +1932,13 @@ where
         fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create download directory: {err}"))?;
     }
-    let temp = path.with_extension("download");
+    let temp = download_temp_path(path);
     if temp.exists() {
         let _ = fs::remove_file(&temp);
     }
     emit_step_progress(
         on_progress,
+        install_kind,
         "downloading",
         "codexClient.progressDownloading",
         Some(0),
@@ -1847,6 +1971,7 @@ where
                 if last_emit.elapsed() >= Duration::from_millis(500) {
                     emit_step_progress(
                         on_progress,
+                        install_kind,
                         "downloading",
                         "codexClient.progressDownloading",
                         downloaded,
@@ -1874,6 +1999,7 @@ where
     let downloaded = fs::metadata(&temp).ok().map(|metadata| metadata.len());
     emit_step_progress(
         on_progress,
+        install_kind,
         "downloading",
         "codexClient.progressDownloadComplete",
         downloaded,
@@ -1881,11 +2007,26 @@ where
         Some(2),
         Some(4),
     );
-    fs::rename(&temp, path).map_err(|err| format!("Failed to save downloaded file: {err}"))
+    if path.exists() {
+        fs::remove_file(path).map_err(|err| {
+            format!(
+                "Failed to replace staged download {}: {err}",
+                display_path(path)
+            )
+        })?;
+    }
+    fs::rename(&temp, path).map_err(|err| {
+        let _ = fs::remove_file(&temp);
+        format!(
+            "Failed to save downloaded file to {}: {err}",
+            display_path(path)
+        )
+    })
 }
 
 fn emit_step_progress<F>(
     on_progress: &F,
+    install_kind: &str,
     phase: &str,
     message: impl Into<String>,
     downloaded: Option<u64>,
@@ -1902,6 +2043,7 @@ fn emit_step_progress<F>(
         _ => None,
     };
     on_progress(CodexClientProgress {
+        install_kind: install_kind.to_string(),
         phase: phase.to_string(),
         message: message.into(),
         downloaded,
@@ -1940,6 +2082,64 @@ fn staged_package_path(release: &CodexClientRelease) -> Result<PathBuf, String> 
         format!("{}.Msix", release.package_moniker)
     };
     Ok(dir.join(file))
+}
+
+enum StagedPackageTarget {
+    Reuse,
+    Download(PathBuf),
+}
+
+fn staged_package_target(path: &Path, sha256: &str) -> Result<StagedPackageTarget, String> {
+    if !path.exists() {
+        return Ok(StagedPackageTarget::Download(path.to_path_buf()));
+    }
+
+    if sha256_file(path)
+        .ok()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(sha256))
+    {
+        return Ok(StagedPackageTarget::Reuse);
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(StagedPackageTarget::Download(path.to_path_buf())),
+        Err(_) if path.exists() => Ok(StagedPackageTarget::Download(
+            alternate_staged_package_path(path, sha256),
+        )),
+        Err(_) => Ok(StagedPackageTarget::Download(path.to_path_buf())),
+    }
+}
+
+fn alternate_staged_package_path(path: &Path, sha256: &str) -> PathBuf {
+    let short_sha: String = sha256.chars().take(8).collect();
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("download");
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    let file_name = match extension {
+        Some(extension) if !extension.is_empty() => format!("{stem}-{short_sha}.{extension}"),
+        _ => format!("{stem}-{short_sha}"),
+    };
+    path.with_file_name(file_name)
+}
+
+fn download_temp_path(path: &Path) -> PathBuf {
+    let sequence = DOWNLOAD_TEMP_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    path.with_file_name(format!(
+        "{file_name}.download.{}.{}.{}",
+        std::process::id(),
+        sequence,
+        nanos
+    ))
 }
 
 fn staging_dir() -> Result<PathBuf, String> {
@@ -3172,5 +3372,68 @@ mod tests {
             select_install_route(&settings, Some(&installed), false),
             "portable-fallback"
         );
+    }
+
+    #[test]
+    fn windows_checksum_matches_package_moniker_not_first_msix() {
+        let checksums = "\
+744d1b7500ae59ddb24c60aeaa9a861b33aaf0a72fa4f90f5a26e3017d6cd408  OpenAI.Codex_26.616.9593.0_arm64__2p2nqsd0c76g0.Msix
+d0d57caccde4e95b6326c8ab8f5ebb610cbbaff4f80197d34e586432d57ad84d  OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix
+";
+
+        assert_eq!(
+            checksum_for_windows(checksums, "OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0")
+                .as_deref(),
+            Some("d0d57caccde4e95b6326c8ab8f5ebb610cbbaff4f80197d34e586432d57ad84d")
+        );
+    }
+
+    #[test]
+    fn stale_staged_package_falls_back_when_canonical_path_is_not_removable() {
+        let root = std::env::temp_dir().join(format!(
+            "codestudio-lite-codex-client-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let canonical = root.join("OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix");
+        fs::create_dir(&canonical).unwrap();
+
+        let target = staged_package_target(
+            &canonical,
+            "d0d57caccde4e95b6326c8ab8f5ebb610cbbaff4f80197d34e586432d57ad84d",
+        )
+        .unwrap();
+        let StagedPackageTarget::Download(fallback) = target else {
+            panic!("expected a fallback download target");
+        };
+
+        assert_ne!(fallback, canonical);
+        assert_eq!(
+            fallback.file_name().and_then(|name| name.to_str()),
+            Some("OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0-d0d57cac.Msix")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn download_temp_path_is_unique_for_the_same_target() {
+        let target = PathBuf::from(r"C:\Temp\OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix");
+
+        let first = download_temp_path(&target);
+        let second = download_temp_path(&target);
+
+        assert_ne!(first, target);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), target.parent());
+        assert!(first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name
+                .starts_with("OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix.download.")));
     }
 }

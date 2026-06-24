@@ -5,11 +5,14 @@
   import StatusPill from "../components/StatusPill.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
   import {
-    launchClaudeDesktop
+    launchClaudeDesktop,
+    restartClaudeDesktopAfterAccessibilityGrant
   } from "../lib/api";
-  import { t } from "../lib/i18n";
+  import { t, type TranslationKey } from "../lib/i18n";
   import {
     claudeDesktopView,
+    claudeDesktopVisibleInstallKinds,
+    consumeClaudeDesktopPendingLaunchAfterRestart,
     dismissClaudeDesktopError,
     dismissClaudeDesktopSuccess,
     ensureClaudeDesktopLoaded,
@@ -25,18 +28,22 @@
   import type { Severity, ToolInstallProgress } from "../types";
 
   $: view = $claudeDesktopView;
-  $: status = view.status;
   $: installKinds = view.installKinds;
   $: selectedKind = view.selectedKind;
   $: isWindowsKind = view.snapshot?.platform === "windows";
-  $: exeKindInstalled = Boolean(installKinds?.exe?.installed);
-  // The EXE tab is hidden unless an EXE install is detected; if the user had
-  // it selected and the EXE install later disappears, fall back to MSIX for
-  // display without mutating the persisted selection.
-  $: effectiveSelectedKind = selectedKind === "exe" && !exeKindInstalled ? "msix" : selectedKind;
-  $: installPlan = view.installPlan;
-  $: updatePlan = view.updatePlan;
-  $: busyAction = view.busyAction;
+  $: visibleInstallKinds = claudeDesktopVisibleInstallKinds(view);
+  $: effectiveSelectedKind = visibleInstallKinds.includes(selectedKind) ? selectedKind : "msix";
+  $: kindView = view.kindViews[effectiveSelectedKind];
+  $: status = kindView.status;
+  $: installPlan = kindView.installPlan;
+  $: updatePlan = kindView.updatePlan;
+  $: busyAction = kindView.busyAction;
+  $: progress = kindView.progress;
+  $: progressPercent = progress?.percent ?? null;
+  $: progressStepLabel = progress?.step && progress.stepTotal
+    ? $t("claudeDesktop.progressStep", { current: progress.step, total: progress.stepTotal })
+    : "";
+  $: showProgress = Boolean(progress && (busyAction === "install" || busyAction === "update" || progress.phase === "done"));
   $: installed = status?.installState === "installed";
   $: statusLabel = installed ? $t("common.installed") : $t("common.missing");
   $: statusTone = (installed ? "ok" : "warning") as Severity;
@@ -45,7 +52,7 @@
   $: canUninstall = installed && busyAction === null;
   $: isRunning = status?.running ?? false;
   $: canLaunch = installed && busyAction === null && !launching;
-  $: liveLogGroups = groupedProgressLogs(view.progressLogs);
+  $: liveLogGroups = groupedProgressLogs(kindView.progressLogs);
   $: hasLogs = liveLogGroups.length > 0;
   // Only call it "up to date" when the app is actually installed and we know
   // the latest version and there is no update. For a missing install we want
@@ -65,10 +72,15 @@
   let installLogViewport: HTMLDivElement | null = null;
   let launchError: string | null = null;
   let launching = false;
+  let accessibilityPromptOpen = false;
+  let accessibilityRestarting = false;
+  let accessibilityLaunchLocalize = false;
+  let pendingLaunchConsumed = false;
 
   onMount(() => {
     startClaudeDesktopProgressListener();
     void ensureClaudeDesktopLoaded();
+    void resumePendingLaunchAfterRestart();
   });
 
   afterUpdate(() => {
@@ -137,6 +149,54 @@
     return groups;
   }
 
+  function formatBytes(value: number | null | undefined) {
+    if (!value) {
+      return $t("common.unknown");
+    }
+    const units = ["B", "KB", "MB", "GB"];
+    let size = value;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit += 1;
+    }
+    return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+  }
+
+  function progressPhaseLabel(value: string | null | undefined) {
+    if (!value) {
+      return $t("claudeDesktop.phase.preparing");
+    }
+    const key = `claudeDesktop.phase.${value}` as Parameters<typeof $t>[0];
+    const label = $t(key);
+    return label === key ? value : label;
+  }
+
+  function formatProgressMessage(message: string | null | undefined) {
+    if (!message) {
+      return $t("claudeDesktop.progressWorking");
+    }
+    if (message.startsWith("claudeDesktop.")) {
+      return $t(message as TranslationKey);
+    }
+    return message;
+  }
+
+  function progressByteLabel(value: ToolInstallProgress) {
+    if (value.downloaded !== null && value.downloaded !== undefined && value.total !== null && value.total !== undefined) {
+      return $t("claudeDesktop.progressBytes", {
+        downloaded: formatBytes(value.downloaded),
+        total: formatBytes(value.total)
+      });
+    }
+    if (value.downloaded !== null && value.downloaded !== undefined) {
+      return $t("claudeDesktop.progressDownloaded", {
+        downloaded: formatBytes(value.downloaded)
+      });
+    }
+    return $t("claudeDesktop.progressWorking");
+  }
+
   async function installClaude() {
     await installOrUpdateClaudeDesktop("install");
   }
@@ -153,16 +213,50 @@
     if (!canLaunch) {
       return;
     }
+    await launchClaudeWithLocalization(localizeClaudeLaunch);
+  }
+
+  async function launchClaudeWithLocalization(localize: boolean) {
     launchError = null;
     launching = true;
     try {
-      await launchClaudeDesktop({ localize: localizeClaudeLaunch });
+      await launchClaudeDesktop({ localize });
       await new Promise((resolve) => setTimeout(resolve, 2500));
       await refreshClaudeDesktop();
     } catch (err) {
-      launchError = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("ACCESSIBILITY_NOT_TRUSTED")) {
+        accessibilityLaunchLocalize = localize;
+        accessibilityPromptOpen = true;
+      } else {
+        launchError = message;
+      }
     } finally {
       launching = false;
+    }
+  }
+
+  async function resumePendingLaunchAfterRestart() {
+    if (pendingLaunchConsumed) {
+      return;
+    }
+    pendingLaunchConsumed = true;
+    const pending = consumeClaudeDesktopPendingLaunchAfterRestart();
+    if (!pending) {
+      return;
+    }
+    accessibilityPromptOpen = false;
+    await launchClaudeWithLocalization(pending.localize);
+  }
+
+  async function restartAfterAccessibilityGrant() {
+    accessibilityRestarting = true;
+    launchError = null;
+    try {
+      await restartClaudeDesktopAfterAccessibilityGrant({ localize: accessibilityLaunchLocalize });
+    } catch (err) {
+      launchError = err instanceof Error ? err.message : String(err);
+      accessibilityRestarting = false;
     }
   }
 
@@ -192,9 +286,9 @@
           {$t(isRunning ? "toolLaunch.restart" : "toolLaunch.action")}
         {/if}
       </button>
-      <button class="secondary-button" disabled={view.loading || busyAction !== null} on:click={() => refreshClaudeDesktop()}>
-        <AppIcon name={view.loading ? "loading" : "refresh"} size={16} class={view.loading ? "spin" : ""} />
-        {$t(view.loading ? "common.refreshing" : "common.refresh")}
+      <button class="secondary-button" disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop()}>
+        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? "spin" : ""} />
+        {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
   </section>
@@ -230,17 +324,13 @@
     </div>
   </section>
 
-  {#if isWindowsKind && installKinds}
+  {#if isWindowsKind && installKinds && visibleInstallKinds.length > 1}
     <div class="install-kind-tabs">
-      <button class:active={effectiveSelectedKind === "msix"} on:click={() => setClaudeDesktopSelectedKind("msix")}>
-        {$t("desktopClient.kind.windowsApp")}
-        
-      </button>
-      {#if exeKindInstalled}
-        <button class:active={effectiveSelectedKind === "exe"} on:click={() => setClaudeDesktopSelectedKind("exe")}>
-          {$t("desktopClient.kind.exe")}
-          </button>
-      {/if}
+      {#each visibleInstallKinds as kind}
+        <button class:active={effectiveSelectedKind === kind} on:click={() => setClaudeDesktopSelectedKind(kind)}>
+          {kind === "msix" ? $t("desktopClient.kind.windowsApp") : $t("desktopClient.kind.exe")}
+        </button>
+      {/each}
     </div>
   {/if}
 
@@ -298,6 +388,24 @@
         {$t("common.uninstall")}
       </button>
     </div>
+    {#if showProgress && progress}
+      <div class="install-progress" aria-live="polite">
+        <div class="progress-copy">
+          <strong>{progressStepLabel ? `${progressStepLabel} / ${progressPhaseLabel(progress.phase)}` : progressPhaseLabel(progress.phase)}</strong>
+          <span>{formatProgressMessage(progress.message)}</span>
+        </div>
+        <div class="progress-track" class:indeterminate={progressPercent === null}>
+          <span
+            class="progress-fill"
+            style={`width: ${progressPercent === null ? 38 : Math.max(2, Math.min(100, progressPercent)).toFixed(1)}%`}
+          ></span>
+        </div>
+        <div class="progress-meta">
+          <span>{progressPercent === null ? $t("claudeDesktop.progressUnknown") : `${progressPercent.toFixed(0)}%`}</span>
+          <span>{progressByteLabel(progress)}</span>
+        </div>
+      </div>
+    {/if}
   </section>
 
   {#if isWindowsAppTab}
@@ -355,6 +463,30 @@
   {/if}
 
 </div>
+
+{#if accessibilityPromptOpen}
+  <div class="modal-backdrop">
+    <div class="modal-panel">
+      <div class="modal-body">
+        <div>
+          <span class="eyebrow">{$t("claudeDesktop.accessibilityEyebrow")}</span>
+          <h2>{$t("claudeDesktop.accessibilityTitle")}</h2>
+          <p>{$t("claudeDesktop.accessibilityDescription")}</p>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="secondary-button" disabled={accessibilityRestarting} on:click={() => { accessibilityPromptOpen = false; }}>
+          {$t("common.cancel")}
+        </button>
+        <button class="primary-button" disabled={accessibilityRestarting} on:click={restartAfterAccessibilityGrant}>
+          <AppIcon name={accessibilityRestarting ? "loading" : "restart"} size={16} class={accessibilityRestarting ? "spin" : ""} />
+          {$t(accessibilityRestarting ? "claudeDesktop.accessibilityRestarting" : "claudeDesktop.accessibilityRestart")}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if view.confirmUninstall}
   <div class="modal-backdrop">

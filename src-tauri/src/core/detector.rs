@@ -44,6 +44,8 @@ const CLAUDE_DESKTOP_LATEST_WINDOWS_URL: &str =
     "https://downloads.claude.ai/releases/win32/x64/.latest";
 const CLAUDE_DESKTOP_LATEST_MACOS_URL: &str =
     "https://downloads.claude.ai/releases/darwin/universal/.latest";
+const CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND: &str =
+    "Download and install the latest Claude Desktop MSIX from https://claude.ai/api/desktop/win32/x64/msix/latest/redirect with Add-AppxPackage -Path";
 const CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX: &str = "pzs8sxrjxfjjc";
 
 #[derive(Debug)]
@@ -409,17 +411,8 @@ fn detect_claude_desktop_tool(definition: &ToolDefinition) -> ToolStatus {
         Some(_) => ConfigState::Unconfigured,
         None => ConfigState::Unknown,
     };
-    let install_kind = detected.as_ref().map(|app| {
-        if app.source.starts_with("appx") || app.source == "app-bundle" {
-            "msix".to_string()
-        } else {
-            "exe".to_string()
-        }
-    });
-    let details = detected
-        .as_ref()
-        .map(|app| format!("Resolved: {} ({})", app.path, app.source))
-        .or_else(|| claude_desktop_missing_detail(config_path.as_deref()));
+    let (install_state, install_kind, install_path, version, details) =
+        claude_desktop_status_from_detection(detected.as_ref(), config_path.as_deref());
 
     ToolStatus {
         id: definition.id.to_string(),
@@ -427,25 +420,66 @@ fn detect_claude_desktop_tool(definition: &ToolDefinition) -> ToolStatus {
         category: definition.category.clone(),
         command: definition.command.to_string(),
         path_repair: None,
-        version: detected.as_ref().map(|app| app.version.clone()),
+        version,
         latest_version: None,
         update_available: false,
         update_command: update_command_for_tool(definition.id),
-        install_state: if detected.is_some() {
-            InstallState::Installed
-        } else {
-            InstallState::Missing
-        },
+        install_state,
         config_state,
         config_path: config_path.as_deref().map(display_path),
-        install_path: detected
-            .as_ref()
-            .map(|app| display_path(std::path::Path::new(&app.path))),
+        install_path,
         install_command: definition.install_command.map(ToString::to_string),
         details,
         install_kind,
         running: process_control::is_process_running("Claude"),
     }
+}
+
+fn claude_desktop_status_from_detection(
+    detected: Option<&DesktopAppDetection>,
+    config_path: Option<&Path>,
+) -> (
+    InstallState,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    if let Some(app) = detected.filter(|app| app.source == "appx-stale") {
+        return (
+            InstallState::Missing,
+            None,
+            None,
+            None,
+            Some(format!(
+                "MSIX/AppX package files are present but not registered: {}",
+                app.path
+            )),
+        );
+    }
+
+    let install_kind = detected.map(|app| {
+        if app.source.starts_with("appx") || app.source == "app-bundle" {
+            "msix".to_string()
+        } else {
+            "exe".to_string()
+        }
+    });
+    let details = detected
+        .map(|app| format!("Resolved: {} ({})", app.path, app.source))
+        .or_else(|| claude_desktop_missing_detail(config_path));
+
+    (
+        if detected.is_some() {
+            InstallState::Installed
+        } else {
+            InstallState::Missing
+        },
+        install_kind,
+        detected.map(|app| display_path(std::path::Path::new(&app.path))),
+        detected.map(|app| app.version.clone()),
+        details,
+    )
 }
 
 fn detect_claude_desktop_installation() -> Option<DesktopAppDetection> {
@@ -461,9 +495,6 @@ fn detect_claude_desktop_installation() -> Option<DesktopAppDetection> {
 fn detect_claude_desktop_windows() -> Option<DesktopAppDetection> {
     detect_claude_desktop_windows_native_exe()
         .or_else(detect_claude_desktop_windows_registered_msix)
-        .or_else(detect_claude_desktop_windows_stale_msix)
-        .or_else(detect_claude_desktop_windows_cached_stale_msix)
-        .or_else(detect_claude_desktop_windows_known_stale_msix)
         // Last-resort fallback for a winget .exe (non-MSIX) install whose
         // install folder name we did not enumerate: scan %LOCALAPPDATA% one
         // level deep for a directory containing Claude.exe. Cheap (a single
@@ -485,7 +516,7 @@ fn detect_claude_desktop_windows_localappdata_scan() -> Option<DesktopAppDetecti
 /// surface, or `None` when no such install is found. The returned path points
 /// at the versioned `app-<version>/Claude.exe` image when present (so a real
 /// version label is recoverable), or the bare launcher otherwise. Used by the
-/// localization patch path as a fallback so it resolves the same install
+/// localized launch path as a fallback so it resolves the same install
 /// detection finds, even when the explicit candidate list misses a location.
 pub fn claude_desktop_windows_native_install_path() -> Option<PathBuf> {
     if !cfg!(target_os = "windows") {
@@ -514,9 +545,6 @@ pub fn claude_desktop_install_kinds() -> ClaudeDesktopInstallKinds {
         };
     }
     let msix = detect_claude_desktop_windows_registered_msix()
-        .or_else(detect_claude_desktop_windows_stale_msix)
-        .or_else(detect_claude_desktop_windows_cached_stale_msix)
-        .or_else(detect_claude_desktop_windows_known_stale_msix)
         .map(|app| DesktopInstallKindInfo {
             installed: true,
             version: Some(app.version.clone()),
@@ -574,10 +602,9 @@ fn scan_localappdata_for_claude_exe(root: &Path) -> Option<DesktopAppDetection> 
 /// version label can be recovered; otherwise returns the first `Claude.exe`.
 /// Check whether a Claude.exe has its companion `resources/app.asar`, i.e.
 /// the install is functional rather than a leftover exe from a partial
-/// uninstall. When the in-place localization patch modifies Claude.exe, the
-/// NSIS uninstaller may be unable to delete it (hash mismatch) but still
-/// removes every other file — leaving an orphaned exe that detection must not
-/// mistake for a working install.
+/// uninstall. Older localized builds may also have left an orphaned exe after
+/// NSIS removed every companion file, so detection must not mistake that
+/// leftover for a working install.
 fn claude_exe_has_companion_asar(exe: &Path) -> bool {
     exe.parent()
         .map(|dir| dir.join("resources").join("app.asar").is_file())
@@ -666,6 +693,13 @@ fn detect_claude_desktop_windows_registered_msix() -> Option<DesktopAppDetection
     })
 }
 
+pub(crate) fn claude_desktop_windows_registered_msix_installed() -> bool {
+    if !cfg!(target_os = "windows") {
+        return false;
+    }
+    detect_claude_desktop_windows_registered_msix().is_some()
+}
+
 /// Normalize an MSIX/install-detected Claude Desktop version to the 3-part
 /// label used by the release feed. `Get-AppxPackage` reports 4-part versions
 /// (e.g. 1.14271.0.0); the upstream feed and winget report 3-part
@@ -682,40 +716,6 @@ fn normalized_claude_desktop_version(version: &str) -> String {
     } else {
         label
     }
-}
-
-fn detect_claude_desktop_windows_stale_msix() -> Option<DesktopAppDetection> {
-    find_latest_claude_desktop_windows_stale_msix_dir().map(|path| DesktopAppDetection {
-        version: normalized_claude_desktop_version(
-            &stale_claude_desktop_version(&path).unwrap_or_else(|| "installed".to_string()),
-        ),
-        path: path.to_string_lossy().to_string(),
-        source: "appx-stale",
-    })
-}
-
-fn detect_claude_desktop_windows_cached_stale_msix() -> Option<DesktopAppDetection> {
-    let manifest = claude_desktop_windows_cached_stale_msix_manifest()?;
-    let path = manifest.parent()?.to_path_buf();
-    Some(DesktopAppDetection {
-        version: normalized_claude_desktop_version(
-            &stale_claude_desktop_version(&path).unwrap_or_else(|| "installed".to_string()),
-        ),
-        path: path.to_string_lossy().to_string(),
-        source: "appx-stale",
-    })
-}
-
-fn detect_claude_desktop_windows_known_stale_msix() -> Option<DesktopAppDetection> {
-    let manifest = claude_desktop_windows_known_stale_msix_manifest()?;
-    let path = manifest.parent()?.to_path_buf();
-    Some(DesktopAppDetection {
-        version: normalized_claude_desktop_version(
-            &stale_claude_desktop_version(&path).unwrap_or_else(|| "installed".to_string()),
-        ),
-        path: path.to_string_lossy().to_string(),
-        source: "appx-stale",
-    })
 }
 
 fn detect_claude_desktop_macos() -> Option<DesktopAppDetection> {
@@ -1412,7 +1412,6 @@ fn winget_package_for_tool(tool_id: &str) -> Option<&'static str> {
         return None;
     }
     match tool_id {
-        "claude-desktop" => Some("Anthropic.Claude"),
         "node" => Some("OpenJS.NodeJS.LTS"),
         "git" => Some("Git.Git"),
         "bun" => Some("Oven-sh.Bun"),
@@ -1431,10 +1430,7 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
                     .to_string(),
             )
         }
-        "claude-desktop" => Some(
-            "winget upgrade --id Anthropic.Claude --exact --accept-source-agreements --accept-package-agreements --disable-interactivity"
-                .to_string(),
-        ),
+        "claude-desktop" => Some(CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND.to_string()),
         "claude-vscode" => {
             Some("code --install-extension anthropic.claude-code --force".to_string())
         }
@@ -1916,6 +1912,39 @@ mod tests {
         assert_eq!(
             claude_desktop_windows_package_identities(),
             &["Claude", "Anthropic.Claude"]
+        );
+    }
+
+    #[test]
+    fn claude_desktop_stale_msix_detection_does_not_mark_tool_installed() {
+        let stale = DesktopAppDetection {
+            path: r"C:\Program Files\WindowsApps\Claude_1.14271.0.0_x64__pzs8sxrjxfjjc".to_string(),
+            version: "1.14271.0".to_string(),
+            source: "appx-stale",
+        };
+
+        let (install_state, install_kind, install_path, version, details) =
+            claude_desktop_status_from_detection(Some(&stale), None);
+
+        assert_eq!(install_state, InstallState::Missing);
+        assert!(install_kind.is_none());
+        assert!(install_path.is_none());
+        assert!(version.is_none());
+        assert!(details
+            .as_deref()
+            .unwrap_or_default()
+            .contains("MSIX/AppX package files are present but not registered"));
+    }
+
+    #[test]
+    fn claude_desktop_windows_update_command_uses_official_msix() {
+        let command = update_command_for_tool("claude-desktop").expect("update command");
+
+        assert!(command.contains("claude.ai/api/desktop/win32/x64/msix/latest/redirect"));
+        assert!(command.contains("Add-AppxPackage -Path"));
+        assert!(
+            !command.contains("winget upgrade --id Anthropic.Claude"),
+            "Claude Desktop Windows updates must not use deprecated winget routing: {command}"
         );
     }
 

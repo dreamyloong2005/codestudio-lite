@@ -266,61 +266,6 @@ pub fn read_named_file(asar_bytes: &[u8], name: &str) -> Result<Vec<u8>, AsarErr
     read_packed_file(content, offset, size)
 }
 
-/// Test helper: build an asar whose files (slash-separated paths) are laid
-/// out in the given order, returning the full asar bytes. Used by the
-/// claude_desktop_patch re-patch self-reference tests to build an asar that
-/// contains a nested Claude main entry such as ".vite/build/index.pre.js".
-#[cfg(test)]
-pub(crate) fn build_test_asar_with_files(files: &[(&str, &[u8])]) -> Vec<u8> {
-    use serde_json::{Map, Value};
-    let mut content = Vec::new();
-    let mut offsets: Vec<u64> = Vec::new();
-    for (_path, body) in files {
-        offsets.push(content.len() as u64);
-        content.extend_from_slice(body);
-    }
-    fn insert(tree: &mut Map<String, Value>, path: &str, size: usize, offset: u64) {
-        let parts: Vec<&str> = path.split('/').collect();
-        let mut node = tree;
-        for part in &parts[..parts.len() - 1] {
-            let entry = node
-                .entry(part.to_string())
-                .or_insert_with(|| Value::Object(Map::new()));
-            let obj = entry.as_object_mut().expect("dir entry must be object");
-            node = obj
-                .entry("files".to_string())
-                .or_insert_with(|| Value::Object(Map::new()))
-                .as_object_mut()
-                .expect("files must be object");
-        }
-        let mut leaf = Map::new();
-        leaf.insert("size".to_string(), Value::from(size));
-        leaf.insert("offset".to_string(), Value::from(offset.to_string()));
-        node.insert(parts[parts.len() - 1].to_string(), Value::Object(leaf));
-    }
-    let mut root = Map::new();
-    let mut files_map = Map::new();
-    for ((path, body), offset) in files.iter().zip(offsets.iter()) {
-        insert(&mut files_map, path, body.len(), *offset);
-    }
-    root.insert("files".to_string(), Value::Object(files_map));
-    let tree = Value::Object(root);
-    let json_bytes = serde_json::to_vec(&tree).expect("serialize asar tree");
-    let json_len = json_bytes.len();
-    let header_data_size = align_to_four(json_len + PICKLE_SIZE_FIELD);
-    let header_size = PICKLE_SIZE_FIELD + header_data_size;
-    let content_base = 8 + header_size;
-    let total = content_base + content.len();
-    let mut out = vec![0u8; total];
-    out[0..4].copy_from_slice(&(PICKLE_SIZE_FIELD as u32).to_le_bytes());
-    out[4..8].copy_from_slice(&(header_size as u32).to_le_bytes());
-    out[8..12].copy_from_slice(&(header_data_size as u32).to_le_bytes());
-    out[12..16].copy_from_slice(&(json_len as u32).to_le_bytes());
-    out[16..16 + json_len].copy_from_slice(&json_bytes);
-    out[content_base..content_base + content.len()].copy_from_slice(&content);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
