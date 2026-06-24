@@ -3835,8 +3835,118 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
 mod tests {
     use super::*;
 
-    fn production_source(source: &str) -> &str {
-        source.split("mod tests {").next().unwrap_or(source)
+    fn patch_source() -> &'static str {
+        include_str!("claude_desktop_patch.rs")
+    }
+
+    fn production_source() -> &'static str {
+        patch_source()
+            .split("mod tests {")
+            .next()
+            .unwrap_or_else(patch_source)
+    }
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str, label: &str) -> &'a str {
+        source
+            .split(start)
+            .nth(1)
+            .and_then(|tail| tail.split(end).next())
+            .unwrap_or_else(|| panic!("{label} body should exist"))
+    }
+
+    fn patch_between(start: &str, end: &str, label: &str) -> &'static str {
+        source_between(patch_source(), start, end, label)
+    }
+
+    fn production_between(start: &str, end: &str, label: &str) -> &'static str {
+        source_between(production_source(), start, end, label)
+    }
+
+    fn windows_debugger_request_body() -> &'static str {
+        patch_between(
+            "fn request_windows_claude_main_process_debugger_once()",
+            "#[cfg(target_os = \"macos\")]",
+            "request_windows_claude_main_process_debugger_once",
+        )
+    }
+
+    fn assert_contains_all(source: &str, expected: &[&str]) {
+        for needle in expected {
+            assert!(
+                source.contains(needle),
+                "expected source to contain {needle:?}"
+            );
+        }
+    }
+
+    fn assert_contains_none(source: &str, forbidden: &[&str]) {
+        for needle in forbidden {
+            assert!(
+                !source.contains(needle),
+                "expected source not to contain {needle:?}"
+            );
+        }
+    }
+
+    fn assert_order(source: &str, before: &str, after: &str, message: &str) {
+        let before_idx = source
+            .find(before)
+            .unwrap_or_else(|| panic!("{message}: missing earlier fragment {before:?}"));
+        let after_idx = source
+            .find(after)
+            .unwrap_or_else(|| panic!("{message}: missing later fragment {after:?}"));
+        assert!(before_idx < after_idx, "{message}");
+    }
+
+    fn assert_contains_in_order(source: &str, expected: &[&str], message: &str) {
+        let mut offset = 0;
+        for needle in expected {
+            let relative_idx = source[offset..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("{message}: missing ordered fragment {needle:?}"));
+            offset += relative_idx + needle.len();
+        }
+    }
+
+    fn main_process_injection_source() -> String {
+        build_main_process_injection_source_for_paths(
+            Path::new(r"C:\CodeStudio\translation-runtime.js"),
+            Path::new(r"C:\CodeStudio\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
+            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        )
+    }
+
+    struct LocaleExpectation {
+        key: &'static str,
+        label: &'static str,
+        expected: &'static str,
+        forbidden: &'static [&'static str],
+    }
+
+    fn assert_locale_expectations(
+        map: &serde_json::Map<String, Value>,
+        expectations: &[LocaleExpectation],
+    ) {
+        for LocaleExpectation {
+            key,
+            label,
+            expected,
+            forbidden,
+        } in expectations
+        {
+            let actual = map
+                .get(*key)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("missing {label} ({key})"));
+            assert_eq!(actual, *expected, "unexpected {label} ({key})");
+            for fragment in *forbidden {
+                assert!(
+                    !actual.contains(fragment),
+                    "{label} ({key}) should not contain {fragment:?}: {actual}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3864,42 +3974,51 @@ mod tests {
 
     #[test]
     fn windows_localization_is_runtime_only_and_does_not_patch_installed_app() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let production_source = production_source(source);
-        assert!(production_source.contains("ensure_windows_claude_main_process_debugger"));
-        assert!(production_source.contains("enable_claude_main_process_debugger"));
+        let production_source = production_source();
+        assert_contains_all(
+            production_source,
+            &[
+                "ensure_windows_claude_main_process_debugger",
+                "enable_claude_main_process_debugger",
+            ],
+        );
 
-        let ensure_body = production_source
-            .split("pub fn ensure_localization_patch()")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split("pub fn ensure_localized_launch_prerequisites")
-                    .next()
-            })
-            .expect("ensure_localization_patch body should exist");
+        let ensure_body = production_between(
+            "pub fn ensure_localization_patch()",
+            "pub fn ensure_localized_launch_prerequisites",
+            "ensure_localization_patch",
+        );
         assert!(ensure_body.contains("ensure_patch_files()?"));
         assert!(!ensure_body.contains(concat!("apply_", "localization_patch")));
 
-        let windows_launch_body = production_source
-            .split("fn launch_windows_claude_desktop")
-            .nth(1)
-            .and_then(|tail| tail.split("fn launch_windows_claude_msix").next())
-            .expect("Windows launch body should exist");
-        assert!(windows_launch_body.contains("ensure_patch_files()?"));
-        assert!(
-            windows_launch_body
-                .find("ensure_patch_files()?")
-                .expect("Windows localized launch should prepare runtime files")
-                < windows_launch_body
-                    .find("write_localized_launch_marker()?")
-                    .expect("Windows localized launch should write zh marker")
+        let windows_launch_body = production_between(
+            "fn launch_windows_claude_desktop",
+            "fn launch_windows_claude_msix",
+            "Windows launch",
         );
-        assert!(windows_launch_body.contains("write_localized_launch_marker()?"));
-        assert!(windows_launch_body.contains("spawn_silent_localization_injector()"));
-        assert!(!windows_launch_body.contains("ensure_windows_claude_main_process_debugger()?"));
-        assert!(!windows_launch_body.contains("retry_inject_localization()?"));
-        assert!(!windows_launch_body.contains(concat!("apply_", "localization_patch")));
-        assert!(!windows_launch_body.contains(concat!("activate_", "localized_claude")));
+        assert_contains_all(
+            windows_launch_body,
+            &[
+                "ensure_patch_files()?",
+                "write_localized_launch_marker()?",
+                "spawn_silent_localization_injector()",
+            ],
+        );
+        assert_order(
+            windows_launch_body,
+            "ensure_patch_files()?",
+            "write_localized_launch_marker()?",
+            "Windows localized launch should prepare runtime files before writing the zh marker",
+        );
+        assert_contains_none(
+            windows_launch_body,
+            &[
+                "ensure_windows_claude_main_process_debugger()?",
+                "retry_inject_localization()?",
+                concat!("apply_", "localization_patch"),
+                concat!("activate_", "localized_claude"),
+            ],
+        );
 
         for removed_symbol in [
             concat!("resolve_", "claude_install_for_patch"),
@@ -3931,13 +4050,12 @@ mod tests {
 
     #[test]
     fn direct_claude_desktop_launch_spawns_background_injector_on_windows() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let production_source = production_source(source);
-        let launch_body = production_source
-            .split("pub fn launch_with_app")
-            .nth(1)
-            .and_then(|tail| tail.split("pub fn base_launch_command").next())
-            .expect("launch_with_app body should exist");
+        let production_source = production_source();
+        let launch_body = production_between(
+            "pub fn launch_with_app",
+            "pub fn base_launch_command",
+            "launch_with_app",
+        );
 
         assert!(launch_body.contains("launch_windows_claude_desktop(localize)?"));
         assert!(
@@ -3945,11 +4063,12 @@ mod tests {
             "launch_with_app should delegate Windows background injection to the Windows launch helper"
         );
 
-        let windows_launch_body = production_source
-            .split("fn launch_windows_claude_desktop")
-            .nth(1)
-            .and_then(|tail| tail.split("fn launch_windows_claude_msix").next())
-            .expect("Windows launch body should exist");
+        let windows_launch_body = source_between(
+            production_source,
+            "fn launch_windows_claude_desktop",
+            "fn launch_windows_claude_msix",
+            "Windows launch",
+        );
         assert!(
             windows_launch_body.contains("spawn_silent_localization_injector()"),
             "direct localized Windows launch should return after app activation and inject in the background"
@@ -3958,205 +4077,221 @@ mod tests {
 
     #[test]
     fn silent_windows_injector_waits_for_manual_debugger_activation() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let silent_body = source
-            .split("pub fn spawn_silent_localization_injector")
-            .nth(1)
-            .and_then(|tail| tail.split("fn ensure_patch_files").next())
-            .expect("spawn_silent_localization_injector body should exist");
-
-        assert!(silent_body.contains("manualDebuggerActivationFallback"));
-        assert!(silent_body.contains("thread::spawn(move || {"));
-        assert!(silent_body.contains("enable_claude_main_process_debugger()"));
-        assert!(silent_body.contains("retry_inject_localization_until("));
-        assert!(silent_body.contains("CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT"));
-        assert!(
-            silent_body
-                .find("thread::spawn(move || {")
-                .expect("silent injector should spawn a helper thread")
-                < silent_body
-                    .find("enable_claude_main_process_debugger()")
-                    .expect("helper thread should try to open the debugger")
+        let silent_body = patch_between(
+            "pub fn spawn_silent_localization_injector",
+            "fn ensure_patch_files",
+            "spawn_silent_localization_injector",
         );
-        assert!(
-            silent_body
-                .find("enable_claude_main_process_debugger()")
-                .expect("debugger helper should be present")
-                < silent_body
-                    .rfind("retry_inject_localization_until(")
-                    .expect(
-                        "extended localization retry loop should keep running after helper start"
-                    )
+
+        assert_contains_all(
+            silent_body,
+            &[
+                "manualDebuggerActivationFallback",
+                "thread::spawn(move || {",
+                "enable_claude_main_process_debugger()",
+                "retry_inject_localization_until(",
+                "CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT",
+            ],
+        );
+        assert_order(
+            silent_body,
+            "thread::spawn(move || {",
+            "enable_claude_main_process_debugger()",
+            "silent injector should spawn a helper thread before trying to open the debugger",
+        );
+        assert_order(
+            silent_body,
+            "enable_claude_main_process_debugger()",
+            "retry_inject_localization_until(",
+            "extended localization retry loop should keep running after helper start",
         );
     }
 
     #[test]
     fn terminal_windows_injector_keeps_waiting_after_debugger_automation_failure() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let spawn_body = source
-            .split("pub fn spawn_localization_injector")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split("pub fn spawn_silent_localization_injector")
-                    .next()
-            })
-            .expect("spawn_localization_injector body should exist");
+        let spawn_body = patch_between(
+            "pub fn spawn_localization_injector",
+            "pub fn spawn_silent_localization_injector",
+            "spawn_localization_injector",
+        );
 
-        assert!(spawn_body.contains("manualDebuggerActivationFallback"));
-        assert!(spawn_body.contains("retry_localization_after_background_debugger_request()"));
+        assert_contains_all(
+            spawn_body,
+            &[
+                "manualDebuggerActivationFallback",
+                "retry_localization_after_background_debugger_request()",
+            ],
+        );
         assert!(!spawn_body.contains("return;"));
-        assert!(
-            spawn_body
-                .find("manualDebuggerActivationFallback")
-                .expect("terminal injector should mark manual fallback")
-                < spawn_body
-                    .find("retry_localization_after_background_debugger_request()")
-                    .expect("terminal injector should keep retrying injection")
+        assert_order(
+            spawn_body,
+            "manualDebuggerActivationFallback",
+            "retry_localization_after_background_debugger_request()",
+            "terminal injector should mark manual fallback before retrying injection",
         );
     }
 
     #[test]
     fn macos_localization_uses_official_main_process_debugger_menu() {
-        let source = include_str!("claude_desktop_patch.rs");
-        assert!(source.contains("launch_macos_claude_desktop_localized"));
-        assert!(source.contains("enable_macos_claude_main_process_debugger"));
-        assert!(source.contains("request_macos_claude_main_process_debugger_once"));
-        assert!(source.contains("enable_macos_claude_main_process_debugger"));
-        assert!(source.contains("MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT"));
-        assert!(source.contains("request_macos_claude_main_process_debugger_native"));
-        assert!(source.contains("AXIsProcessTrusted"));
-        assert!(source.contains("AXUIElementCreateApplication"));
-        assert!(source.contains("macos-main-debugger.log"));
-        assert!(source.contains("Enable Main Process Debugger"));
-        assert!(source.contains("Grant CodeStudio Lite Accessibility permission"));
-        assert!(source.contains("ensure_localized_launch_prerequisites"));
-        assert!(source.contains("ensure_macos_accessibility_trusted_for_localized_launch"));
-        assert!(source.contains("Current app bundle"));
-        assert!(source.contains("Current executable"));
-        assert!(source.contains("env::current_exe()"));
-        assert!(source.contains("Accessibility preflight check: AXIsProcessTrusted"));
-        assert!(source.contains("AXIsProcessTrustedWithOptions(prompt=true) returned"));
-        assert!(source.contains("CLAUDE_MACOS_ACCESSIBILITY_PENDING_LAUNCH_MARKER"));
-        assert!(source.contains("take_pending_claude_desktop_launch_after_restart"));
-        assert!(source.contains("restart_claude_desktop_after_accessibility_grant"));
-        assert!(source.contains("write_macos_accessibility_pending_launch_marker"));
-        assert!(source.contains("take_macos_accessibility_pending_launch_marker"));
-        assert!(source.contains("request_restart()"));
-        assert!(source.contains("macos_accessibility_is_trusted_raw()"));
-        assert!(source.contains("request_macos_accessibility_prompt"));
-        assert!(source.contains("launch-claude-macos-zh.sh"));
-        assert!(source.contains("macos_localized_launch_script"));
-        assert!(source.contains("write_localized_launch_marker()?"));
-        assert!(source.contains("claude_node_inspector_available()"));
-        assert!(source.contains("wait_for_claude_node_inspector()"));
-        assert!(source.contains("启用主进程调试器"));
-        assert!(source.contains("click_macos_claude_main_process_debugger_menu"));
-        assert!(source.contains("ax_find_and_press_debugger_menu_item"));
-        for removed_symbol in [
-            concat!("apply_", "macos_localization_patch"),
-            concat!("resolve_", "macos_claude_install_for_patch"),
-            concat!("Macos", "ClaudePatchPaths"),
-            concat!("Macos", "PatchPayloads"),
-            concat!("ElectronAsarIntegrity", ":Resources/app.asar:hash"),
-            concat!("update_", "macos_asar_integrity_hash"),
-            concat!("ad_hoc_", "codesign_macos_app"),
-            concat!("with administrator", " privileges"),
-            concat!("apply-claude-", "macos-patch.log"),
-            concat!("Privacy_", "Accessibility"),
-            concat!("open_macos_", "accessibility_settings"),
-            concat!("run_", "macos_main_process_debugger_", "apple", "script"),
-            concat!("macos_enable_main_process_debugger_", "apple", "script"),
+        let source = patch_source();
+        assert_contains_all(
+            source,
+            &[
+                "launch_macos_claude_desktop_localized",
+                "enable_macos_claude_main_process_debugger",
+                "request_macos_claude_main_process_debugger_once",
+                "MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT",
+                "request_macos_claude_main_process_debugger_native",
+                "AXIsProcessTrusted",
+                "AXUIElementCreateApplication",
+                "macos-main-debugger.log",
+                "Enable Main Process Debugger",
+                "Grant CodeStudio Lite Accessibility permission",
+                "ensure_localized_launch_prerequisites",
+                "ensure_macos_accessibility_trusted_for_localized_launch",
+                "Current app bundle",
+                "Current executable",
+                "env::current_exe()",
+                "Accessibility preflight check: AXIsProcessTrusted",
+                "AXIsProcessTrustedWithOptions(prompt=true) returned",
+                "CLAUDE_MACOS_ACCESSIBILITY_PENDING_LAUNCH_MARKER",
+                "take_pending_claude_desktop_launch_after_restart",
+                "restart_claude_desktop_after_accessibility_grant",
+                "write_macos_accessibility_pending_launch_marker",
+                "take_macos_accessibility_pending_launch_marker",
+                "request_restart()",
+                "macos_accessibility_is_trusted_raw()",
+                "request_macos_accessibility_prompt",
+                "launch-claude-macos-zh.sh",
+                "macos_localized_launch_script",
+                "write_localized_launch_marker()?",
+                "claude_node_inspector_available()",
+                "wait_for_claude_node_inspector()",
+                "启用主进程调试器",
+                "click_macos_claude_main_process_debugger_menu",
+                "ax_find_and_press_debugger_menu_item",
+            ],
+        );
+        assert_contains_none(
+            source,
+            &[
+                concat!("apply_", "macos_localization_patch"),
+                concat!("resolve_", "macos_claude_install_for_patch"),
+                concat!("Macos", "ClaudePatchPaths"),
+                concat!("Macos", "PatchPayloads"),
+                concat!("ElectronAsarIntegrity", ":Resources/app.asar:hash"),
+                concat!("update_", "macos_asar_integrity_hash"),
+                concat!("ad_hoc_", "codesign_macos_app"),
+                concat!("with administrator", " privileges"),
+                concat!("apply-claude-", "macos-patch.log"),
+                concat!("Privacy_", "Accessibility"),
+                concat!("open_macos_", "accessibility_settings"),
+                concat!("run_", "macos_main_process_debugger_", "apple", "script"),
+                concat!("macos_enable_main_process_debugger_", "apple", "script"),
+            ],
+        );
+
+        let ensure_body = patch_between(
+            "pub fn ensure_localization_patch()",
+            "pub fn spawn_localization_injector",
+            "ensure_localization_patch",
+        );
+        assert_contains_all(
+            ensure_body,
+            &[
+                "ensure_patch_files()?",
+                "ensure_claude_desktop_developer_mode()",
+            ],
+        );
+        assert_contains_none(
+            ensure_body,
+            &[concat!("apply_", "macos_localization_patch()")],
+        );
+
+        let macos_launch_body = patch_between(
+            "fn launch_macos_claude_desktop_localized(",
+            "fn enable_macos_claude_main_process_debugger",
+            "macOS launch",
+        );
+        assert_contains_all(
+            macos_launch_body,
+            &[
+                "ensure_patch_files()?",
+                "ensure_claude_desktop_developer_mode()?",
+                "write_localized_launch_marker()?",
+                "close_existing_claude_for_localized_launch()?",
+                "hidden_command(\"open\")",
+                "enable_macos_claude_main_process_debugger()",
+                "retry_inject_localization()",
+                "localization inspector opened, but injection failed",
+            ],
+        );
+        assert_contains_none(
+            macos_launch_body,
+            &[
+                "allow_accessibility_restart",
+                "ensure_macos_accessibility_trusted_or_restart_needed()?",
+                "schedule_macos_accessibility_restart",
+                "localization injection also failed",
+                concat!("apply_", "macos_localization_patch()?"),
+            ],
+        );
+        assert_order(
+            macos_launch_body,
+            "ensure_macos_accessibility_trusted",
+            "write_localized_launch_marker()?",
+            "Accessibility preflight should run before writing the localized launch marker",
+        );
+        for after_preflight in [
+            "close_existing_claude_for_localized_launch()?",
+            "hidden_command(\"open\")",
         ] {
-            assert!(!source.contains(removed_symbol));
+            assert_order(
+                macos_launch_body,
+                "ensure_macos_accessibility_trusted_for_localized_launch()?",
+                after_preflight,
+                "Accessibility preflight should run before touching Claude",
+            );
         }
 
-        let ensure_body = source
-            .split("pub fn ensure_localization_patch()")
-            .nth(1)
-            .and_then(|tail| tail.split("pub fn spawn_localization_injector").next())
-            .expect("ensure_localization_patch body should exist");
-        assert!(!ensure_body.contains(concat!("apply_", "macos_localization_patch()")));
-        assert!(ensure_body.contains("ensure_patch_files()?"));
-        assert!(ensure_body.contains("ensure_claude_desktop_developer_mode()"));
-
-        let macos_launch_body = source
-            .split("fn launch_macos_claude_desktop_localized(")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split("fn enable_macos_claude_main_process_debugger")
-                    .next()
-            })
-            .expect("macOS launch body should exist");
-        assert!(macos_launch_body.contains("ensure_patch_files()?"));
-        assert!(macos_launch_body.contains("ensure_claude_desktop_developer_mode()?"));
-        assert!(!macos_launch_body.contains("allow_accessibility_restart"));
-        assert!(
-            !macos_launch_body.contains("ensure_macos_accessibility_trusted_or_restart_needed()?")
-        );
-        assert!(!macos_launch_body.contains("schedule_macos_accessibility_restart"));
-        assert!(
-            macos_launch_body
-                .find("ensure_macos_accessibility_trusted")
-                .expect("Accessibility preflight should run before launching Claude")
-                < macos_launch_body
-                    .find("write_localized_launch_marker()?")
-                    .expect("localized launch marker should be written after preflight")
-        );
-        assert!(
-            macos_launch_body
-                .find("ensure_macos_accessibility_trusted_for_localized_launch()?")
-                .expect("Accessibility preflight should run before launching Claude")
-                < macos_launch_body
-                    .find("close_existing_claude_for_localized_launch()?")
-                    .expect("Claude should only be closed after preflight")
-        );
-        assert!(
-            macos_launch_body
-                .find("ensure_macos_accessibility_trusted_for_localized_launch()?")
-                .expect("Accessibility preflight should run before launching Claude")
-                < macos_launch_body
-                    .find("hidden_command(\"open\")")
-                    .expect("Claude should only be opened after preflight")
-        );
-        assert!(macos_launch_body.contains("write_localized_launch_marker()?"));
-        assert!(macos_launch_body.contains("close_existing_claude_for_localized_launch()?"));
-        assert!(macos_launch_body.contains("hidden_command(\"open\")"));
-        assert!(macos_launch_body.contains("enable_macos_claude_main_process_debugger()"));
-        assert!(macos_launch_body.contains("retry_inject_localization()"));
-        assert!(!macos_launch_body.contains("localization injection also failed"));
-        assert!(macos_launch_body.contains("localization inspector opened, but injection failed"));
-        assert!(!macos_launch_body.contains(concat!("apply_", "macos_localization_patch()?")));
-
         let script = macos_localized_launch_script();
-        assert!(!script.contains("developer_settings.json"));
-        assert!(!script.contains("allowDevTools"));
-        assert!(!script.contains("osascript"));
-        assert!(!script.contains("tell application"));
-        assert!(!script.contains("/usr/bin/plutil"));
-        assert!(script.contains("/usr/bin/pgrep -x Claude"));
-        assert!(script.contains("/usr/bin/pkill -TERM -x Claude"));
-        assert!(script.contains("/usr/bin/pkill -KILL -x Claude"));
-        assert!(script.contains("/usr/bin/open -a Claude"));
-        assert!(script.contains("claude_debugger_open()"));
-        assert!(script.contains("lsof -nP -iTCP"));
-        assert!(script.contains("/usr/bin/curl -fsS --max-time 1"));
-        assert!(script.contains("port=9229"));
-        assert!(!script.contains("/usr/bin/seq 9229 9300"));
-        assert!(script.contains("\"webSocketDebuggerUrl\""));
-        assert!(script.contains("Claude.app/Contents/MacOS/Claude"));
-        assert!(script.contains("while ! claude_debugger_open; do"));
-        assert!(script.contains("deadline=$(( $(/bin/date +%s) + 90 ))"));
-        assert!(script.contains("debugger_attempts=0"));
-        assert!(script.contains("debugger_attempts=$((debugger_attempts + 1))"));
-        assert!(script.contains(
-            "Waiting for CodeStudio Lite to enable Claude main process debugger via Accessibility"
-        ));
-        assert!(script.contains("Timed out waiting for Claude main process debugger"));
-        assert!(!script.contains("APPLESCRIPT"));
-        assert!(!script.contains("JXA"));
-        assert!(!script.contains("clickDebuggerConfirmation"));
-        assert!(!script.contains("clickedDebuggerMenu"));
-        assert!(script.contains("localized-launch.flag"));
+        assert_contains_all(
+            &script,
+            &[
+                "/usr/bin/pgrep -x Claude",
+                "/usr/bin/pkill -TERM -x Claude",
+                "/usr/bin/pkill -KILL -x Claude",
+                "/usr/bin/open -a Claude",
+                "claude_debugger_open()",
+                "lsof -nP -iTCP",
+                "/usr/bin/curl -fsS --max-time 1",
+                "port=9229",
+                "\"webSocketDebuggerUrl\"",
+                "Claude.app/Contents/MacOS/Claude",
+                "while ! claude_debugger_open; do",
+                "deadline=$(( $(/bin/date +%s) + 90 ))",
+                "debugger_attempts=0",
+                "debugger_attempts=$((debugger_attempts + 1))",
+                "Waiting for CodeStudio Lite to enable Claude main process debugger via Accessibility",
+                "Timed out waiting for Claude main process debugger",
+                "localized-launch.flag",
+            ],
+        );
+        assert_contains_none(
+            &script,
+            &[
+                "developer_settings.json",
+                "allowDevTools",
+                "osascript",
+                "tell application",
+                "/usr/bin/plutil",
+                "/usr/bin/seq 9229 9300",
+                "APPLESCRIPT",
+                "JXA",
+                "clickDebuggerConfirmation",
+                "clickedDebuggerMenu",
+            ],
+        );
     }
 
     #[test]
@@ -4182,249 +4317,230 @@ mod tests {
     fn localized_launch_uses_official_debugger_runtime_injection_without_debug_args() {
         assert!(claude_launch_args(true).is_empty());
         assert!(claude_launch_args(false).is_empty());
-        let source = include_str!("claude_desktop_patch.rs");
-        let production_source = production_source(source);
-        assert!(production_source.contains("ensure_windows_claude_main_process_debugger"));
-        assert!(production_source.contains("enable_claude_main_process_debugger"));
-        assert!(production_source.contains("retry_inject_localization"));
-        assert!(!production_source.contains(concat!("apply_", "localization_patch")));
-        assert!(!production_source.contains(concat!("build_", "inspector_shim")));
+        let production_source = production_source();
+        assert_contains_all(
+            production_source,
+            &[
+                "ensure_windows_claude_main_process_debugger",
+                "enable_claude_main_process_debugger",
+                "retry_inject_localization",
+            ],
+        );
+        assert_contains_none(
+            production_source,
+            &[
+                concat!("apply_", "localization_patch"),
+                concat!("build_", "inspector_shim"),
+            ],
+        );
     }
 
     #[test]
     fn windows_debugger_automation_uses_in_window_menu_not_alt_top_menu() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let request_body = source
-            .split("fn request_windows_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
-            .expect("request_windows_claude_main_process_debugger_once body should exist");
-        assert!(request_body.contains("UIAutomationClient"));
-        assert!(request_body.contains("SetProcessDPIAware"));
-        assert!(request_body.contains("shell:AppsFolder"));
-        assert!(request_body.contains("$bang = [char]33"));
-        assert!(request_body.contains("$packagePrefix = $pkg.PackageFamilyName + $bang"));
+        let request_body = windows_debugger_request_body();
+        assert_contains_all(
+            request_body,
+            &[
+                "UIAutomationClient",
+                "SetProcessDPIAware",
+                "shell:AppsFolder",
+                "$bang = [char]33",
+                "$packagePrefix = $pkg.PackageFamilyName + $bang",
+                "Developer",
+                "Enable Main Process Debugger",
+                "TogglePattern",
+                "ValuePattern",
+                "Find-ClaudeMenuButton",
+                "Invoke-Element",
+                "Find-ClaudeDeveloperMenuByStructure",
+                "Find-ClaudeDebuggerToggleByStructure",
+                "Find-ClaudeMenuItems",
+                "AutomationElement]::FromHandle($window.Hwnd)",
+                "Close-ClaudeInspectorPromptWindows",
+                "Test-ClaudeInspectorPromptCandidate",
+                "IsInspectorPrompt",
+                "Where-Object { -not $_.IsInspectorPrompt }",
+            ],
+        );
         assert!(!request_body.contains("$($pkg.PackageFamilyName)!"));
-        assert!(request_body.contains("Developer"));
-        assert!(request_body.contains("Enable Main Process Debugger"));
-        assert!(request_body.contains("TogglePattern"));
-        assert!(request_body.contains("ValuePattern"));
-        assert!(request_body.contains("Find-ClaudeMenuButton"));
-        assert!(request_body.contains("Invoke-Element"));
-        assert!(request_body.contains("Find-ClaudeDeveloperMenuByStructure"));
-        assert!(request_body.contains("Find-ClaudeDebuggerToggleByStructure"));
-        assert!(request_body.contains("Find-ClaudeMenuItems"));
-        assert!(request_body.contains("AutomationElement]::FromHandle($window.Hwnd)"));
-        assert!(request_body.contains("Close-ClaudeInspectorPromptWindows"));
-        assert!(request_body.contains("Test-ClaudeInspectorPromptCandidate"));
-        assert!(request_body.contains("IsInspectorPrompt"));
-        assert!(request_body.contains("Where-Object { -not $_.IsInspectorPrompt }"));
-        assert!(
-            request_body
-                .find("Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null")
-                .expect("inspector prompt should be closed before menu automation")
-                < request_body
-                    .find("if (-not (Open-ClaudeMenu $window $developerNames))")
-                    .expect("menu lookup should happen after prompt cleanup")
+        assert_order(
+            request_body,
+            "Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null",
+            "if (-not (Open-ClaudeMenu $window $developerNames))",
+            "inspector prompt should be closed before menu automation",
         );
-        assert!(request_body.contains("WindowPattern"));
-        assert!(request_body.contains("$windowPattern.Close()"));
-        assert!(request_body.contains("PostMessage"));
-        assert!(request_body.contains("WM_CLOSE"));
-        assert!(request_body.contains("windows-main-debugger.log"));
-        assert!(request_body.contains("Write-ClaudeDebuggerLog"));
-        assert!(request_body.contains("Format-ClaudeElementForLog"));
-        assert!(request_body.contains("$menuButton = Find-ClaudeMenuButton $window"));
-        assert!(
-            request_body
-                .find("function Open-ClaudeMenu")
-                .expect("Open-ClaudeMenu function should exist")
-                < request_body
-                    .find("$menuButton = Find-ClaudeMenuButton $window")
-                    .expect("menu button lookup should still be the button fallback")
+        assert_contains_all(
+            request_body,
+            &[
+                "WindowPattern",
+                "$windowPattern.Close()",
+                "PostMessage",
+                "WM_CLOSE",
+                "windows-main-debugger.log",
+                "Write-ClaudeDebuggerLog",
+                "Format-ClaudeElementForLog",
+                "$menuButton = Find-ClaudeMenuButton $window",
+                "run_windows_debugger_powershell_with_timeout",
+            ],
         );
-        assert!(
-            request_body
-                .find("function Open-ClaudeMenu")
-                .and_then(|start| {
-                    request_body[start..]
-                        .find("Test-ClaudeMenuPopupOpen $window $developerNames")
-                        .map(|offset| start + offset)
-                })
-                .expect("popup Developer menu should be accepted before button fallback")
-                < request_body
-                    .find("$menuButton = Find-ClaudeMenuButton $window")
-                    .expect("menu button lookup should happen after visible menu check")
+        assert_contains_in_order(
+            request_body,
+            &[
+                "function Open-ClaudeMenu",
+                "Test-ClaudeMenuPopupOpen $window $developerNames",
+                "$menuButton = Find-ClaudeMenuButton $window",
+            ],
+            "Open-ClaudeMenu should accept visible popup menus before button fallback",
         );
-        assert!(
-            request_body
-                .find("if (-not (Open-ClaudeMenu $window $developerNames))")
-                .expect("should open the in-window menu through UI Automation")
-                < request_body
-                    .find("$developer = Find-ClaudeDeveloperMenuByStructure $window")
-                    .expect("developer lookup should run after opening the menu")
+        assert_order(
+            request_body,
+            "if (-not (Open-ClaudeMenu $window $developerNames))",
+            "$developer = Find-ClaudeDeveloperMenuByStructure $window",
+            "developer lookup should run after opening the in-window menu",
         );
-        assert!(
-            request_body
-                .find("Find-ClaudeDeveloperMenuElement $developerNames")
-                .expect("localized developer label lookup should remain the fast path")
-                < request_body
-                    .find("$developer = Find-ClaudeDeveloperMenuByStructure $window")
-                    .expect("structural developer fallback should run after label lookup")
+        assert_order(
+            request_body,
+            "Find-ClaudeDeveloperMenuElement $developerNames",
+            "$developer = Find-ClaudeDeveloperMenuByStructure $window",
+            "structural developer fallback should run after label lookup",
         );
-        assert!(
-            request_body
-                .find("Find-ClaudeDebuggerToggleElement $debuggerNames")
-                .expect("localized debugger label lookup should remain the fast path")
-                < request_body
-                    .find("$debuggerItem = Find-ClaudeDebuggerToggleByStructure $window")
-                    .expect("structural debugger fallback should run after label lookup")
+        assert_order(
+            request_body,
+            "Find-ClaudeDebuggerToggleElement $debuggerNames",
+            "$debuggerItem = Find-ClaudeDebuggerToggleByStructure $window",
+            "structural debugger fallback should run after label lookup",
         );
-        assert!(
-            request_body
-                .find("for ($attempt = 0; $attempt -lt 8; $attempt++)")
-                .expect("confirmation handling should stay after toggling debugger")
-                < request_body
-                    .rfind("Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null")
-                    .expect("inspector prompt windows should be closed after debugger opens")
+        assert_contains_in_order(
+            request_body,
+            &[
+                "$togglePattern.Toggle()",
+                "for ($attempt = 0; $attempt -lt 8; $attempt++)",
+                "Wait-CloseClaudeInspectorPromptWindows $window 12 | Out-Null",
+            ],
+            "inspector prompt windows should be closed after debugger opens",
         );
-        assert!(!request_body.contains(concat!("Set", "Cursor", "Pos")));
-        assert!(!request_body.contains(concat!("mouse", "_event")));
-        assert!(!request_body.contains(concat!("Click", "-Point")));
-        assert!(!request_body.contains(concat!("Click", "-Element", "Center")));
-        assert!(!request_body.contains(concat!("System.Windows", ".Forms")));
-        assert!(!request_body.contains(concat!("Bounding", "Rectangle")));
-        assert!(!request_body.contains(concat!("$window", ".Left")));
-        assert!(!request_body.contains(concat!("$window", ".Top")));
-        assert!(!request_body.contains(concat!("$window", ".Right")));
-        assert!(!request_body.contains(concat!("$window", ".Bottom")));
-        assert!(!request_body.contains(concat!("Send", "Keys")));
-        assert!(!request_body.contains("'%d'"));
-        assert!(!request_body.contains("{DOWN}{ENTER}"));
-        assert!(request_body.contains("run_windows_debugger_powershell_with_timeout"));
-        assert!(!request_body.contains("crate::core::platform::run_powershell(script)"));
-        assert!(source.contains("WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT"));
-        assert!(source.contains("child.kill()"));
+        assert_contains_none(
+            request_body,
+            &[
+                concat!("Set", "Cursor", "Pos"),
+                concat!("mouse", "_event"),
+                concat!("Click", "-Point"),
+                concat!("Click", "-Element", "Center"),
+                concat!("System.Windows", ".Forms"),
+                concat!("Bounding", "Rectangle"),
+                concat!("$window", ".Left"),
+                concat!("$window", ".Top"),
+                concat!("$window", ".Right"),
+                concat!("$window", ".Bottom"),
+                concat!("Send", "Keys"),
+                "'%d'",
+                "{DOWN}{ENTER}",
+                "crate::core::platform::run_powershell(script)",
+            ],
+        );
+        assert_contains_all(
+            patch_source(),
+            &[
+                "WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT",
+                "child.kill()",
+            ],
+        );
     }
 
     #[test]
     fn windows_debugger_automation_searches_same_claude_process_popup_menus() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let request_body = source
-            .split("fn request_windows_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
-            .expect("request_windows_claude_main_process_debugger_once body should exist");
+        let request_body = windows_debugger_request_body();
 
-        assert!(request_body.contains("function Get-ClaudeAutomationRoots($window)"));
-        assert!(request_body.contains("if ([int]$processId -ne [int]$window.ProcessId)"));
-        assert!(request_body.contains("$className -notlike 'Chrome_WidgetWin_*'"));
-        assert!(request_body.contains("AutomationElement]::FromHandle($hWnd)"));
-        assert!(
-            request_body
-                .find("function Get-ClaudeAutomationRoots($window)")
-                .expect("same-process UIA root helper should be defined")
-                < request_body
-                    .find("function Find-ClaudeMenuElement")
-                    .expect("menu lookup should use same-process root helper")
+        assert_contains_all(
+            request_body,
+            &[
+                "function Get-ClaudeAutomationRoots($window)",
+                "if ([int]$processId -ne [int]$window.ProcessId)",
+                "$className -notlike 'Chrome_WidgetWin_*'",
+                "AutomationElement]::FromHandle($hWnd)",
+            ],
         );
-        assert!(
-            request_body
-                .find("foreach ($rootInfo in (Get-ClaudeAutomationRoots $window))")
-                .expect("menu lookup should scan same-process Claude popup roots")
-                < request_body
-                    .find("$matches = $root.FindAll")
-                    .expect("menu lookup should search each collected root")
+        assert_order(
+            request_body,
+            "function Get-ClaudeAutomationRoots($window)",
+            "function Find-ClaudeMenuElement",
+            "menu lookup should use same-process root helper",
+        );
+        assert_order(
+            request_body,
+            "foreach ($rootInfo in (Get-ClaudeAutomationRoots $window))",
+            "$matches = $root.FindAll",
+            "menu lookup should search each collected root",
         );
     }
 
     #[test]
     fn windows_debugger_automation_does_not_treat_main_window_submenu_as_open_menu() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let request_body = source
-            .split("fn request_windows_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
-            .expect("request_windows_claude_main_process_debugger_once body should exist");
+        let request_body = windows_debugger_request_body();
 
-        assert!(request_body.contains("function Find-ClaudeDeveloperMenuElement"));
-        assert!(request_body.contains("function Find-ClaudeDebuggerToggleElement"));
-        assert!(request_body.contains("function Test-ClaudeMenuPopupOpen"));
-        assert!(request_body.contains("if ($rootInfo.IsMainWindow) { continue }"));
-        assert!(request_body.contains("$controlType -eq 'ControlType.MenuItem'"));
-        assert!(request_body.contains("$className -eq 'MenuItemView'"));
-        assert!(
-            request_body.contains("$patterns -contains 'ExpandCollapsePatternIdentifiers.Pattern'")
+        assert_contains_all(
+            request_body,
+            &[
+                "function Find-ClaudeDeveloperMenuElement",
+                "function Find-ClaudeDebuggerToggleElement",
+                "function Test-ClaudeMenuPopupOpen",
+                "if ($rootInfo.IsMainWindow) { continue }",
+                "$controlType -eq 'ControlType.MenuItem'",
+                "$className -eq 'MenuItemView'",
+                "$patterns -contains 'ExpandCollapsePatternIdentifiers.Pattern'",
+                "$controlType -eq 'ControlType.CheckBox'",
+                "$patterns -contains 'TogglePatternIdentifiers.Pattern'",
+            ],
         );
-        assert!(request_body.contains("$controlType -eq 'ControlType.CheckBox'"));
-        assert!(request_body.contains("$patterns -contains 'TogglePatternIdentifiers.Pattern'"));
         assert!(!request_body.contains("Find-ClaudeMenuElement $developerNames $window $false"));
     }
 
     #[test]
     fn windows_debugger_automation_closes_anonymous_blocking_overlay_before_menu() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let request_body = source
-            .split("fn request_windows_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
-            .expect("request_windows_claude_main_process_debugger_once body should exist");
+        let request_body = windows_debugger_request_body();
 
-        assert!(request_body.contains("function Close-ClaudeBlockingOverlayWindows($window)"));
-        assert!(request_body.contains("function Find-ClaudeAnonymousOverlayCloseButton($root)"));
-        assert!(request_body.contains("function Test-ClaudeOverlayCandidateText([string]$text)"));
-        assert!(request_body.contains("if ($name.Length -gt 0) { continue }"));
-        assert!(request_body.contains("InvokePatternIdentifiers.Pattern"));
-        assert!(request_body.contains("ControlType.Button"));
-        assert!(request_body.contains(
-            "Upgrade|Plan|Pro|Team|Try|Trial|Subscribe|Discount|Offer|New|Announcement|Promo"
-        ));
-        assert!(request_body.contains("升级|订阅|套餐|试用|优惠|公告|新功能|推广|广告"));
-        assert!(
-            request_body
-                .find("Close-ClaudeBlockingOverlayWindows $window | Out-Null")
-                .expect("blocking overlay should be closed before menu automation")
-                < request_body
-                    .find("if (-not (Open-ClaudeMenu $window $developerNames))")
-                    .expect("menu automation should happen after overlay cleanup")
+        assert_contains_all(
+            request_body,
+            &[
+                "function Close-ClaudeBlockingOverlayWindows($window)",
+                "function Find-ClaudeAnonymousOverlayCloseButton($root)",
+                "function Test-ClaudeOverlayCandidateText([string]$text)",
+                "if ($name.Length -gt 0) { continue }",
+                "InvokePatternIdentifiers.Pattern",
+                "ControlType.Button",
+                "Upgrade|Plan|Pro|Team|Try|Trial|Subscribe|Discount|Offer|New|Announcement|Promo",
+                "升级|订阅|套餐|试用|优惠|公告|新功能|推广|广告",
+            ],
         );
-        assert!(!request_body.contains(concat!("Set", "Cursor", "Pos")));
-        assert!(!request_body.contains(concat!("Click", "-Element", "Center")));
-        assert!(!request_body.contains(concat!("Bounding", "Rectangle")));
+        assert_order(
+            request_body,
+            "Close-ClaudeBlockingOverlayWindows $window | Out-Null",
+            "if (-not (Open-ClaudeMenu $window $developerNames))",
+            "blocking overlay should be closed before menu automation",
+        );
+        assert_contains_none(
+            request_body,
+            &[
+                concat!("Set", "Cursor", "Pos"),
+                concat!("Click", "-Element", "Center"),
+                concat!("Bounding", "Rectangle"),
+            ],
+        );
     }
 
     #[test]
     fn windows_debugger_automation_prefers_existing_window_before_appx_activation() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let request_body = source
-            .split("fn request_windows_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
-            .expect("request_windows_claude_main_process_debugger_once body should exist");
+        let request_body = windows_debugger_request_body();
 
-        let first_window_lookup = request_body
-            .find("$window = Get-ClaudeMainWindow")
-            .expect("script should look for an already-open Claude window");
-        let existing_window_branch = request_body
-            .find("if ($window) {")
-            .expect("script should branch on already-open Claude windows");
-        let fallback_activation_branch = request_body
-            .find("} else {\n  Start-ClaudeWindowsApp")
-            .expect("script should activate Claude only when no window exists");
-        let first_poll_loop = request_body
-            .find("for ($attempt = 0; $attempt -lt 20; $attempt++)")
-            .expect("script should still poll for Claude after activation");
-        assert!(
-            first_window_lookup < existing_window_branch,
-            "existing visible Claude windows should be used before slow AppX activation"
-        );
-        assert!(
-            existing_window_branch < fallback_activation_branch,
-            "existing-window path should not fall through the AppX activation branch"
-        );
-        assert!(
-            fallback_activation_branch < first_poll_loop,
-            "launch polling should only run after the fallback activation branch starts"
+        assert_contains_in_order(
+            request_body,
+            &[
+                "$window = Get-ClaudeMainWindow",
+                "if ($window) {",
+                "} else {\n  Start-ClaudeWindowsApp",
+                "for ($attempt = 0; $attempt -lt 20; $attempt++)",
+            ],
+            "existing Claude window should be preferred before fallback AppX activation",
         );
         assert!(!request_body.contains("if (-not $window) { Start-ClaudeWindowsApp }"));
         assert!(request_body.contains(
@@ -4434,277 +4550,279 @@ mod tests {
 
     #[test]
     fn windows_debugger_automation_polls_to_close_inspector_prompt() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let request_body = source
-            .split("fn request_windows_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
-            .expect("request_windows_claude_main_process_debugger_once body should exist");
+        let request_body = windows_debugger_request_body();
 
-        assert!(request_body.contains("function Wait-CloseClaudeInspectorPromptWindows($window"));
-        assert!(request_body.contains("Close-ClaudeInspectorPromptWindows $window"));
-        assert!(request_body.contains("Start-Sleep -Milliseconds 120"));
-        assert!(
-            request_body
-                .find("$togglePattern.Toggle()")
-                .expect("debugger toggle should be invoked")
-                < request_body
-                    .find("Wait-CloseClaudeInspectorPromptWindows $window")
-                    .expect("inspector prompt should be polled after toggling debugger")
+        assert_contains_all(
+            request_body,
+            &[
+                "function Wait-CloseClaudeInspectorPromptWindows($window",
+                "Close-ClaudeInspectorPromptWindows $window",
+                "Start-Sleep -Milliseconds 120",
+            ],
         );
-        assert!(
-            request_body
-                .find("for ($attempt = 0; $attempt -lt 8; $attempt++)")
-                .expect("confirmation loop should remain")
-                < request_body
-                    .rfind("Wait-CloseClaudeInspectorPromptWindows $window")
-                    .expect("inspector prompt should also be polled after confirmations")
+        assert_order(
+            request_body,
+            "$togglePattern.Toggle()",
+            "Wait-CloseClaudeInspectorPromptWindows $window",
+            "inspector prompt should be polled after toggling debugger",
+        );
+        assert_contains_in_order(
+            request_body,
+            &[
+                "for ($attempt = 0; $attempt -lt 8; $attempt++)",
+                "Wait-CloseClaudeInspectorPromptWindows $window",
+            ],
+            "inspector prompt should also be polled after confirmations",
         );
     }
 
     #[test]
     fn windows_debugger_automation_closes_native_inspector_dialog_windows() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let request_body = source
-            .split("fn request_windows_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("#[cfg(target_os = \"macos\")]").next())
-            .expect("request_windows_claude_main_process_debugger_once body should exist");
+        let request_body = windows_debugger_request_body();
 
-        assert!(
-            request_body.contains("function Test-ClaudeInspectorWindowClass([string]$className)")
+        assert_contains_all(
+            request_body,
+            &[
+                "function Test-ClaudeInspectorWindowClass([string]$className)",
+                "'#32770'",
+            ],
         );
-        assert!(request_body.contains("'#32770'"));
-        let close_body = request_body
-            .split("function Close-ClaudeInspectorPromptWindows($window)")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split("function Wait-CloseClaudeInspectorPromptWindows")
-                    .next()
-            })
-            .expect("Close-ClaudeInspectorPromptWindows body should exist");
-        assert!(close_body.contains("Test-ClaudeInspectorWindowClass $className"));
-        assert!(!close_body.contains("if ($className -ne 'Chrome_WidgetWin_1') { return $true }"));
-        assert!(close_body.contains("$closed += 1"));
-        assert!(!close_body.contains("$script:closed += 1"));
+        let close_body = source_between(
+            request_body,
+            "function Close-ClaudeInspectorPromptWindows($window)",
+            "function Wait-CloseClaudeInspectorPromptWindows",
+            "Close-ClaudeInspectorPromptWindows",
+        );
+        assert_contains_all(
+            close_body,
+            &["Test-ClaudeInspectorWindowClass $className", "$closed += 1"],
+        );
+        assert_contains_none(
+            close_body,
+            &[
+                "if ($className -ne 'Chrome_WidgetWin_1') { return $true }",
+                "$script:closed += 1",
+            ],
+        );
     }
 
     #[test]
     fn node_inspector_uses_claude_default_port_only() {
-        let source = include_str!("claude_desktop_patch.rs");
         assert_eq!(CLAUDE_NODE_INSPECT_PORT, 9229);
-        assert!(!source.contains(&concat!("CLAUDE_NODE_INSPECT_PORT", "_SCAN_END")));
-        assert!(!source.contains(&concat!("..=", "CLAUDE_NODE_INSPECT_PORT")));
+        assert_contains_none(
+            patch_source(),
+            &[
+                concat!("CLAUDE_NODE_INSPECT_PORT", "_SCAN_END"),
+                concat!("..=", "CLAUDE_NODE_INSPECT_PORT"),
+            ],
+        );
     }
 
     #[test]
     fn node_inspector_injection_source_targets_electron_windows() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
+        let source = main_process_injection_source();
+        assert_contains_all(
+            &source,
+            &[
+                "BrowserWindow.getAllWindows",
+                "process.getBuiltinModule(\"module\").createRequire",
+                "contents.debugger.attach",
+                "__cslZhAttachedVersion",
+                "debuggerWasAttached",
+                "contents.debugger.detach()",
+                "Fetch.enable",
+                "Page.addScriptToEvaluateOnNewDocument",
+                "Page.reload",
+                "withTimeout",
+                "__CODESTUDIO_CLAUDE_ZH_MAIN__",
+                "CSL_INJECTION_VERSION",
+                "translation-runtime.js",
+                "localePayloadForUrl",
+                "ion-dist/i18n/en-US.json",
+                "currentLocale === \"zh-CN\" && isEn && localLike",
+                "webContents.getAllWebContents",
+                "localWindowHotSwitchSync",
+                "lower.startsWith(\"devtools://\")",
+                "applyLocalWindowTitle",
+                "setup-desktop-3p",
+                "Configure Third-Party Inference",
+                "aboutClaudeWindowFallback",
+                "About Claude",
+                "about_window",
+            ],
         );
-        assert!(source.contains("BrowserWindow.getAllWindows"));
-        assert!(source.contains("process.getBuiltinModule(\"module\").createRequire"));
-        assert!(source.contains("contents.debugger.attach"));
-        assert!(source.contains("__cslZhAttachedVersion"));
-        assert!(source.contains("debuggerWasAttached"));
-        assert!(source.contains("contents.debugger.detach()"));
-        assert!(source.contains("Fetch.enable"));
-        assert!(source.contains("Page.addScriptToEvaluateOnNewDocument"));
         // The runtime is delivered via addScriptToEvaluateOnNewDocument so it
         // survives the reload; executeJavaScript is intentionally NOT awaited
         // before reload (that would leave its promise pending on unload).
-        assert!(!source.contains("await contents.executeJavaScript(runtime, true)"));
-        assert!(source.contains("Page.reload"));
-        assert!(source.contains("withTimeout"));
-        assert!(source.contains("__CODESTUDIO_CLAUDE_ZH_MAIN__"));
-        assert!(source.contains("CSL_INJECTION_VERSION"));
-        assert!(source.contains("translation-runtime.js"));
-        assert!(source.contains("localePayloadForUrl"));
-        assert!(source.contains("ion-dist/i18n/en-US.json"));
-        assert!(source.contains("currentLocale === \"zh-CN\" && isEn && localLike"));
-        assert!(source.contains("webContents.getAllWebContents"));
-        assert!(source.contains("localWindowHotSwitchSync"));
-        assert!(source.contains("lower.startsWith(\"devtools://\")"));
-        assert!(source.contains("applyLocalWindowTitle"));
-        assert!(source.contains("setup-desktop-3p"));
-        assert!(source.contains("Configure Third-Party Inference"));
-        assert!(source.contains("aboutClaudeWindowFallback"));
-        assert!(source.contains("About Claude"));
-        assert!(source.contains("about_window"));
+        assert_contains_none(
+            &source,
+            &["await contents.executeJavaScript(runtime, true)"],
+        );
     }
 
     #[test]
     fn node_inspector_injection_syncs_locale_after_language_menu_changes() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("CSL_INJECTION_VERSION = 9"));
-        assert!(source.contains("let currentLocale"));
-        assert!(source.contains("setCurrentLocale"));
-        assert!(source.contains("zhActive"));
-        assert!(source.contains("pollLocale"));
-        assert!(source.contains("syncOpenWindowsLocale"));
-        assert!(source.contains("syncOneWindowLocale"));
-        assert!(source.contains("CSL_WANTED_LOCALE_KEY"));
-        assert!(source.contains(
-            "localStorage.getItem(\"__cslWantedLocale\")||localStorage.getItem(\"spa:locale\")"
-        ));
-        assert!(source.contains("localStorage.getItem(\"spa:locale\")"));
-        assert!(source.contains("localStorage.setItem(\"__cslWantedLocale\""));
-        assert!(source.contains("localStorage.setItem(\"spa:locale\""));
-        assert!(source.contains("claude-locale-change"));
-        assert!(source.contains("localeChangeListeners.push(syncOpenWindowsLocale)"));
-        assert!(source.contains("syncOpenWindowsLocale(currentLocale)"));
-        assert!(source.contains("fireLocaleChange(currentLocale)"));
-        assert!(source.contains("fallback"));
-        assert!(source.contains("setCurrentLocale(fallback)"));
+        assert_contains_all(
+            &source,
+            &[
+                "CSL_INJECTION_VERSION = 9",
+                "let currentLocale",
+                "setCurrentLocale",
+                "zhActive",
+                "pollLocale",
+                "syncOpenWindowsLocale",
+                "syncOneWindowLocale",
+                "CSL_WANTED_LOCALE_KEY",
+                "localStorage.getItem(\"__cslWantedLocale\")||localStorage.getItem(\"spa:locale\")",
+                "localStorage.getItem(\"spa:locale\")",
+                "localStorage.setItem(\"__cslWantedLocale\"",
+                "localStorage.setItem(\"spa:locale\"",
+                "claude-locale-change",
+                "localeChangeListeners.push(syncOpenWindowsLocale)",
+                "syncOpenWindowsLocale(currentLocale)",
+                "fireLocaleChange(currentLocale)",
+                "fallback",
+                "setCurrentLocale(fallback)",
+            ],
+        );
     }
 
     #[test]
     fn node_inspector_injection_localizes_macos_menu_bar() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("macosMenuBarLocalization"));
-        assert!(source.contains("process.platform !== \"darwin\""));
-        assert!(source.contains("Menu.setApplicationMenu"));
-        assert!(source.contains("Menu.getApplicationMenu"));
-        assert!(source.contains("__cslMenuBarLocalizationInstalled"));
-        assert!(source.contains("__cslLastApplicationMenu"));
-        assert!(source.contains("localeChangeListeners.push(retranslateMenuBar)"));
-        assert!(source.contains("en-US.json"));
-        assert!(source.contains("shellLocale"));
-        assert!(source.contains("labelToId"));
-        assert!(source.contains("rememberCatalog"));
-        assert!(source.contains("process.resourcesPath"));
-        assert!(source.contains("__cslMessageId"));
-        assert!(source.contains("labelMessageId"));
-        assert!(source.contains("menuHardcodedZh"));
-        assert!(source.contains("menuRoleZh"));
-        assert!(source.contains("roleKey(item)"));
-        assert!(source.contains("Hide Claude"));
-        assert!(source.contains("Enable Main Process Debugger"));
-        assert!(source.contains("\\u542f\\u7528\\u4e3b\\u8fdb\\u7a0b\\u8c03\\u8bd5\\u5668"));
+        assert_contains_all(
+            &source,
+            &[
+                "macosMenuBarLocalization",
+                "process.platform !== \"darwin\"",
+                "Menu.setApplicationMenu",
+                "Menu.getApplicationMenu",
+                "__cslMenuBarLocalizationInstalled",
+                "__cslLastApplicationMenu",
+                "localeChangeListeners.push(retranslateMenuBar)",
+                "en-US.json",
+                "shellLocale",
+                "labelToId",
+                "rememberCatalog",
+                "process.resourcesPath",
+                "__cslMessageId",
+                "labelMessageId",
+                "menuHardcodedZh",
+                "menuRoleZh",
+                "roleKey(item)",
+                "Hide Claude",
+                "Enable Main Process Debugger",
+                "\\u542f\\u7528\\u4e3b\\u8fdb\\u7a0b\\u8c03\\u8bd5\\u5668",
+            ],
+        );
     }
 
     #[test]
     fn node_inspector_injection_localizes_windows_in_window_menu() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("windowsMenuPopupLocalization"));
-        assert!(source.contains("process.platform === \"win32\""));
-        assert!(source.contains("Menu.buildFromTemplate"));
-        assert!(source.contains("Menu.setApplicationMenu"));
-        assert!(source.contains("Menu.prototype.popup"));
-        assert!(source.contains("__cslMenuPopupLocalizationInstalled"));
-        assert!(source.contains("localizeMenuForCurrentLocale"));
-        assert!(source.contains("relabelMenuItems(menu, currentLocale"));
-        assert!(source.contains("origBuildFromTemplate(template)"));
-        assert!(source.contains("origSetApplicationMenu(menu)"));
-        assert!(source.contains("origPopup.call(this"));
-        assert!(source.contains("\"File\": \"\\u6587\\u4ef6\""));
-        assert!(source.contains("\"Edit\": \"\\u7f16\\u8f91\""));
-        assert!(source.contains("\"View\": \"\\u89c6\\u56fe\""));
-        assert!(source.contains("\"Developer\": \"\\u5f00\\u53d1\\u8005\""));
-        assert!(source.contains("\"Help\": \"\\u5e2e\\u52a9\""));
-        assert!(source.contains("\"Show Dev Tools\""));
-        assert!(source.contains("\"Open App Config File...\""));
+        assert_contains_all(
+            &source,
+            &[
+                "windowsMenuPopupLocalization",
+                "process.platform === \"win32\"",
+                "Menu.buildFromTemplate",
+                "Menu.setApplicationMenu",
+                "Menu.prototype.popup",
+                "__cslMenuPopupLocalizationInstalled",
+                "localizeMenuForCurrentLocale",
+                "relabelMenuItems(menu, currentLocale",
+                "origBuildFromTemplate(template)",
+                "origSetApplicationMenu(menu)",
+                "origPopup.call(this",
+                "\"File\": \"\\u6587\\u4ef6\"",
+                "\"Edit\": \"\\u7f16\\u8f91\"",
+                "\"View\": \"\\u89c6\\u56fe\"",
+                "\"Developer\": \"\\u5f00\\u53d1\\u8005\"",
+                "\"Help\": \"\\u5e2e\\u52a9\"",
+                "\"Show Dev Tools\"",
+                "\"Open App Config File...\"",
+            ],
+        );
     }
 
     #[test]
     fn node_inspector_injection_syncs_windows_devtools_title_after_language_changes() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("devToolsWindowTitleSync"));
-        assert!(source.contains("lower.startsWith(\"devtools://\")"));
-        assert!(source.contains("lower.startsWith(\"chrome-devtools://\")"));
-        assert!(source.contains("syncDevToolsTitleLater"));
-        assert!(source.contains("\"page-title-updated\""));
-        assert!(source.contains("\"devtools-opened\""));
-        assert!(source.contains("\"did-finish-load\""));
-        assert!(source.contains("localeChangeListeners.push(() =>"));
-        assert!(source.contains("syncOpenWindowsLocale(currentLocale)"));
-        assert!(source.contains("\\u5f00\\u53d1\\u8005\\u5de5\\u5177"));
+        assert_contains_all(
+            &source,
+            &[
+                "devToolsWindowTitleSync",
+                "lower.startsWith(\"devtools://\")",
+                "lower.startsWith(\"chrome-devtools://\")",
+                "syncDevToolsTitleLater",
+                "\"page-title-updated\"",
+                "\"devtools-opened\"",
+                "\"did-finish-load\"",
+                "localeChangeListeners.push(() =>",
+                "syncOpenWindowsLocale(currentLocale)",
+                "\\u5f00\\u53d1\\u8005\\u5de5\\u5177",
+            ],
+        );
     }
 
     #[test]
     fn node_inspector_injection_localizes_windows_tray_menu() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("windowsTrayMenuLocalization"));
-        assert!(source.contains("electron.Tray"));
-        assert!(source.contains("Tray.prototype.setContextMenu"));
-        assert!(source.contains("__cslTrayMenuLocalizationInstalled"));
-        assert!(source.contains("knownTrayMenus"));
-        assert!(source.contains("localizeTrayMenuForCurrentLocale"));
-        assert!(source.contains("localeChangeListeners.push(retranslateTrayMenus)"));
-        assert!(source.contains("Show Claude"));
-        assert!(source.contains("Show App"));
-        assert!(source.contains("Quit Claude"));
-        assert!(source.contains("\\u663e\\u793a Claude"));
-        assert!(source.contains("\\u663e\\u793a\\u5e94\\u7528\\u754c\\u9762"));
-        assert!(source.contains("\\u9000\\u51fa Claude"));
+        assert_contains_all(
+            &source,
+            &[
+                "windowsTrayMenuLocalization",
+                "electron.Tray",
+                "Tray.prototype.setContextMenu",
+                "__cslTrayMenuLocalizationInstalled",
+                "knownTrayMenus",
+                "localizeTrayMenuForCurrentLocale",
+                "localeChangeListeners.push(retranslateTrayMenus)",
+                "Show Claude",
+                "Show App",
+                "Quit Claude",
+                "\\u663e\\u793a Claude",
+                "\\u663e\\u793a\\u5e94\\u7528\\u754c\\u9762",
+                "\\u9000\\u51fa Claude",
+            ],
+        );
     }
 
     #[test]
     fn macos_menu_bar_can_return_to_chinese_from_other_locales() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("rememberCatalog(enObj)"));
-        assert!(source.contains("rememberCatalog(zhObj)"));
-        assert!(source.contains("fs.readdirSync(process.resourcesPath)"));
-        assert!(source.contains("loadLocaleCatalog(target)"));
-        assert!(source
-            .contains("item.__cslMessageId = labelMessageId(orig) || labelMessageId(item.label)"));
-        assert!(source.contains("translateLabel(orig, item.__cslMessageId, roleKey(item))"));
-        assert!(source.contains("const id = item.__cslMessageId || labelMessageId(orig)"));
-        assert!(source.contains("id && idToVal[id] ? idToVal[id]"));
-        assert!(source.contains("about: \"\\u5173\\u4e8eClaude\""));
-        assert!(source.contains("quit: \"\\u9000\\u51fa Claude\""));
+        assert_contains_all(
+            &source,
+            &[
+                "rememberCatalog(enObj)",
+                "rememberCatalog(zhObj)",
+                "fs.readdirSync(process.resourcesPath)",
+                "loadLocaleCatalog(target)",
+                "item.__cslMessageId = labelMessageId(orig) || labelMessageId(item.label)",
+                "translateLabel(orig, item.__cslMessageId, roleKey(item))",
+                "const id = item.__cslMessageId || labelMessageId(orig)",
+                "id && idToVal[id] ? idToVal[id]",
+                "about: \"\\u5173\\u4e8eClaude\"",
+                "quit: \"\\u9000\\u51fa Claude\"",
+            ],
+        );
     }
 
     #[test]
     fn macos_debugger_menu_is_not_clicked_when_inspector_is_already_open() {
-        let source = include_str!("claude_desktop_patch.rs");
-        let enable_body = source
-            .split("fn enable_macos_claude_main_process_debugger()")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split("fn request_macos_claude_main_process_debugger_once")
-                    .next()
-            })
-            .expect("enable_macos_claude_main_process_debugger body should exist");
+        let source = patch_source();
+        let enable_body = patch_between(
+            "fn enable_macos_claude_main_process_debugger()",
+            "fn request_macos_claude_main_process_debugger_once",
+            "enable_macos_claude_main_process_debugger",
+        );
         assert!(
             enable_body
                 .find("claude_node_inspector_available()")
@@ -4734,32 +4852,39 @@ mod tests {
                     .find("request_macos_claude_main_process_debugger_once()")
                     .expect("should request the debugger inside the retry loop")
         );
-        let request_body = source
-            .split("fn request_macos_claude_main_process_debugger_once()")
-            .nth(1)
-            .and_then(|tail| tail.split("fn macos_debugger_log_path").next())
-            .expect("request_macos_claude_main_process_debugger_once body should exist");
-        assert!(request_body.contains("request_macos_claude_main_process_debugger_native"));
-        assert!(request_body.contains("append_macos_debugger_log"));
-        assert!(!request_body.contains(".output()"));
-        assert!(!request_body.contains("osascript"));
-        assert!(!request_body.contains(&concat!(
-            "run_",
-            "macos_main_process_debugger_",
-            "apple",
-            "script"
-        )));
-        let preflight_body = source
-            .split("fn ensure_macos_accessibility_trusted_for_localized_launch()")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split("fn enable_macos_claude_main_process_debugger")
-                    .next()
-            })
-            .expect("Accessibility preflight body should exist");
-        assert!(preflight_body.contains("macos_accessibility_is_trusted_raw()"));
-        assert!(preflight_body.contains("AXIsProcessTrusted=true"));
-        assert!(preflight_body.contains("AXIsProcessTrusted=false"));
+        let request_body = patch_between(
+            "fn request_macos_claude_main_process_debugger_once()",
+            "fn macos_debugger_log_path",
+            "request_macos_claude_main_process_debugger_once",
+        );
+        assert_contains_all(
+            request_body,
+            &[
+                "request_macos_claude_main_process_debugger_native",
+                "append_macos_debugger_log",
+            ],
+        );
+        assert_contains_none(
+            request_body,
+            &[
+                ".output()",
+                "osascript",
+                concat!("run_", "macos_main_process_debugger_", "apple", "script"),
+            ],
+        );
+        let preflight_body = patch_between(
+            "fn ensure_macos_accessibility_trusted_for_localized_launch()",
+            "fn enable_macos_claude_main_process_debugger",
+            "Accessibility preflight",
+        );
+        assert_contains_all(
+            preflight_body,
+            &[
+                "macos_accessibility_is_trusted_raw()",
+                "AXIsProcessTrusted=true",
+                "AXIsProcessTrusted=false",
+            ],
+        );
         assert!(
             preflight_body
                 .find("macos_accessibility_is_trusted_raw()")
@@ -4770,14 +4895,19 @@ mod tests {
         );
         assert!(!preflight_body.contains(concat!("Privacy_", "Accessibility")));
 
-        let native_permission_body = source
-            .split("fn macos_accessibility_trusted_or_prompt()")
-            .nth(1)
-            .and_then(|tail| tail.split("fn request_macos_accessibility_prompt").next())
-            .expect("macos_accessibility_trusted_or_prompt body should exist");
-        assert!(native_permission_body.contains("macos_accessibility_is_trusted_raw()"));
-        assert!(native_permission_body.contains("AXIsProcessTrusted=true before prompt"));
-        assert!(native_permission_body.contains("AXIsProcessTrusted=false before prompt"));
+        let native_permission_body = patch_between(
+            "fn macos_accessibility_trusted_or_prompt()",
+            "fn request_macos_accessibility_prompt",
+            "macos_accessibility_trusted_or_prompt",
+        );
+        assert_contains_all(
+            native_permission_body,
+            &[
+                "macos_accessibility_is_trusted_raw()",
+                "AXIsProcessTrusted=true before prompt",
+                "AXIsProcessTrusted=false before prompt",
+            ],
+        );
         assert!(
             native_permission_body
                 .find("macos_accessibility_is_trusted_raw()")
@@ -4788,25 +4918,30 @@ mod tests {
         );
         assert!(!native_permission_body.contains(concat!("Privacy_", "Accessibility")));
 
-        let background_retry_body = source
-            .split("fn retry_localization_after_background_debugger_request()")
-            .nth(1)
-            .and_then(|tail| tail.split("fn ensure_patch_files").next())
-            .expect("background retry helper body should exist");
+        let background_retry_body = patch_between(
+            "fn retry_localization_after_background_debugger_request()",
+            "fn ensure_patch_files",
+            "background retry helper",
+        );
         assert!(background_retry_body.contains("enable_claude_main_process_debugger()"));
         assert!(!background_retry_body.contains("wait_for_macos_claude_main_process_debugger()"));
-        let silent_body = source
-            .split("pub fn spawn_silent_localization_injector")
-            .nth(1)
-            .and_then(|tail| tail.split("fn ensure_patch_files").next())
-            .expect("spawn_silent_localization_injector body should exist");
+        let silent_body = patch_between(
+            "pub fn spawn_silent_localization_injector",
+            "fn ensure_patch_files",
+            "spawn_silent_localization_injector",
+        );
         assert!(silent_body.contains("enable_claude_main_process_debugger()"));
         assert!(!silent_body.contains("wait_for_macos_claude_main_process_debugger()"));
 
-        assert!(source.contains("ax_find_and_press_debugger_menu_item"));
-        assert!(source.contains("macos_main_process_debugger_menu_title_matches"));
-        assert!(source.contains("macos_developer_menu_title_matches"));
-        assert!(source.contains("normalized_menu_title"));
+        assert_contains_all(
+            source,
+            &[
+                "ax_find_and_press_debugger_menu_item",
+                "macos_main_process_debugger_menu_title_matches",
+                "macos_developer_menu_title_matches",
+                "normalized_menu_title",
+            ],
+        );
         for title in [
             "Developer",
             "开发者",
@@ -4827,188 +4962,186 @@ mod tests {
                 "developer menu title should match {title}"
             );
         }
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "Enable Main Process Debugger"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "启用主进程调试器"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "Main Process Debugger"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "啟用主進程偵錯器"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "Activer le débogueur du processus principal"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "Hauptprozess-Debugger aktivieren"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "Activar depurador del proceso principal"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "Ativar depurador do processo principal"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "メインプロセスデバッガーを有効にする"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "메인 프로세스 디버거 활성화"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "मुख्य प्रक्रिया डिबगर सक्षम करें"
-        ));
-        assert!(macos_main_process_debugger_menu_title_matches(
-            "Aktifkan debugger proses utama"
-        ));
-        assert!(macos_debugger_confirmation_title_matches("Continue"));
-        assert!(macos_debugger_confirmation_title_matches("允许"));
-        assert!(macos_debugger_confirmation_title_matches("继续"));
-        assert!(macos_debugger_confirmation_title_matches("繼續"));
-        assert!(macos_debugger_confirmation_title_matches("Continuer"));
-        assert!(macos_debugger_confirmation_title_matches("Fortfahren"));
-        assert!(macos_debugger_confirmation_title_matches("Continuar"));
-        assert!(macos_debugger_confirmation_title_matches("Permitir"));
-        assert!(macos_debugger_confirmation_title_matches("Apri"));
-        assert!(macos_debugger_confirmation_title_matches("開く"));
-        assert!(macos_debugger_confirmation_title_matches("계속"));
-        assert!(macos_debugger_confirmation_title_matches("जारी रखें"));
-        assert!(macos_debugger_confirmation_title_matches("Lanjutkan"));
+        for title in [
+            "Enable Main Process Debugger",
+            "启用主进程调试器",
+            "Main Process Debugger",
+            "啟用主進程偵錯器",
+            "Activer le débogueur du processus principal",
+            "Hauptprozess-Debugger aktivieren",
+            "Activar depurador del proceso principal",
+            "Ativar depurador do processo principal",
+            "メインプロセスデバッガーを有効にする",
+            "메인 프로세스 디버거 활성화",
+            "मुख्य प्रक्रिया डिबगर सक्षम करें",
+            "Aktifkan debugger proses utama",
+        ] {
+            assert!(
+                macos_main_process_debugger_menu_title_matches(title),
+                "main process debugger title should match {title}"
+            );
+        }
+        for title in [
+            "Continue",
+            "允许",
+            "继续",
+            "繼續",
+            "Continuer",
+            "Fortfahren",
+            "Continuar",
+            "Permitir",
+            "Apri",
+            "開く",
+            "계속",
+            "जारी रखें",
+            "Lanjutkan",
+        ] {
+            assert!(
+                macos_debugger_confirmation_title_matches(title),
+                "debugger confirmation title should match {title}"
+            );
+        }
 
         let script = macos_localized_launch_script();
-        assert!(
-            script
-                .find("while ! claude_debugger_open; do")
-                .expect("script should wait until the debugger endpoint exists")
-                < script
-                    .find("debugger_attempts=$((debugger_attempts + 1))")
-                    .expect("script should count debugger wait attempts")
+        assert_order(
+            &script,
+            "while ! claude_debugger_open; do",
+            "debugger_attempts=$((debugger_attempts + 1))",
+            "script should count debugger wait attempts while waiting for the endpoint",
         );
-        assert!(script.contains("debugger_attempts=$((debugger_attempts + 1))"));
-        assert!(!script.contains("osascript"));
-        assert!(!script.contains("APPLESCRIPT"));
-        assert!(!script.contains("JXA"));
-        assert!(!script.contains("clickDebuggerConfirmation"));
+        assert_contains_none(
+            &script,
+            &[
+                "osascript",
+                "APPLESCRIPT",
+                "JXA",
+                "clickDebuggerConfirmation",
+            ],
+        );
     }
 
     #[test]
     fn node_inspector_injection_consumes_localized_launch_marker() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("localized-launch.flag"));
-        assert!(source.contains("consumeLocalizedLaunchMarker"));
-        assert!(source.contains("fs.unlinkSync(marker)"));
-        assert!(source.contains("localizedLaunchDefaultZh"));
-        assert!(source.contains("var __CSL_LL="));
-        assert!(source.contains("__CSL_LL_DONE"));
-        assert!(source.contains("localStorage.setItem('spa:locale','zh-CN')"));
-        assert!(!source.contains("if(typeof __CSL_LL==='undefined')var __CSL_LL=!1;"));
+        assert_contains_all(
+            &source,
+            &[
+                "localized-launch.flag",
+                "consumeLocalizedLaunchMarker",
+                "fs.unlinkSync(marker)",
+                "localizedLaunchDefaultZh",
+                "var __CSL_LL=",
+                "__CSL_LL_DONE",
+                "localStorage.setItem('spa:locale','zh-CN')",
+            ],
+        );
+        assert_contains_none(
+            &source,
+            &["if(typeof __CSL_LL==='undefined')var __CSL_LL=!1;"],
+        );
     }
 
     #[test]
     fn node_inspector_injection_waits_for_real_renderer_attach() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("await globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__.refresh()"));
-        assert!(source.contains("const results = await Promise.all"));
-        assert!(source.contains("if (attached.has(contents)) return true;"));
-        assert!(source.contains("attached.add(contents);"));
-        assert!(source.contains("return { ok: true, reused: false, ...summary };"));
-        let patch = include_str!("claude_desktop_patch.rs");
-        assert!(patch.contains("\"Runtime.evaluate\""));
-        assert!(patch.contains("\"awaitPromise\": true"));
+        assert_contains_all(
+            &source,
+            &[
+                "await globalThis.__CODESTUDIO_CLAUDE_ZH_MAIN__.refresh()",
+                "const results = await Promise.all",
+                "if (attached.has(contents)) return true;",
+                "attached.add(contents);",
+                "return { ok: true, reused: false, ...summary };",
+            ],
+        );
+        assert_contains_all(
+            patch_source(),
+            &["\"Runtime.evaluate\"", "\"awaitPromise\": true"],
+        );
     }
 
     #[test]
     fn node_inspector_injection_reinstalls_when_injection_changes_without_version_bump() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
-        assert!(source.contains("CSL_INJECTION_SIGNATURE"));
-        assert!(source.contains("injectionSignature === CSL_INJECTION_SIGNATURE"));
-        assert!(source.contains("previousInjectionSignature !== CSL_INJECTION_SIGNATURE"));
-        assert!(source.contains("contents.__cslZhAttachedInjectionSignature"));
-        assert!(source.contains("dispose"));
-        assert!(
-            source
-                .find("injectionSignature === CSL_INJECTION_SIGNATURE")
-                .expect("reuse must compare injection signature")
-                < source
-                    .find("return { ok: true, reused: true, ...summary };")
-                    .expect("same-injection reuse should stay available")
+        assert_contains_all(
+            &source,
+            &[
+                "CSL_INJECTION_SIGNATURE",
+                "injectionSignature === CSL_INJECTION_SIGNATURE",
+                "previousInjectionSignature !== CSL_INJECTION_SIGNATURE",
+                "contents.__cslZhAttachedInjectionSignature",
+                "dispose",
+            ],
+        );
+        assert_order(
+            &source,
+            "injectionSignature === CSL_INJECTION_SIGNATURE",
+            "return { ok: true, reused: true, ...summary };",
+            "same-injection reuse should stay available after comparing signatures",
         );
     }
 
     #[test]
     fn node_inspector_injection_reload_is_timeout_guarded() {
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
 
         // The reload is wrapped in a timeout so a stalled Page.reload cannot
         // hang the async injection (which would block the inspector read loop).
-        assert!(source.contains("Promise.race"));
-        assert!(source.contains("Page.reload"));
+        assert_contains_all(&source, &["Promise.race", "Page.reload"]);
         // A read timeout guards the CDP eval round-trip on the Rust side too.
-        assert!(
-            source.contains("CLAUDE_INSPECTOR_EVAL_TIMEOUT") || {
-                let patch = include_str!("claude_desktop_patch.rs");
-                patch.contains("CLAUDE_INSPECTOR_EVAL_TIMEOUT")
-            }
-        );
+        assert_contains_all(patch_source(), &["CLAUDE_INSPECTOR_EVAL_TIMEOUT"]);
     }
 
     #[test]
     fn windows_claude_process_lookup_uses_visible_claude_main_processes() {
         let source = windows_find_claude_process_script(Some(1234));
 
-        assert!(source.contains("Get-Process -Name 'claude'"));
-        assert!(source.contains("StartTime"));
-        assert!(source.contains("Where-Object { $_.Path"));
-        assert!(source.contains("Select-Object -First 1"));
-        assert!(!source.contains("Get-CimInstance Win32_Process -Filter \"name = 'Claude.exe'\""));
-        assert!(!source.contains("CreationDate -Descending"));
+        assert_contains_all(
+            &source,
+            &[
+                "Get-Process -Name 'claude'",
+                "StartTime",
+                "Where-Object { $_.Path",
+                "Select-Object -First 1",
+            ],
+        );
+        assert_contains_none(
+            &source,
+            &[
+                "Get-CimInstance Win32_Process -Filter \"name = 'Claude.exe'\"",
+                "CreationDate -Descending",
+            ],
+        );
     }
 
     #[test]
     fn windows_claude_process_lookup_returns_all_candidates_for_attach() {
         let source = windows_find_claude_process_script(Some(1234));
 
-        assert!(source.contains("ForEach-Object"));
-        assert!(source.contains("[string]$_.Id"));
-        assert!(source.contains("$ordered += @($visible"));
-        assert!(!source.contains("exit 0"));
+        assert_contains_all(
+            &source,
+            &["ForEach-Object", "[string]$_.Id", "$ordered += @($visible"],
+        );
+        assert_contains_none(&source, &["exit 0"]);
     }
 
     #[test]
     fn inspector_target_lookup_reads_only_default_claude_port() {
-        let source = include_str!("claude_desktop_patch.rs");
-
-        assert!(source.contains(&concat!(
-            "read_node_inspector_targets_from_port(",
-            "CLAUDE_NODE_INSPECT_PORT",
-            ")"
-        )));
-        assert!(!source.contains(&concat!("all_targets", ".extend(targets)")));
+        assert_contains_all(
+            patch_source(),
+            &[concat!(
+                "read_node_inspector_targets_from_port(",
+                "CLAUDE_NODE_INSPECT_PORT",
+                ")"
+            )],
+        );
+        assert_contains_none(
+            patch_source(),
+            &[concat!("all_targets", ".extend(targets)")],
+        );
     }
 
     #[test]
@@ -5102,33 +5235,101 @@ mod tests {
     }
 
     #[test]
-    fn bundled_zh_locale_avoids_literal_task_and_shipping_translations() {
+    fn bundled_zh_locale_uses_curated_terms_for_known_machine_translation_regressions() {
         let ion: Value = serde_json::from_str(CLAUDE_ION_ZH_LOCALE).expect("ion zh locale json");
         let Some(map) = ion.as_object() else {
             panic!("ion zh locale should be an object");
         };
-        let tedious = map
-            .get("4ahpF5N/t0")
-            .and_then(Value::as_str)
-            .expect("tedious task marketing copy");
-        let shipping = map
-            .get("ye9sGm7rX3")
-            .and_then(Value::as_str)
-            .expect("shipping features marketing copy");
 
-        assert_eq!(tedious, "推进繁琐任务");
-        assert_eq!(shipping, "发布功能，而不是堆代码行数");
-        assert!(!tedious.contains("坚持"));
-        assert!(!shipping.contains("船只"));
-        assert!(!shipping.contains("线条"));
+        let expectations = [
+            LocaleExpectation {
+                key: "4ahpF5N/t0",
+                label: "tedious task marketing copy",
+                expected: "推进繁琐任务",
+                forbidden: &["坚持"],
+            },
+            LocaleExpectation {
+                key: "ye9sGm7rX3",
+                label: "shipping features marketing copy",
+                expected: "发布功能，而不是堆代码行数",
+                forbidden: &["船只", "线条"],
+            },
+            LocaleExpectation {
+                key: "HqlBRpo6tx",
+                label: "relaunch update button",
+                expected: "重新启动以应用更新",
+                forbidden: &["发布", "以更新"],
+            },
+            LocaleExpectation {
+                key: "0hPFsTuQ1X",
+                label: "inference request header help text",
+                expected: "每次向配置的提供方发送推理请求时额外附加 HTTP 标头。可用于租户级路由、组织 ID、Bedrock Guardrails 等场景。",
+                forbidden: &["租户路由", "基岩", "护栏"],
+            },
+            LocaleExpectation {
+                key: "4EAtPWhM42",
+                label: "interface font Anthropic Sans option",
+                expected: "Anthropic Sans",
+                forbidden: &["拟人桑斯"],
+            },
+            LocaleExpectation {
+                key: "BPnT3TVya+",
+                label: "transcript text size small option",
+                expected: "小",
+                forbidden: &[],
+            },
+            LocaleExpectation {
+                key: "ovJ26CKo4Q",
+                label: "transcript text size and width medium option",
+                expected: "中",
+                forbidden: &["媒介"],
+            },
+            LocaleExpectation {
+                key: "/06iwcQHPz",
+                label: "transcript text size large option",
+                expected: "大",
+                forbidden: &["大型"],
+            },
+            LocaleExpectation {
+                key: "Cs33xZFR6o",
+                label: "transcript width narrow option",
+                expected: "窄",
+                forbidden: &["狭窄"],
+            },
+            LocaleExpectation {
+                key: "PSiaaVYiAT",
+                label: "transcript width wide option",
+                expected: "宽",
+                forbidden: &[],
+            },
+            LocaleExpectation {
+                key: "akXG4ChYkN",
+                label: "enable remote control by default setting",
+                expected: "默认启用遥控",
+                forbidden: &["遥控器"],
+            },
+            LocaleExpectation {
+                key: "/JL5gAMv5z",
+                label: "confidence level medium option",
+                expected: "中",
+                forbidden: &["媒介"],
+            },
+            LocaleExpectation {
+                key: "6SI3PVzMTR",
+                label: "severity medium badge",
+                expected: "中",
+                forbidden: &["媒介"],
+            },
+        ];
+
+        assert_locale_expectations(map, &expectations);
     }
 
     #[test]
     fn locale_runtime_source_stays_small() {
         let source = build_locale_runtime_source();
         assert!(source.len() < 15_000);
-        assert!(!source.contains("__CLAUDE_ZH_ION_LOCALE__"));
-        assert!(!source.contains(CLAUDE_ION_ZH_LOCALE));
+        assert_contains_none(&source, &["__CLAUDE_ZH_ION_LOCALE__", CLAUDE_ION_ZH_LOCALE]);
     }
 
     #[test]
@@ -5204,12 +5405,7 @@ mod tests {
         if std::env::var("CSL_EXTRACT_RUNTIME_INJECTION").is_err() {
             return;
         }
-        let source = build_main_process_injection_source_for_paths(
-            Path::new(r"C:\CodeStudio\translation-runtime.js"),
-            Path::new(r"C:\CodeStudio\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\zh-CN.json"),
-            Path::new(r"C:\CodeStudio\ion-dist\i18n\dynamic\zh-CN.json"),
-        );
+        let source = main_process_injection_source();
         let dir = std::env::temp_dir().join("csldiag");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("runtime-injection.js");

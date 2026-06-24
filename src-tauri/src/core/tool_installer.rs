@@ -1605,7 +1605,7 @@ foreach ($root in $roots) {
         Remove-Item -LiteralPath $prop.PSPath -Recurse -Force -ErrorAction Stop
         $removed += if ($installLocation) { "$keyName ($installLocation)" } else { $keyName }
       } catch {
-        Write-Output "Unable to remove stale Claude Desktop EXE uninstall entry $keyName: $($_.Exception.Message)"
+        Write-Output "Unable to remove stale Claude Desktop EXE uninstall entry ${keyName}: $($_.Exception.Message)"
       }
     }
   }
@@ -3516,6 +3516,8 @@ mod tests {
         assert!(cleanup_script.contains("resources\\app.asar"));
         assert!(cleanup_script.contains("Keeping live Claude Desktop EXE uninstall entry"));
         assert!(cleanup_script.contains("Remove-Item -LiteralPath $prop.PSPath"));
+        assert!(cleanup_script.contains("${keyName}: $($_.Exception.Message)"));
+        assert!(!cleanup_script.contains("$keyName:"));
     }
 
     #[test]
