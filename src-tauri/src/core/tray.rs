@@ -1,9 +1,9 @@
 //! System tray icon and menu.
 //!
 //! Registers a tray icon so closing the main window hides it to the tray
-//! instead of quitting the app (matching CC Switch's behavior). The tray
-//! menu offers "Show main window" and "Quit"; clicking the icon shows the
-//! window. Quitting via the tray shuts down the Local Gateway before exit.
+//! instead of quitting the app. The tray menu offers "Show main window" and
+//! "Quit"; clicking the icon shows the window. Quitting via the tray shuts
+//! down the Local Gateway before exit.
 
 use crate::core::gateway;
 use tauri::menu::{Menu, MenuItem};
