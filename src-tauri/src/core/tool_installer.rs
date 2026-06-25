@@ -2815,7 +2815,6 @@ fn windows_elevated_powershell_args(program: &str, args: &[&str]) -> Vec<String>
     ]
 }
 
-#[cfg(windows)]
 fn ps_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
