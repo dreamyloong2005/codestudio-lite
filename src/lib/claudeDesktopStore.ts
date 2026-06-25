@@ -251,15 +251,13 @@ function applyKindStatusesFromSnapshot(
   capabilities?: CodexClientCapability[]
 ) {
   const baseStatus = findClaudeDesktop(snapshot);
-  const installKinds = snapshot.claudeInstallKinds ?? null;
-  const exeDetected = claudeDesktopExeInstallDetected(installKinds);
+  const isWindows = snapshot.platform === "windows";
+  const installKinds = isWindows ? (snapshot.claudeInstallKinds ?? null) : null;
   claudeDesktopView.update((current) => ({
     ...current,
     snapshot,
     installKinds,
-    selectedKind: current.selectedKind === "exe" && !claudeDesktopExeInstallDetected(installKinds)
-      ? "msix"
-      : current.selectedKind,
+    selectedKind: isWindows ? current.selectedKind : "msix",
     capabilities: capabilities ?? current.capabilities,
     loaded: true,
     kindViews: {
@@ -275,7 +273,7 @@ function applyKindStatusesFromSnapshot(
         status: statusForInstallKind(baseStatus, "exe", installKinds),
         installPlan: null,
         updatePlan: null,
-        busyAction: exeDetected ? current.kindViews.exe.busyAction : null,
+        busyAction: isWindows ? current.kindViews.exe.busyAction : null,
         loaded: true
       }
     }
@@ -538,9 +536,15 @@ export async function launchClaudeDesktopFromDashboard() {
 }
 
 export async function installOrUpdateClaudeDesktop(mode?: "install" | "update") {
+  return installOrUpdateClaudeDesktopKind(get(claudeDesktopView).selectedKind, mode);
+}
+
+export async function installOrUpdateClaudeDesktopKind(
+  installKind: ClaudeDesktopInstallKind,
+  mode?: "install" | "update"
+) {
   const state = get(claudeDesktopView);
-  const installKind = state.selectedKind;
-  const kindView = selectedKindView(state);
+  const kindView = state.kindViews[installKind];
   if (installKind === "exe") {
     patch({ error: "Claude Desktop EXE installation is no longer supported. Use the Windows App tab to install Claude Desktop." });
     return null;
@@ -565,9 +569,7 @@ export async function installOrUpdateClaudeDesktop(mode?: "install" | "update") 
   );
 }
 
-export async function removeClaudeDesktop() {
-  const view = get(claudeDesktopView);
-  const installKind = view.selectedKind;
+export async function removeClaudeDesktop(installKind: ClaudeDesktopInstallKind = get(claudeDesktopView).selectedKind) {
   return runAction(installKind, "uninstall", () =>
     uninstallTool({
       toolId: CLAUDE_DESKTOP_TOOL_ID,

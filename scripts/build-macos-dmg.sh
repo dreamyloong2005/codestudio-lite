@@ -34,10 +34,8 @@ VERSION="$(/usr/bin/plutil -extract version raw -o - "$TAURI_DIR/tauri.conf.json
 BUNDLE_IDENTIFIER="$(/usr/bin/plutil -extract identifier raw -o - "$TAURI_DIR/tauri.conf.json")"
 
 TEMP_CONFIG="$(mktemp -t codestudio-tauri-build.XXXXXXXX.json)"
-STAGING_DIR="$(mktemp -d -t codestudio-dmg-stage.XXXXXXXX)"
 cleanup() {
   rm -f "$TEMP_CONFIG"
-  rm -rf "$STAGING_DIR"
 }
 trap cleanup EXIT
 
@@ -88,20 +86,10 @@ fi
 DMG_DIR="$TAURI_DIR/target/release/bundle/dmg"
 DMG_PATH="$DMG_DIR/${PRODUCT_NAME}_${VERSION}_${ARCH_LABEL}.dmg"
 mkdir -p "$DMG_DIR"
-rm -f "$DMG_PATH"
 
-echo "Staging signed app for DMG..."
-/usr/bin/ditto "$APP_PATH" "$STAGING_DIR/${PRODUCT_NAME}.app"
-ln -s /Applications "$STAGING_DIR/Applications"
+DMG_PRODUCT_NAME="$PRODUCT_NAME" \
+DMG_VOLUME_NAME="$PRODUCT_NAME" \
+DMG_TAURI_CONFIG="$TAURI_DIR/tauri.conf.json" \
+"$ROOT_DIR/scripts/create-macos-dmg.sh" "$APP_PATH" "$DMG_PATH"
 
-echo "Creating DMG: $DMG_PATH"
-/usr/bin/hdiutil create \
-  -volname "$PRODUCT_NAME" \
-  -srcfolder "$STAGING_DIR" \
-  -ov \
-  -format UDZO \
-  "$DMG_PATH"
-
-/usr/bin/hdiutil verify "$DMG_PATH"
-/usr/bin/shasum -a 256 "$DMG_PATH"
 echo "DMG built: $DMG_PATH"

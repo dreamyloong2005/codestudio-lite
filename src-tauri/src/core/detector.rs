@@ -46,6 +46,7 @@ const CLAUDE_DESKTOP_LATEST_MACOS_URL: &str =
     "https://downloads.claude.ai/releases/darwin/universal/.latest";
 const CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND: &str =
     "Download and install the latest Claude Desktop MSIX from https://claude.ai/api/desktop/win32/x64/msix/latest/redirect with Add-AppxPackage -Path";
+#[cfg(target_os = "windows")]
 const CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX: &str = "pzs8sxrjxfjjc";
 
 #[derive(Debug)]
@@ -124,7 +125,11 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
     // Per-kind install detection for the desktop-client page tabs. Filled
     // here so it is cached alongside the snapshot and the tabs render
     // instantly from the on-disk cache before a fresh scan completes.
-    let claude_install_kinds = Some(claude_desktop_install_kinds());
+    let claude_install_kinds = if cfg!(target_os = "windows") {
+        Some(claude_desktop_install_kinds())
+    } else {
+        None
+    };
     let codex_install_kinds = if supports_codex_desktop_client() {
         Some(codex_client::codex_client_install_kinds())
     } else {
@@ -880,12 +885,14 @@ pub(crate) fn claude_desktop_windows_package_identities() -> &'static [&'static 
     &["Claude", "Anthropic.Claude"]
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn claude_desktop_windows_stale_msix_manifest() -> Option<PathBuf> {
     find_latest_claude_desktop_windows_stale_msix_dir()
         .map(|path| path.join("AppxManifest.xml"))
         .filter(|path| path.is_file())
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn claude_desktop_windows_cached_stale_msix_manifest() -> Option<PathBuf> {
     let snapshot = storage::load_detection_cache().ok()??;
     snapshot
@@ -896,6 +903,7 @@ pub(crate) fn claude_desktop_windows_cached_stale_msix_manifest() -> Option<Path
         .and_then(|details| stale_msix_manifest_from_detection_details(details, "appx-stale"))
 }
 
+#[cfg(target_os = "windows")]
 pub(crate) fn claude_desktop_windows_known_stale_msix_manifest() -> Option<PathBuf> {
     for version in claude_desktop_windows_known_versions() {
         for candidate in claude_desktop_windows_known_manifest_candidates(&version) {
@@ -907,6 +915,7 @@ pub(crate) fn claude_desktop_windows_known_stale_msix_manifest() -> Option<PathB
     None
 }
 
+#[cfg(target_os = "windows")]
 fn stale_msix_manifest_from_detection_details(
     details: &str,
     source_fragment: &str,
@@ -927,6 +936,7 @@ fn stale_msix_manifest_from_detection_details(
     manifest.is_file().then_some(manifest)
 }
 
+#[cfg(target_os = "windows")]
 fn claude_desktop_windows_known_versions() -> Vec<String> {
     let mut versions = Vec::new();
     if let Ok(Some(snapshot)) = storage::load_detection_cache() {
@@ -951,6 +961,7 @@ fn claude_desktop_windows_known_versions() -> Vec<String> {
     versions
 }
 
+#[cfg(target_os = "windows")]
 fn push_claude_desktop_version_candidates(versions: &mut Vec<String>, version: &str) {
     let Some(version) = normalized_version_label(version) else {
         return;
@@ -961,6 +972,7 @@ fn push_claude_desktop_version_candidates(versions: &mut Vec<String>, version: &
     }
 }
 
+#[cfg(target_os = "windows")]
 fn claude_desktop_windows_known_manifest_candidates(version: &str) -> Vec<PathBuf> {
     let root = PathBuf::from(r"C:\Program Files\WindowsApps");
     vec![
@@ -975,10 +987,8 @@ fn claude_desktop_windows_known_manifest_candidates(version: &str) -> Vec<PathBu
     ]
 }
 
+#[cfg(target_os = "windows")]
 fn find_latest_claude_desktop_windows_stale_msix_dir() -> Option<PathBuf> {
-    if !cfg!(target_os = "windows") {
-        return None;
-    }
     if cached_claude_desktop_windows_msix_package().is_some() {
         return None;
     }
@@ -1005,6 +1015,7 @@ fn find_latest_claude_desktop_windows_stale_msix_dir() -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
+#[cfg(target_os = "windows")]
 fn stale_claude_desktop_version(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     name.strip_prefix("Claude_")?
@@ -1013,6 +1024,7 @@ fn stale_claude_desktop_version(path: &Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(target_os = "windows")]
 fn compare_stale_claude_desktop_dirs(left: &Path, right: &Path) -> Ordering {
     compare_versions(
         stale_claude_desktop_version(left).as_deref().unwrap_or("0"),
@@ -1937,15 +1949,21 @@ mod tests {
     }
 
     #[test]
-    fn claude_desktop_windows_update_command_uses_official_msix() {
+    fn claude_desktop_update_command_uses_platform_official_route() {
         let command = update_command_for_tool("claude-desktop").expect("update command");
 
-        assert!(command.contains("claude.ai/api/desktop/win32/x64/msix/latest/redirect"));
-        assert!(command.contains("Add-AppxPackage -Path"));
-        assert!(
-            !command.contains("winget upgrade --id Anthropic.Claude"),
-            "Claude Desktop Windows updates must not use deprecated winget routing: {command}"
-        );
+        if cfg!(target_os = "macos") {
+            assert!(command.contains("official DMG"));
+            assert!(command.contains("downloads.claude.ai"));
+            assert!(!command.contains("Homebrew"));
+        } else {
+            assert!(command.contains("claude.ai/api/desktop/win32/x64/msix/latest/redirect"));
+            assert!(command.contains("Add-AppxPackage -Path"));
+            assert!(
+                !command.contains("winget upgrade --id Anthropic.Claude"),
+                "Claude Desktop Windows updates must not use deprecated winget routing: {command}"
+            );
+        }
     }
 
     #[test]
@@ -1953,6 +1971,27 @@ mod tests {
         let candidates = claude_desktop_macos_app_candidates();
 
         assert!(candidates.contains(&PathBuf::from("/Applications/Claude.app")));
+    }
+
+    #[test]
+    fn claude_desktop_macos_app_bundle_status_is_installed() {
+        let detected = DesktopAppDetection {
+            path: "/Applications/Claude.app".to_string(),
+            version: "1.14271.0".to_string(),
+            source: "app-bundle",
+        };
+
+        let (install_state, install_kind, install_path, version, details) =
+            claude_desktop_status_from_detection(Some(&detected), None);
+
+        assert_eq!(install_state, InstallState::Installed);
+        assert_eq!(install_kind.as_deref(), Some("msix"));
+        assert_eq!(install_path.as_deref(), Some("/Applications/Claude.app"));
+        assert_eq!(version.as_deref(), Some("1.14271.0"));
+        assert!(details
+            .as_deref()
+            .unwrap_or_default()
+            .contains("app-bundle"));
     }
 
     #[test]

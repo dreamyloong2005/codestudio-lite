@@ -46,6 +46,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
 
   let route: Route = "dashboard";
   let dashboardLoading = true;
+  let dashboardRefreshing = false;
   let snapshot: DetectionSnapshot | null = null;
   let gatewayStatus: GatewayStatus | null = null;
   let profileSummary: ProfileSummary | null = null;
@@ -56,6 +57,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
   let backgroundDetectionInterval: number | null = null;
   let dashboardRefreshRunId = 0;
   let visibleRefreshRunId: number | null = null;
+  let dashboardRefreshIndicatorRunId: number | null = null;
   let lastRouteRefreshRoute: Route = route;
   let pendingClaudeDesktopRouteRestore = false;
 
@@ -147,12 +149,17 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     }, BACKGROUND_DETECTION_INTERVAL_MS);
   }
 
-  type RefreshDashboardOptions = { quiet?: boolean; scheduleFollowup?: boolean };
+  type RefreshDashboardOptions = { quiet?: boolean; scheduleFollowup?: boolean; showRefreshIndicator?: boolean };
 
   async function refreshDashboard(options: RefreshDashboardOptions = {}) {
     const quiet = options.quiet ?? false;
     const scheduleFollowup = options.scheduleFollowup ?? true;
+    const showRefreshIndicator = options.showRefreshIndicator ?? route === "dashboard";
     const runId = ++dashboardRefreshRunId;
+    if (showRefreshIndicator) {
+      dashboardRefreshIndicatorRunId = runId;
+      dashboardRefreshing = true;
+    }
     if (!quiet) {
       visibleRefreshRunId = runId;
       dashboardLoading = true;
@@ -175,6 +182,10 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
         error = err instanceof Error ? err.message : String(err);
       }
     } finally {
+      if (showRefreshIndicator && dashboardRefreshIndicatorRunId === runId) {
+        dashboardRefreshing = false;
+        dashboardRefreshIndicatorRunId = null;
+      }
       if (!quiet && visibleRefreshRunId === runId) {
         dashboardLoading = false;
         visibleRefreshRunId = null;
@@ -188,7 +199,11 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     }
   }
 
-  async function loadDashboardWithCache() {
+  async function loadDashboardWithCache(options: { showRefreshIndicator?: boolean } = {}) {
+    const showRefreshIndicator = options.showRefreshIndicator ?? route === "dashboard";
+    if (showRefreshIndicator) {
+      dashboardRefreshing = true;
+    }
     dashboardLoading = true;
     error = null;
     try {
@@ -209,7 +224,8 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
 
     await refreshDashboard({
       quiet: snapshot !== null,
-      scheduleFollowup: true
+      scheduleFollowup: true,
+      showRefreshIndicator
     });
   }
 
@@ -266,7 +282,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
 
   async function refreshCurrentRouteAfterSwitch(currentRoute: Route) {
     if (currentRoute === "dashboard") {
-      await refreshDashboard({ quiet: true, scheduleFollowup: false });
+      await refreshDashboard({ quiet: true, scheduleFollowup: false, showRefreshIndicator: true });
     } else if (currentRoute === "codexClient") {
       await ensureCodexClientLoaded();
     } else if (currentRoute === "claudeDesktop") {
@@ -349,11 +365,15 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
     gatewayStatus = result.status;
   }
 
+  async function initializeDashboardOnMount() {
+    await restorePendingClaudeDesktopLaunch();
+    await loadDashboardWithCache({ showRefreshIndicator: route === "dashboard" });
+  }
+
   onMount(() => {
     applyTheme("system");
     void refreshSettings();
-    void loadDashboardWithCache();
-    void restorePendingClaudeDesktopLaunch();
+    void initializeDashboardOnMount();
     void checkForAppUpdate();
   });
 
@@ -411,6 +431,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
         {#if route === "dashboard"}
           <Dashboard
             {snapshot}
+            refreshingExternally={dashboardRefreshing}
             onRefresh={refreshDashboard}
             onToolStatusUpdated={mergeToolStatus}
             onConfigureTool={configureTool}

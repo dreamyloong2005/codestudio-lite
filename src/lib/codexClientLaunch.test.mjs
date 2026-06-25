@@ -70,6 +70,10 @@ test("Codex client notices are localized and dismiss with an icon", () => {
 test("Codex client keeps cached update plan visible while background refresh runs", () => {
   const route = read("src/routes/CodexClient.svelte");
   const store = read("src/lib/codexClientStore.ts");
+  const api = read("src/lib/api.ts");
+  const commands = read("src-tauri/src/commands/codex_client.rs");
+  const lib = read("src-tauri/src/lib.rs");
+  const storage = read("src-tauri/src/core/storage.rs");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
@@ -86,6 +90,18 @@ test("Codex client keeps cached update plan visible while background refresh run
   assert.match(route, /planRefreshing && effectivePlan/);
   assert.match(route, /\{#if planUnavailable\}/);
   assert.match(route, /codexClient\.planStale/);
+  assert.match(store, /loadCachedCodexClientStates/);
+  assert.doesNotMatch(store, /loadCachedCodexClientState,\s*\n/);
+  assert.doesNotMatch(store, /await loadCachedCodexClientState\(\)/);
+  assert.match(store, /function cachedStateEntries/);
+  assert.match(store, /entries\.find\(\(\[kind,\s*state\]\) => kind === selectedKind && Boolean\(state\.plan\)\)/);
+  assert.match(store, /patch\(\{ loaded:\s*true,\s*selectedKind:\s*preferredKind \}\)/);
+  assert.match(api, /export async function loadCachedCodexClientStates\(\): Promise<CodexClientStateCache>/);
+  assert.match(api, /invoke\("load_cached_codex_client_states"\)/);
+  assert.match(commands, /pub async fn load_cached_codex_client_states\(\) -> Result<CodexClientStateCache,\s*String>/);
+  assert.match(lib, /commands::codex_client::load_cached_codex_client_states/);
+  assert.match(storage, /CREATE TABLE IF NOT EXISTS codex_client_state \(\s*install_kind TEXT PRIMARY KEY,/);
+  assert.match(storage, /INSERT INTO codex_client_state \(install_kind,\s*generated_at,\s*state_json\)/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
     assert.match(dictionary, /"codexClient\.planRefreshing"/);
@@ -155,6 +171,8 @@ test("Codex client isolates Windows App and EXE tab operation state", () => {
   assert.match(core, /fn settings_for_install_kind/);
   assert.match(core, /pub fn plan_update\(request: PlanCodexClientUpdateRequest\)/);
   assert.match(core, /pub fn stage_update_with_progress<F>\(\s*request: StageCodexClientUpdateRequest/);
+  assert.match(core, /fn select_install_route\(\s*settings:\s*&CodexClientSettings,\s*installed:\s*Option<&InstalledCodexClient>,\s*\) -> &'static str/);
+  assert.doesNotMatch(core, /portable_recommended|Automatically switched to portable installation|progressMsixPortableFallback|progressMsixExecutionPortableFallback/);
 });
 
 test("Codex client does not expose a Windows official update-source choice", () => {

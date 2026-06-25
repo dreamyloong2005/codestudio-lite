@@ -16,12 +16,13 @@
     dismissClaudeDesktopError,
     dismissClaudeDesktopSuccess,
     ensureClaudeDesktopLoaded,
-    installOrUpdateClaudeDesktop,
+    installOrUpdateClaudeDesktopKind,
     openClaudeDesktopStagingPath,
     refreshClaudeDesktop,
     removeClaudeDesktop,
     setClaudeDesktopConfirmUninstall,
     setClaudeDesktopLocalizeLaunch,
+    setClaudeDesktopPendingLaunchAfterRestart,
     setClaudeDesktopSelectedKind,
     startClaudeDesktopProgressListener
   } from "../lib/claudeDesktopStore";
@@ -52,6 +53,19 @@
   $: canUninstall = installed && busyAction === null;
   $: isRunning = status?.running ?? false;
   $: canLaunch = installed && busyAction === null && !launching;
+  $: activePlan = installed ? updatePlan : installPlan;
+  $: activePlanAvailable = Boolean(activePlan?.canInstall);
+  $: activePlanUpToDate = Boolean(installed && activePlan && !status?.updateAvailable);
+  $: activePlanBlocker = activePlan?.blocker && !activePlanUpToDate ? activePlan.blocker : null;
+  $: activePlanStatus = !activePlan
+    ? $t("codexClient.planNotLoaded")
+    : activePlanBlocker
+      ? activePlanBlocker
+      : activePlanAvailable
+        ? versionStatusHint
+        : activePlanUpToDate
+          ? $t("codexClient.upToDate")
+          : $t("codexClient.planNotLoaded");
   $: liveLogGroups = groupedProgressLogs(kindView.progressLogs);
   $: hasLogs = liveLogGroups.length > 0;
   // Only call it "up to date" when the app is actually installed and we know
@@ -79,8 +93,7 @@
 
   onMount(() => {
     startClaudeDesktopProgressListener();
-    void ensureClaudeDesktopLoaded();
-    void resumePendingLaunchAfterRestart();
+    void initializeClaudeDesktopPage();
   });
 
   afterUpdate(() => {
@@ -198,15 +211,15 @@
   }
 
   async function installClaude() {
-    await installOrUpdateClaudeDesktop("install");
+    await installOrUpdateClaudeDesktopKind(effectiveSelectedKind, "install");
   }
 
   async function updateClaude() {
-    await installOrUpdateClaudeDesktop("update");
+    await installOrUpdateClaudeDesktopKind(effectiveSelectedKind, "update");
   }
 
   async function uninstallClaude() {
-    await removeClaudeDesktop();
+    await removeClaudeDesktop(effectiveSelectedKind);
   }
 
   async function launchClaude() {
@@ -214,6 +227,11 @@
       return;
     }
     await launchClaudeWithLocalization(localizeClaudeLaunch);
+  }
+
+  async function initializeClaudeDesktopPage() {
+    await ensureClaudeDesktopLoaded();
+    await resumePendingLaunchAfterRestart();
   }
 
   async function launchClaudeWithLocalization(localize: boolean) {
@@ -260,6 +278,13 @@
     }
   }
 
+  function cancelAccessibilityLaunch() {
+    accessibilityPromptOpen = false;
+    accessibilityRestarting = false;
+    accessibilityLaunchLocalize = false;
+    setClaudeDesktopPendingLaunchAfterRestart(null);
+  }
+
   function dismissLaunchError() {
     launchError = null;
   }
@@ -286,7 +311,7 @@
           {$t(isRunning ? "toolLaunch.restart" : "toolLaunch.action")}
         {/if}
       </button>
-      <button class="secondary-button" disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop()}>
+      <button class="secondary-button" disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(false, effectiveSelectedKind)}>
         <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? "spin" : ""} />
         {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>
@@ -408,6 +433,69 @@
     {/if}
   </section>
 
+  <section class="panel-band">
+    <div class="section-heading">
+      <div>
+        <h2>{$t("codexClient.planTitle")}</h2>
+        <p>{activePlanStatus}</p>
+      </div>
+      <div class="section-actions">
+        {#if activePlan}
+          <StatusPill
+            status={activePlanAvailable ? "warning" : activePlanBlocker ? "warning" : "ok"}
+            label={activePlanAvailable ? $t("codexClient.updateAvailable") : activePlanBlocker ? $t("status.warning") : $t("codexClient.upToDate")}
+          />
+        {/if}
+      </div>
+    </div>
+    <div class="preview-list codex-client-list">
+      {#if activePlan}
+        <div>
+          <strong>{$t("toolInstall.command")}</strong>
+          <span>{activePlan.command || $t("common.none")}</span>
+        </div>
+        <div>
+          <strong>{$t("toolInstall.manager", { manager: activePlan.manager })}</strong>
+          <span>{activePlan.requiresAdmin ? $t("toolInstall.adminMayPrompt") : $t("toolInstall.userScope")}</span>
+        </div>
+        {#if activePlan.prerequisites.length > 0}
+          {#each activePlan.prerequisites as prerequisite}
+            <div>
+              <strong>{prerequisite.toolName}</strong>
+              <span>{prerequisite.reason || prerequisite.command}</span>
+            </div>
+          {/each}
+        {/if}
+        {#each activePlan.commands as command}
+          <div>
+            <strong>{command.stage === "prerequisite" ? $t("toolInstall.stage.prerequisite") : command.stage === "update" ? $t("common.update") : $t("toolInstall.stage.target")}</strong>
+            <span>{command.command}</span>
+          </div>
+        {/each}
+        {#each activePlan.steps as step}
+          <div>
+            <strong>{step.label}</strong>
+            <span>{step.detail}</span>
+          </div>
+        {/each}
+        {#if activePlanBlocker}
+          <div class="warning-row">
+            <strong>{$t("status.warning")}</strong>
+            <span>{activePlanBlocker}</span>
+          </div>
+        {/if}
+        {#each activePlan.warnings as warning}
+          <div class="warning-row">
+            <strong>{$t("status.warning")}</strong>
+            <span>{warning}</span>
+          </div>
+        {/each}
+      {:else}
+        <div class="empty-row">{$t("codexClient.planNotLoaded")}</div>
+      {/if}
+    </div>
+  </section>
+
   {#if isWindowsAppTab}
     <section class="panel-band">
       <div class="section-heading">
@@ -476,7 +564,7 @@
       </div>
 
       <div class="modal-actions">
-        <button class="secondary-button" disabled={accessibilityRestarting} on:click={() => { accessibilityPromptOpen = false; }}>
+        <button class="secondary-button" disabled={accessibilityRestarting} on:click={cancelAccessibilityLaunch}>
           {$t("common.cancel")}
         </button>
         <button class="primary-button" disabled={accessibilityRestarting} on:click={restartAfterAccessibilityGrant}>

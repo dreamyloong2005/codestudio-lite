@@ -46,8 +46,11 @@
   } from "../types";
   import { afterUpdate, onDestroy, onMount, tick } from "svelte";
 
+  type DashboardRefreshOptions = { quiet?: boolean; scheduleFollowup?: boolean; showRefreshIndicator?: boolean };
+
   export let snapshot: DetectionSnapshot | null = null;
-  export let onRefresh: (options?: { quiet?: boolean; scheduleFollowup?: boolean }) => void | Promise<void> = () => {};
+  export let refreshingExternally = false;
+  export let onRefresh: (options?: DashboardRefreshOptions) => void | Promise<void> = () => {};
   export let onToolStatusUpdated: (tool: ToolStatus) => void = () => {};
   export let onConfigureTool: (tool: ToolStatus) => void = () => {};
   export let onOpenTerminal: () => void = () => {};
@@ -90,6 +93,7 @@
   let unlistenInstallProgress: (() => void) | null = null;
   let refreshing = false;
   let clearingClaudeEnv = false;
+  $: refreshBusy = refreshing || refreshingExternally;
   // Currently open card-action overflow (<details>) element, if any. Kept as a
   // module-level ref so a single document click listener can close it when the
   // user clicks outside the popover without wiring one listener per card.
@@ -693,45 +697,45 @@
   }
 
   // Toggle a card-action overflow <details>. Closing the previous popover when a
-// second one opens guarantees only one is open at a time; native <details>
-// would otherwise let several stay open simultaneously.
-function toggleOverflowDetails(event: MouseEvent, details: HTMLDetailsElement) {
-  event.stopPropagation();
-  const willOpen = !details.open;
-  if (openOverflowDetails && openOverflowDetails !== details) {
+  // second one opens guarantees only one is open at a time; native <details>
+  // would otherwise let several stay open simultaneously.
+  function toggleOverflowDetails(event: MouseEvent, details: HTMLDetailsElement) {
+    event.stopPropagation();
+    const willOpen = !details.open;
+    if (openOverflowDetails && openOverflowDetails !== details) {
+      openOverflowDetails.open = false;
+    }
+    openOverflowDetails = willOpen ? details : null;
+  }
+
+  function closeOverflowOnOutsideClick(event: MouseEvent) {
+    if (!openOverflowDetails) {
+      return;
+    }
+    if (openOverflowDetails.contains(event.target as Node)) {
+      return;
+    }
     openOverflowDetails.open = false;
+    openOverflowDetails = null;
   }
-  openOverflowDetails = willOpen ? details : null;
-}
 
-function closeOverflowOnOutsideClick(event: MouseEvent) {
-  if (!openOverflowDetails) {
-    return;
+  function closeOverflowOnEscape(event: KeyboardEvent) {
+    if (event.key !== "Escape" || !openOverflowDetails) {
+      return;
+    }
+    openOverflowDetails.open = false;
+    openOverflowDetails = null;
   }
-  if (openOverflowDetails.contains(event.target as Node)) {
-    return;
-  }
-  openOverflowDetails.open = false;
-  openOverflowDetails = null;
-}
 
-function closeOverflowOnEscape(event: KeyboardEvent) {
-  if (event.key !== "Escape" || !openOverflowDetails) {
-    return;
-  }
-  openOverflowDetails.open = false;
-  openOverflowDetails = null;
-}
-
-async function refreshDashboard() {
-    if (refreshing) {
+  async function refreshDashboard() {
+    if (refreshBusy) {
       return;
     }
     refreshing = true;
     toolActionMessage = null;
     toolActionError = null;
     try {
-      await Promise.resolve(onRefresh({ quiet: false, scheduleFollowup: true }));
+      await Promise.resolve(onRefresh({ quiet: false, scheduleFollowup: true, showRefreshIndicator: true }));
     } catch (err) {
       toolActionError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -909,9 +913,9 @@ async function refreshDashboard() {
       <p>{$t("dashboard.subtitle")}</p>
     </div>
     <div class="top-actions">
-      <button class="secondary-button" type="button" disabled={refreshing} on:click={refreshDashboard}>
-        <AppIcon name={refreshing ? "loading" : "refresh"} size={16} class={refreshing ? "spin" : ""} />
-        {$t(refreshing ? "common.refreshing" : "common.refresh")}
+      <button class="secondary-button" type="button" disabled={refreshBusy} on:click={refreshDashboard}>
+        <AppIcon name={refreshBusy ? "loading" : "refresh"} size={16} class={refreshBusy ? "spin" : ""} />
+        {$t(refreshBusy ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
   </section>

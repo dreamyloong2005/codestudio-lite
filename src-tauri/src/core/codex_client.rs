@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::net::TcpListener;
@@ -156,6 +157,8 @@ pub struct CodexClientState {
     #[serde(default)]
     pub running: bool,
 }
+
+pub type CodexClientStateCache = BTreeMap<String, CodexClientState>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -405,6 +408,13 @@ pub fn load_cached_state() -> Option<CodexClientState> {
     storage::load_codex_client_state().ok().flatten()
 }
 
+/// Load all cached Codex states keyed by install kind. Windows has independent
+/// MSIX and portable plans, so one global row loses whichever tab was scanned
+/// first.
+pub fn load_cached_states() -> CodexClientStateCache {
+    storage::load_codex_client_states().unwrap_or_default()
+}
+
 pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> {
     inspect_state_for_install_kind(include_network, None)
 }
@@ -614,11 +624,6 @@ where
             }
         }
     }
-    let preserve_existing_msix = installed_before
-        .as_ref()
-        .map(|item| item.source == "msix")
-        .unwrap_or(false);
-
     let installed = if action == "portable-fallback" {
         emit_step_progress(
             &on_progress,
@@ -675,53 +680,11 @@ where
                 .or_else(|| detect_installed(&settings)),
             Ok(report) => {
                 notes.push(format!("MSIX install failed: {}", report.message));
-                if preserve_existing_msix {
-                    return Err(format!("MSIX update failed: {}.", report.message));
-                }
-                notes.push("Automatically switched to portable installation.".to_string());
-                emit_step_progress(
-                    &on_progress,
-                    &install_kind,
-                    "portable-fallback",
-                    "codexClient.progressMsixPortableFallback",
-                    None,
-                    None,
-                    Some(5),
-                    Some(7),
-                );
-                let portable = install_portable(
-                    &staged_path,
-                    &expand_env_path(&settings.install_root)?,
-                    &install_kind,
-                    &on_progress,
-                )?;
-                notes.extend(portable.notes);
-                portable.installed
+                return Err(format!("MSIX install failed: {}.", report.message));
             }
             Err(err) => {
                 notes.push(format!("MSIX install execution failed: {err}"));
-                if preserve_existing_msix {
-                    return Err(format!("MSIX update execution failed: {err}."));
-                }
-                notes.push("Automatically switched to portable installation.".to_string());
-                emit_step_progress(
-                    &on_progress,
-                    &install_kind,
-                    "portable-fallback",
-                    "codexClient.progressMsixExecutionPortableFallback",
-                    None,
-                    None,
-                    Some(5),
-                    Some(7),
-                );
-                let portable = install_portable(
-                    &staged_path,
-                    &expand_env_path(&settings.install_root)?,
-                    &install_kind,
-                    &on_progress,
-                )?;
-                notes.extend(portable.notes);
-                portable.installed
+                return Err(format!("MSIX install execution failed: {err}."));
             }
         }
     };
@@ -1017,12 +980,7 @@ fn build_plan(
         .as_deref()
         .map(|version| compare_versions(version, &release.version) != Ordering::Less)
         .unwrap_or(false);
-    let portable_recommended = capabilities.iter().any(|cap| {
-        cap.status == Severity::Error
-            && ["add-appx", "appx-service", "msix-runtime"].contains(&cap.id.as_str())
-    });
-    let existing_source = installed.map(|item| item.source.as_str());
-    let route = select_install_route(settings, installed, portable_recommended).to_string();
+    let route = select_install_route(settings, installed).to_string();
     let mut warnings = Vec::new();
     if route == "unsupported" {
         warnings.push("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
@@ -1041,14 +999,6 @@ fn build_plan(
         }
     } else if route == "portable-fallback" {
         warnings.push("The current plan will install the portable build and register Start menu and uninstall entries.".to_string());
-        if portable_recommended {
-            warnings.push(package::msix_runtime_unavailable_message(None));
-        }
-    } else if existing_source == Some("msix") && portable_recommended {
-        warnings.push(
-            "An existing MSIX install was detected; this update will prefer replacing the original MSIX and will not automatically switch install type even if capability probing recommends portable mode."
-                .to_string(),
-        );
     }
 
     Ok(CodexClientPlan {
@@ -1076,7 +1026,6 @@ fn build_plan(
 fn select_install_route(
     settings: &CodexClientSettings,
     installed: Option<&InstalledCodexClient>,
-    portable_recommended: bool,
 ) -> &'static str {
     if cfg!(target_os = "macos") {
         return "macos-dmg";
@@ -1087,10 +1036,7 @@ fn select_install_route(
     let existing_source = installed.map(|item| item.source.as_str());
     if existing_source == Some("msix") {
         "msix-sideload"
-    } else if existing_source == Some("portable")
-        || settings.windows_install_mode == "portable"
-        || portable_recommended
-    {
+    } else if existing_source == Some("portable") || settings.windows_install_mode == "portable" {
         "portable-fallback"
     } else {
         "msix-sideload"
@@ -3358,7 +3304,7 @@ mod tests {
         let installed = installed("msix");
 
         assert_eq!(
-            select_install_route(&settings, Some(&installed), true),
+            select_install_route(&settings, Some(&installed)),
             "msix-sideload"
         );
     }
@@ -3369,9 +3315,16 @@ mod tests {
         let installed = installed("portable");
 
         assert_eq!(
-            select_install_route(&settings, Some(&installed), false),
+            select_install_route(&settings, Some(&installed)),
             "portable-fallback"
         );
+    }
+
+    #[test]
+    fn default_windows_install_stays_msix_without_capability_fallback() {
+        let settings = CodexClientSettings::default();
+
+        assert_eq!(select_install_route(&settings, None), "msix-sideload");
     }
 
     #[test]

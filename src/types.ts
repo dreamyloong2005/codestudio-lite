@@ -766,6 +766,8 @@ export interface CodexClientState {
   running: boolean;
 }
 
+export type CodexClientStateCache = Partial<Record<"msix" | "portable", CodexClientState>>;
+
 export interface CodexClientStageReport {
   installKind: "msix" | "portable";
   upToDate: boolean;

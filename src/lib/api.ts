@@ -19,6 +19,7 @@ import type {
   CodexClientSettings,
   CodexClientStageReport,
   CodexClientState,
+  CodexClientStateCache,
   CodexClientUninstallRequest,
   PlanCodexClientUpdateRequest,
   StageCodexClientUpdateRequest,
@@ -817,6 +818,13 @@ export async function loadCachedCodexClientState(): Promise<CodexClientState | n
     return invoke("load_cached_codex_client_state");
   }
   return null;
+}
+
+export async function loadCachedCodexClientStates(): Promise<CodexClientStateCache> {
+  if (isTauri()) {
+    return invoke("load_cached_codex_client_states");
+  }
+  return {};
 }
 
 export async function planCodexClientUpdate(

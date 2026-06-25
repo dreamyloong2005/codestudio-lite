@@ -3,7 +3,7 @@ import {
   detectCodexInstallKinds,
   inspectCodexClient,
   installCodexClient,
-  loadCachedCodexClientState,
+  loadCachedCodexClientStates,
   loadCachedDetection,
   launchCodexClient,
   listenCodexClientProgress,
@@ -18,7 +18,8 @@ import type {
   CodexClientProgress,
   CodexClientSettings,
   CodexClientStageReport,
-  CodexClientState
+  CodexClientState,
+  CodexClientStateCache
 } from "../types";
 import type { TranslationKey } from "./i18n";
 
@@ -172,6 +173,22 @@ function stateInstallKind(state: CodexClientState): CodexClientInstallKind {
   return normalizeInstallKind(state.installKind);
 }
 
+function cachedStateEntries(
+  cache: CodexClientStateCache | null | undefined
+): Array<[CodexClientInstallKind, CodexClientState]> {
+  const byKind = new Map<CodexClientInstallKind, CodexClientState>();
+  for (const kind of INSTALL_KINDS) {
+    const state = cache?.[kind];
+    if (state) {
+      byKind.set(stateInstallKind(state), state);
+    }
+  }
+  return INSTALL_KINDS.flatMap((kind) => {
+    const state = byKind.get(kind);
+    return state ? [[kind, state] as [CodexClientInstallKind, CodexClientState]] : [];
+  });
+}
+
 function settingsKey(settings: CodexClientSettings) {
   return JSON.stringify({
     source: settings.source,
@@ -316,13 +333,29 @@ export function startCodexClientProgressListener() {
 // async re-scan still runs and supersedes this with live data.
 async function hydrateCodexClientFromCache(): Promise<boolean> {
   try {
-    const cached = await loadCachedCodexClientState();
-    if (cached) {
-      const kind = stateInstallKind(cached);
+    const cached = await loadCachedCodexClientStates();
+    const entries = cachedStateEntries(cached);
+    if (entries.length > 0) {
+      const selectedKind = get(codexClientView).selectedKind;
+      const preferredKind = entries.find(([kind, state]) => kind === selectedKind && Boolean(state.plan))?.[0]
+        ?? entries.find(([, state]) => Boolean(state.plan))?.[0]
+        ?? entries.find(([kind]) => kind === selectedKind)?.[0]
+        ?? entries[0][0];
+      const orderedEntries = [...entries].sort(([left], [right]) => {
+        if (left === preferredKind) {
+          return 1;
+        }
+        if (right === preferredKind) {
+          return -1;
+        }
+        return 0;
+      });
       // Pre-mark loaded so applyState uses the cached settings verbatim
       // instead of preserving the default-seeded draft launch options.
-      patch({ loaded: true });
-      applyState(cached, kind);
+      patch({ loaded: true, selectedKind: preferredKind });
+      for (const [kind, state] of orderedEntries) {
+        applyState(state, kind);
+      }
       // Restore per-kind install detection from the cached detection snapshot
       // so the tabs render instantly before the async re-scan completes.
       try {

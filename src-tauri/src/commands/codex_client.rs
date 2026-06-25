@@ -1,8 +1,8 @@
 use crate::core::codex_client::{
     self, CodexClientInstallRequest, CodexClientOperationResult, CodexClientProgress,
-    CodexClientSettings, CodexClientStageReport, CodexClientState, CodexClientUninstallRequest,
-    PlanCodexClientUpdateRequest, StageCodexClientUpdateRequest, UpdateCodexClientSettingsRequest,
-    CODEX_CLIENT_PROGRESS_EVENT,
+    CodexClientSettings, CodexClientStageReport, CodexClientState, CodexClientStateCache,
+    CodexClientUninstallRequest, PlanCodexClientUpdateRequest, StageCodexClientUpdateRequest,
+    UpdateCodexClientSettingsRequest, CODEX_CLIENT_PROGRESS_EVENT,
 };
 use tauri::Emitter;
 
@@ -17,6 +17,15 @@ pub async fn inspect_codex_client() -> Result<CodexClientState, String> {
 pub async fn load_cached_codex_client_state() -> Result<Option<CodexClientState>, String> {
     Ok(
         tauri::async_runtime::spawn_blocking(|| codex_client::load_cached_state())
+            .await
+            .map_err(|err| err.to_string())?,
+    )
+}
+
+#[tauri::command]
+pub async fn load_cached_codex_client_states() -> Result<CodexClientStateCache, String> {
+    Ok(
+        tauri::async_runtime::spawn_blocking(|| codex_client::load_cached_states())
             .await
             .map_err(|err| err.to_string())?,
     )

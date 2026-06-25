@@ -64,6 +64,18 @@ test("dashboard hides launch actions for VS Code plugin tools", () => {
   }
 });
 
+test("dashboard refresh button follows external detection refresh state", () => {
+  const svelte = read("src/routes/Dashboard.svelte");
+
+  assert.match(svelte, /export let refreshingExternally = false/);
+  assert.match(svelte, /\$:\s*refreshBusy = refreshing \|\| refreshingExternally/);
+  assert.match(svelte, /disabled=\{refreshBusy\}/);
+  assert.match(svelte, /name=\{refreshBusy \? "loading" : "refresh"\}/);
+  assert.match(svelte, /class=\{refreshBusy \? "spin" : ""\}/);
+  assert.match(svelte, /\$t\(refreshBusy \? "common\.refreshing" : "common\.refresh"\)/);
+  assert.match(svelte, /onRefresh\(\{ quiet: false, scheduleFollowup: true, showRefreshIndicator: true \}\)/);
+});
+
 test("CLI launch panel accepts and forwards a working directory", () => {
   const dashboard = read("src/routes/Dashboard.svelte");
   const types = read("src/types.ts");

@@ -48,7 +48,10 @@ test("route switches refresh the active CodeStudio Lite page", () => {
   assert.match(app, /import \{ ensureCodexClientLoaded \} from "\.\/lib\/codexClientStore"/);
   assert.match(app, /let lastRouteRefreshRoute: Route = route/);
   assert.match(app, /route !== lastRouteRefreshRoute[\s\S]*refreshCurrentRouteAfterSwitch\(route\)/);
-  assert.match(app, /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: false \}\)/);
+  assert.match(
+    app,
+    /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: false, showRefreshIndicator: true \}\)/
+  );
   assert.match(app, /currentRoute === "codexClient"[\s\S]*ensureCodexClientLoaded\(\)/);
   assert.match(app, /currentRoute === "claudeDesktop"[\s\S]*ensureClaudeDesktopLoaded\(\)/);
   assert.doesNotMatch(app, /currentRoute === "codexClient"[\s\S]*refreshCodexClient\(\)/);
@@ -341,6 +344,8 @@ test("Claude Desktop isolates Windows App and EXE tab operation state", () => {
   assert.match(store, /function selectedKindView/);
   assert.match(store, /patchKind\(/);
   assert.match(store, /function applyKindStatusesFromSnapshot/);
+  assert.match(store, /const isWindows = snapshot\.platform === "windows"/);
+  assert.match(store, /const installKinds = isWindows \? \(snapshot\.claudeInstallKinds \?\? null\) : null/);
   assert.match(store, /progressInstallKind\(progress\)/);
   assert.match(store, /patchKind\(kind,\s*\{[\s\S]*progressLogs:/);
   assert.match(store, /progress:\s*ToolInstallProgress \| null/);
@@ -351,20 +356,37 @@ test("Claude Desktop isolates Windows App and EXE tab operation state", () => {
   assert.match(store, /uninstallTool\(\{\s*toolId: CLAUDE_DESKTOP_TOOL_ID,\s*confirm: true,\s*installKind/);
   assert.match(store, /function claudeDesktopExeInstallDetected/);
   assert.match(store, /export function claudeDesktopVisibleInstallKinds/);
+  assert.match(store, /claudeDesktopExeInstallDetected\(view\.installKinds\) \? \["msix", "exe"\] : \["msix"\]/);
+  assert.match(store, /export async function installOrUpdateClaudeDesktopKind/);
+  assert.match(store, /state\.kindViews\[installKind\]/);
   assert.match(store, /installKind === "exe"/);
   assert.match(store, /Claude Desktop EXE installation is no longer supported/);
-  assert.match(store, /selectedKind:\s*current\.selectedKind === "exe" && !claudeDesktopExeInstallDetected\(installKinds\)\s*\?\s*"msix"\s*:\s*current\.selectedKind/);
+  assert.match(store, /selectedKind:\s*isWindows \? current\.selectedKind : "msix"/);
+  assert.doesNotMatch(store, /selectedKind:\s*current\.selectedKind === "exe" && !claudeDesktopExeInstallDetected/);
   assert.match(store, /installPlan:\s*null/);
   assert.match(store, /updatePlan:\s*null/);
 
   assert.match(route, /claudeDesktopVisibleInstallKinds/);
   assert.match(route, /visibleInstallKinds\s*=\s*claudeDesktopVisibleInstallKinds\(view\)/);
   assert.match(route, /\{#each visibleInstallKinds as kind\}/);
+  assert.match(route, /installOrUpdateClaudeDesktopKind\(effectiveSelectedKind,\s*"install"\)/);
+  assert.match(route, /installOrUpdateClaudeDesktopKind\(effectiveSelectedKind,\s*"update"\)/);
+  assert.match(route, /removeClaudeDesktop\(effectiveSelectedKind\)/);
+  assert.match(route, /refreshClaudeDesktop\(false,\s*effectiveSelectedKind\)/);
   assert.doesNotMatch(route, /on:click=\{\(\) => setClaudeDesktopSelectedKind\("exe"\)\}/);
   assert.match(route, /kindView\s*=\s*view\.kindViews\[effectiveSelectedKind\]/);
   assert.match(route, /status\s*=\s*kindView\.status/);
   assert.match(route, /installPlan\s*=\s*kindView\.installPlan/);
   assert.match(route, /updatePlan\s*=\s*kindView\.updatePlan/);
+  assert.match(route, /activePlan\s*=\s*installed \? updatePlan : installPlan/);
+  assert.match(route, /activePlanAvailable\s*=\s*Boolean\(activePlan\?\.canInstall\)/);
+  assert.match(route, /\$t\("codexClient\.planTitle"\)/);
+  assert.match(route, /activePlan\.command \|\| \$t\("common\.none"\)/);
+  assert.match(route, /activePlan\.requiresAdmin \? \$t\("toolInstall\.adminMayPrompt"\) : \$t\("toolInstall\.userScope"\)/);
+  assert.match(route, /\{#each activePlan\.prerequisites as prerequisite\}/);
+  assert.match(route, /\{#each activePlan\.commands as command\}/);
+  assert.match(route, /\{#each activePlan\.steps as step\}/);
+  assert.match(route, /\{#if activePlanBlocker\}/);
   assert.match(route, /busyAction\s*=\s*kindView\.busyAction/);
   assert.match(route, /progress\s*=\s*kindView\.progress/);
   assert.match(route, /progressPercent\s*=\s*progress\?\.percent/);
@@ -485,9 +507,13 @@ test("macOS app bundle is signed as a bundle for stable Accessibility trust", ()
   const packageJson = JSON.parse(read("package.json"));
   const signScript = read("scripts/sign-macos-bundle.sh");
   const dmgScript = read("scripts/build-macos-dmg.sh");
+  const createDmgScript = read("scripts/create-macos-dmg.sh");
 
   assert.equal(tauriConfig.bundle?.macOS?.signingIdentity, "-");
   assert.equal(tauriConfig.bundle?.macOS?.infoPlist, "Info.plist");
+  assert.deepEqual(tauriConfig.bundle?.macOS?.dmg?.windowSize, { width: 660, height: 400 });
+  assert.deepEqual(tauriConfig.bundle?.macOS?.dmg?.appPosition, { x: 180, y: 170 });
+  assert.deepEqual(tauriConfig.bundle?.macOS?.dmg?.applicationFolderPosition, { x: 480, y: 170 });
   assert.equal(packageJson.scripts?.["tauri:build:dmg"], "scripts/build-macos-dmg.sh");
   assert.equal(packageJson.scripts?.["tauri:sign:macos"], "scripts/sign-macos-bundle.sh");
   assert.match(signScript, /--requirements/);
@@ -498,8 +524,26 @@ test("macOS app bundle is signed as a bundle for stable Accessibility trust", ()
   assert.match(dmgScript, /--no-sign/);
   assert.match(dmgScript, /Warn --no-sign flag detected/);
   assert.match(dmgScript, /Warn Skipping signing due to --no-sign flag/);
-  assert.match(dmgScript, /hdiutil create/);
+  assert.match(dmgScript, /create-macos-dmg\.sh/);
+  assert.ok(
+    dmgScript.indexOf("scripts/sign-macos-bundle.sh") < dmgScript.indexOf("create-macos-dmg.sh")
+  );
+  assert.match(createDmgScript, /bundle\?\.macOS\?\.dmg/);
+  assert.match(createDmgScript, /while IFS=\$'\\t' read -r key value/);
+  assert.doesNotMatch(createDmgScript, /eval/);
+  assert.match(createDmgScript, /create_tauri_style_dmg/);
+  assert.match(createDmgScript, /create_finder_layout_script/);
+  assert.match(createDmgScript, /\/usr\/bin\/osascript/);
+  assert.match(createDmgScript, /\.DS_STORE/);
+  assert.match(createDmgScript, /set position of item "\$escaped_app_name"/);
+  assert.match(createDmgScript, /set position of item "Applications"/);
+  assert.match(createDmgScript, /DMG_ALLOW_PLAIN_FALLBACK/);
+  assert.match(createDmgScript, /does not contain Tauri\/Finder window layout UI/);
+  assert.match(createDmgScript, /hdiutil create/);
+  assert.match(createDmgScript, /hdiutil makehybrid/);
+  assert.match(createDmgScript, /hdiutil verify/);
   assert.doesNotMatch(dmgScript, /tauri build --bundles dmg/);
+  assert.doesNotMatch(createDmgScript, /tauri build --bundles dmg/);
 });
 
 test("Claude Desktop macOS Accessibility grant resumes through the page after explicit user confirmation", () => {
@@ -532,20 +576,35 @@ test("Claude Desktop macOS Accessibility grant resumes through the page after ex
   assert.match(store, /setClaudeDesktopPendingLaunchAfterRestart/);
   assert.match(store, /consumeClaudeDesktopPendingLaunchAfterRestart/);
   assert.match(route, /consumeClaudeDesktopPendingLaunchAfterRestart/);
+  assert.match(route, /initializeClaudeDesktopPage/);
+  assert.match(route, /await ensureClaudeDesktopLoaded\(\);[\s\S]*await resumePendingLaunchAfterRestart\(\);/);
+  assert.match(route, /setClaudeDesktopPendingLaunchAfterRestart/);
+  assert.match(route, /function cancelAccessibilityLaunch\(\)/);
+  assert.match(route, /setClaudeDesktopPendingLaunchAfterRestart\(null\)/);
+  assert.match(route, /on:click=\{cancelAccessibilityLaunch\}/);
   assert.match(route, /claudeDesktop\.accessibilityTitle/);
   assert.match(route, /restartClaudeDesktopAfterAccessibilityGrant/);
   assert.match(route, /ACCESSIBILITY_NOT_TRUSTED/);
+  const restartHandler = route.slice(
+    route.indexOf("async function restartAfterAccessibilityGrant"),
+    route.indexOf("function cancelAccessibilityLaunch")
+  );
+  assert.match(restartHandler, /restartClaudeDesktopAfterAccessibilityGrant/);
+  assert.doesNotMatch(restartHandler, /launchClaudeDesktop|launchClaudeWithLocalization/);
 
   const launchBody = patch.slice(
     patch.indexOf("fn launch_macos_claude_desktop_localized"),
     patch.indexOf("fn enable_macos_claude_main_process_debugger")
   );
   assert.match(launchBody, /ensure_macos_accessibility_trusted_for_localized_launch\(\)\?/);
-  assert.doesNotMatch(launchBody, /schedule_macos_accessibility_restart|request_restart|allow_accessibility_restart/);
+  assert.doesNotMatch(launchBody, /schedule_macos_accessibility_restart|allow_accessibility_restart/);
   assert.doesNotMatch(patch, /MACOS_ACCESSIBILITY_PREFLIGHT_TIMEOUT|MACOS_ACCESSIBILITY_PREFLIGHT_RETRY_MS/);
   assert.match(patch, /write_macos_accessibility_pending_launch_marker/);
   assert.match(patch, /take_macos_accessibility_pending_launch_marker/);
   assert.match(patch, /app\.request_restart\(\)/);
+  assert.doesNotMatch(patch, /app\.restart\(\)/);
+  assert.match(patch, /macos_accessibility_restart_required_error/);
+  assert.match(patch, /restart required before launching Claude/);
 
   for (const dictionary of [enUS, zhCN, zhTW]) {
     assert.match(dictionary, /"claudeDesktop\.accessibilityTitle"/);

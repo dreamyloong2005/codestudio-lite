@@ -32,6 +32,7 @@ pub fn run() {
             commands::codex_client::inspect_codex_client,
             commands::codex_client::install_codex_client,
             commands::codex_client::load_cached_codex_client_state,
+            commands::codex_client::load_cached_codex_client_states,
             commands::codex_client::launch_codex_client,
             commands::codex_client::open_codex_client_path,
             commands::codex_client::plan_codex_client_update,
