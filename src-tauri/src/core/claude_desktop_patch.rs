@@ -860,6 +860,27 @@ function Invoke-Element($element) {
   return $false
 }
 
+function Invoke-ClaudeElementDefaultAction($element) {
+  $legacyAutomationPattern = $null
+  try {
+    $legacyAutomationPattern = $element.GetSupportedPatterns() |
+      Where-Object { $_.ProgrammaticName -eq 'LegacyIAccessiblePatternIdentifiers.Pattern' } |
+      Select-Object -First 1
+  } catch {
+    $legacyAutomationPattern = $null
+  }
+  if (-not $legacyAutomationPattern) { return $false }
+
+  $legacyPattern = $null
+  if ($element.TryGetCurrentPattern($legacyAutomationPattern, [ref]$legacyPattern)) {
+    try {
+      $legacyPattern.DoDefaultAction()
+      return $true
+    } catch {}
+  }
+  return $false
+}
+
 function Get-ClaudeAutomationRoots($window) {
   $roots = New-Object System.Collections.Generic.List[object]
   [CslClaudeWin32]::EnumWindows({
@@ -1125,62 +1146,69 @@ function Open-ClaudeMenu($window, [string[]]$developerNames) {
   return $false
 }
 
-function Test-ClaudeOverlayCandidateText([string]$text) {
-  if (-not $text) { return $false }
-  return $text -match 'Upgrade|Plan|Pro|Team|Try|Trial|Subscribe|Discount|Offer|New|Announcement|Promo|Limited|Introducing|What''s new|Release' -or
-    $text -match '升级|订阅|套餐|试用|优惠|公告|新功能|推广|广告|限时|会员|计划|版本|新增'
-}
-
-function Test-ClaudeRootHasBlockingOverlayText($root) {
-  $conditions = @(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Text
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Document
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Pane
-    ))
-  )
-
-  foreach ($condition in $conditions) {
-    $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
-    foreach ($element in $matches) {
-      $name = ''
-      try { $name = $element.Current.Name } catch { $name = '' }
-      if (Test-ClaudeOverlayCandidateText $name) { return $true }
-    }
+function Test-ClaudeElementStillVisible($element) {
+  if (-not $element) { return $false }
+  try {
+    $null = $element.Current.ControlType
+    if ($element.Current.IsOffscreen) { return $false }
+    $rect = $element.Current.BoundingRectangle
+    return -not $rect.IsEmpty -and $rect.Width -gt 0 -and $rect.Height -gt 0
+  } catch {
+    return $false
   }
-  return $false
 }
 
-function Find-ClaudeAnonymousOverlayCloseButton($root) {
-  if (-not (Test-ClaudeRootHasBlockingOverlayText $root)) { return $null }
+function Get-ClaudeElementRect($element) {
+  try { return $element.Current.BoundingRectangle } catch { return $null }
+}
+
+function Test-ClaudeRectInside($inner, $outer, [int]$tolerance) {
+  if (-not $inner -or -not $outer -or $inner.IsEmpty -or $outer.IsEmpty) { return $false }
+  return $inner.Left -ge ($outer.Left - $tolerance) -and
+    $inner.Top -ge ($outer.Top - $tolerance) -and
+    $inner.Right -le ($outer.Right + $tolerance) -and
+    $inner.Bottom -le ($outer.Bottom + $tolerance)
+}
+
+function Test-ClaudeModalCloseButtonName([string]$name) {
+  if (-not $name) { return $false }
+  return $name -match '^(Close|Dismiss|Not now|No thanks|Maybe later|Got it|OK)$' -or
+    $name -match '^(关闭|關閉|稍后|稍後|取消|跳过|跳過|知道了?|好的)$'
+}
+
+function Find-ClaudeModalCloseButton($modal) {
+  $modalRect = Get-ClaudeElementRect $modal
+  if (-not $modalRect -or $modalRect.IsEmpty) { return $null }
 
   $condition = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::Button
   )
-  $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+  $matches = $modal.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
   $best = $null
   $bestScore = -1
   foreach ($element in $matches) {
-    $name = ''
-    try { $name = $element.Current.Name } catch { $name = '' }
-    if ($name.Length -gt 0) { continue }
-
     $patterns = @($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
-    if ($patterns -notcontains 'InvokePatternIdentifiers.Pattern') { continue }
+    if ($patterns -notcontains 'InvokePatternIdentifiers.Pattern' -and
+        $patterns -notcontains 'LegacyIAccessiblePatternIdentifiers.Pattern') { continue }
 
     $className = ''
+    $name = ''
     try { $className = $element.Current.ClassName } catch { $className = '' }
+    try { $name = $element.Current.Name } catch { $name = '' }
+    if ($className -eq 'WinCaptionButton') { continue }
+
+    $rect = Get-ClaudeElementRect $element
+    if (-not (Test-ClaudeRectInside $rect $modalRect 4)) { continue }
+    if ($rect.Width -lt 12 -or $rect.Height -lt 12) { continue }
+
     $score = 0
-    if ($className -match 'button|close|icon|absolute|rounded|ghost') { $score += 4 }
-    if ($patterns -contains 'ScrollItemPatternIdentifiers.Pattern') { $score += 1 }
+    if (Test-ClaudeModalCloseButtonName $name) { $score += 18 }
+    if ($name.Length -eq 0 -and $rect.Width -le 80 -and $rect.Height -le 80) { $score += 6 }
+    if ($rect.Top -le ($modalRect.Top + 120) -and $rect.Right -ge ($modalRect.Right - 160)) { $score += 10 }
+    if ($className -match 'close|icon|ghost|square|aspect-square|rounded') { $score += 4 }
+    if ($patterns -contains 'LegacyIAccessiblePatternIdentifiers.Pattern') { $score += 2 }
+    if ($score -lt 8) { continue }
     if ($score -gt $bestScore) {
       $bestScore = $score
       $best = $element
@@ -1189,22 +1217,242 @@ function Find-ClaudeAnonymousOverlayCloseButton($root) {
   $best
 }
 
-function Close-ClaudeBlockingOverlayWindows($window) {
+function Find-ClaudeBlockingWebModal($root) {
+  $rootRect = Get-ClaudeElementRect $root
+  if (-not $rootRect -or $rootRect.IsEmpty) { return $null }
+
+  $conditions = @(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Pane
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Group
+    ))
+  )
+
+  $best = $null
+  $bestScore = -1
+  foreach ($condition in $conditions) {
+    $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+    foreach ($element in $matches) {
+      if ($element -eq $root) { continue }
+      $controlType = ''
+      $className = ''
+      $frameworkId = ''
+      try { $controlType = $element.Current.ControlType.ProgrammaticName } catch { $controlType = '' }
+      try { $className = $element.Current.ClassName } catch { $className = '' }
+      try { $frameworkId = $element.Current.FrameworkId } catch { $frameworkId = '' }
+      if ($frameworkId -ne 'Chrome') { continue }
+      if ($className -eq 'WinCaptionButton') { continue }
+      if ($className -eq 'MenuItemView') { continue }
+
+      $rect = Get-ClaudeElementRect $element
+      if (-not (Test-ClaudeRectInside $rect $rootRect 8)) { continue }
+      if ($rect.Width -lt 260 -or $rect.Height -lt 160) { continue }
+      if ($rect.Width -ge ($rootRect.Width - 20) -and $rect.Height -ge ($rootRect.Height - 20)) { continue }
+
+      $button = Find-ClaudeModalCloseButton $element
+      if (-not $button) { continue }
+
+      $score = 0
+      if ($controlType -eq 'ControlType.Window') { $score += 24 }
+      if ($element.Current.IsKeyboardFocusable) { $score += 6 }
+      if ($className -match 'fixed|modal|dialog|popover|rounded|shadow|z-') { $score += 4 }
+      $area = [double]$rect.Width * [double]$rect.Height
+      $rootArea = [double]$rootRect.Width * [double]$rootRect.Height
+      if ($rootArea -gt 0) {
+        $ratio = $area / $rootArea
+        if ($ratio -ge 0.05 -and $ratio -le 0.80) { $score += 4 }
+      }
+      if ($score -gt $bestScore) {
+        $bestScore = $score
+        $best = $element
+      }
+    }
+  }
+  $best
+}
+
+function Get-ClaudeBlockingWebCloseButtonScore($button, $rootRect) {
+  if (-not $button -or -not $rootRect -or $rootRect.IsEmpty) { return -1 }
+
+  $controlType = ''
+  $className = ''
+  $frameworkId = ''
+  $name = ''
+  try { $controlType = $button.Current.ControlType.ProgrammaticName } catch { return -1 }
+  try { $className = $button.Current.ClassName } catch { $className = '' }
+  try { $frameworkId = $button.Current.FrameworkId } catch { $frameworkId = '' }
+  try { $name = $button.Current.Name } catch { $name = '' }
+  if ($controlType -ne 'ControlType.Button') { return -1 }
+  if ($frameworkId -ne 'Chrome') { return -1 }
+  if ($className -eq 'WinCaptionButton') { return -1 }
+  try { if ($button.Current.IsOffscreen) { return -1 } } catch {}
+
+  $patterns = @($button.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+  if ($patterns -notcontains 'InvokePatternIdentifiers.Pattern' -and
+      $patterns -notcontains 'LegacyIAccessiblePatternIdentifiers.Pattern') { return -1 }
+
+  $rect = Get-ClaudeElementRect $button
+  if (-not (Test-ClaudeRectInside $rect $rootRect 8)) { return -1 }
+  if ($rect.Width -lt 12 -or $rect.Height -lt 12) { return -1 }
+
+  $smallSquare = $rect.Width -le 100 -and $rect.Height -le 100
+  $rightSide = $rect.Left -ge ($rootRect.Left + ($rootRect.Width * 0.50))
+  $upperContent = $rect.Top -ge ($rootRect.Top + 56) -and
+    $rect.Top -le ($rootRect.Top + ($rootRect.Height * 0.60))
+  $looksLikeNamedClose = $name -match '^(Close|关闭|關閉)$'
+  $looksLikeDismissAction = Test-ClaudeModalCloseButtonName $name
+
+  if (-not $looksLikeDismissAction -and $name.Length -gt 0) { return -1 }
+  if ($name.Length -eq 0 -and -not ($smallSquare -and $rightSide -and $upperContent)) { return -1 }
+
+  $score = 0
+  if ($looksLikeNamedClose) {
+    $score += 24
+  } elseif ($looksLikeDismissAction) {
+    $score += 14
+  }
+  if ($smallSquare) { $score += 8 }
+  if ($rightSide) { $score += 5 }
+  if ($upperContent) { $score += 5 }
+  if ($className -match 'close|icon|ghost|square|aspect-square|rounded|w-control') { $score += 4 }
+  if ($patterns -contains 'LegacyIAccessiblePatternIdentifiers.Pattern') { $score += 2 }
+  $score
+}
+
+function Test-ClaudeBlockingWebCloseButton($button, $rootRect) {
+  (Get-ClaudeBlockingWebCloseButtonScore $button $rootRect) -ge 20
+}
+
+function Find-ClaudeBlockingWebCloseButton($root, $window) {
+  if (-not $root) { return $null }
+  $menuButton = Find-ClaudeMenuButton $window
+  if ($menuButton) { return $null }
+
+  $rootRect = Get-ClaudeElementRect $root
+  if (-not $rootRect -or $rootRect.IsEmpty) { return $null }
+
+  $condition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Button
+  )
+  $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)
+  $best = $null
+  $bestScore = -1
+  foreach ($button in $matches) {
+    if (-not (Test-ClaudeBlockingWebCloseButton $button $rootRect)) { continue }
+    $score = Get-ClaudeBlockingWebCloseButtonScore $button $rootRect
+    if ($score -gt $bestScore) {
+      $bestScore = $score
+      $best = $button
+    }
+  }
+  if ($best) { Write-ClaudeDebuggerLog ("Selected structural web close button: " + (Format-ClaudeElementForLog $best)) }
+  $best
+}
+
+function Find-ClaudeCloseButton($root) {
+  # Direct full-subtree search for any dismiss button that is not a window
+  # caption button. Used while the Menu button is hidden by a popup: the popup
+  # may not be identifiable as a discrete modal container, so searching the
+  # whole tree for a dismissable button is more reliable than first locating
+  # the modal then its close button.
+  #
+  # Claude desktop localizes the accessible names of its popup buttons, so the
+  # match covers every language Claude ships (en, zh-CN, zh-TW, fr, de, es,
+  # pt-BR, ja, ko, it, hi, id). Explicit "close" verbs score higher than softer
+  # dismissals ("not now"/"later"/etc.) since closing the popup outright is the
+  # goal.
+  if (-not $root) { return $null }
+  $condition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Button
+  )
+  # Localized close verbs (preferred) and softer dismissals (fallback), across
+  # every Claude-supported locale.
+  $closeVerbs = '^(Close|关闭|關閉|Fermer|Schließen|Schliessen|Cerrar|Fechar|閉じる|닫기|Chiudi|बंद करें|Tutup)$'
+  $dismissPhrases = '^(Not now|Dismiss|No thanks|Maybe later|Got it|OK|Later|暂不|以后再说|以后再說|不用了|知道了|好的|稍后|稍後|以后|以後|Pas maintenant|Plus tard|Non merci|Peut-être plus tard|J''ai compris|Nicht jetzt|Später|Spater|Nein danke|Vielleicht später|Vielleicht spater|Verstanden|Ahora no|Más tarde|Mas tarde|No gracias|Tal vez más tarde|Tal vez mas tarde|Entendido|Agora não|Agora nao|Mais tarde|Não obrigado|Nao obrigado|Talvez mais tarde|Entendi|後で|今はしない|いいえ|あとで|나중에|아니요|알겠습니다|Non ora|Più tardi|Piu tardi|No grazie|Magari più tardi|Magari piu tardi|Ho capito|अभी नहीं|बाद में|नहीं धन्यवाद|Jangan sekarang|Nanti|Tidak terima kasih)$'
+  $best = $null
+  $bestScore = -1
+  foreach ($button in $root.FindAll([System.Windows.Automation.TreeScope]::Subtree, $condition)) {
+    $name = ''
+    $className = ''
+    try { $name = $button.Current.Name } catch { $name = '' }
+    try { $className = $button.Current.ClassName } catch { $className = '' }
+    if ($className -eq 'WinCaptionButton') { continue }
+    $isCloseVerb = $name -match $closeVerbs
+    if (-not $isCloseVerb -and $name -notmatch $dismissPhrases) { continue }
+    $patterns = @($button.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })
+    if ($patterns -notcontains 'InvokePatternIdentifiers.Pattern' -and
+        $patterns -notcontains 'LegacyIAccessiblePatternIdentifiers.Pattern') { continue }
+    try { if ($button.Current.IsOffscreen) { continue } } catch {}
+    $rect = $button.Current.BoundingRectangle
+    if ($rect.Width -lt 12 -or $rect.Height -lt 12) { continue }
+    # Prefer an explicit close verb over softer dismissals (Not now/etc.).
+    $score = 0
+    if ($isCloseVerb) { $score += 20 } else { $score += 10 }
+    if ($className -match 'close|icon|ghost|square|aspect-square|rounded') { $score += 4 }
+    if ($score -gt $bestScore) {
+      $bestScore = $score
+      $best = $button
+    }
+  }
+  $best
+}
+
+function Close-ClaudeBlockingWebModals($window) {
   $closed = 0
   try {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($window.Hwnd)
     if (-not $root) { return 0 }
 
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+      if (Find-ClaudeMenuButton $window) { break }
+      $modal = Find-ClaudeBlockingWebModal $root
+      if (-not $modal) { break }
+      # The popup's Close button may not have rendered yet when the script
+      # runs right after the window is activated. Wait for it to appear before
+      # giving up — otherwise Close-ClaudeBlockingWebModals exits without ever
+      # invoking the dismiss button, and the main flow's Menu-button gate then
+      # loops forever without dismissing the popup.
+      $button = Wait-ClaudeCondition 40 50 { Find-ClaudeModalCloseButton $modal }
+      if (-not $button) {
+        Write-ClaudeDebuggerLog 'Claude blocking web modal had no close button after waiting.'
+        break
+      }
+      Write-ClaudeDebuggerLog ("Closing Claude blocking web modal: modal=" + (Format-ClaudeElementForLog $modal) + " button=" + (Format-ClaudeElementForLog $button))
+      $invoked = Invoke-Element $button
+      # Gauge success by the in-window Menu button reappearing (it is hidden
+      # while a blocking popup covers the toolbar) rather than by the modal
+      # element's visibility, which stays stale after the popup is dismissed.
+      if ($invoked -and (Wait-ClaudeCondition 30 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } })) { $closed += 1; continue }
+      $invoked = Invoke-ClaudeElementDefaultAction $button
+      if (-not $invoked) { break }
+      if (Wait-ClaudeCondition 30 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } }) { $closed += 1; continue }
+      break
+    }
+
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
-      $button = Find-ClaudeAnonymousOverlayCloseButton $root
+      if (Find-ClaudeMenuButton $window) { break }
+      $button = Wait-ClaudeCondition 40 50 { Find-ClaudeBlockingWebCloseButton $root $window }
       if (-not $button) { break }
-      Write-ClaudeDebuggerLog ("Closing Claude blocking overlay with anonymous close button: " + (Format-ClaudeElementForLog $button))
-      if (-not (Invoke-Element $button)) { break }
-      $closed += 1
-      Start-Sleep -Milliseconds 250
+      Write-ClaudeDebuggerLog ("Closing Claude blocking web content via close button: " + (Format-ClaudeElementForLog $button))
+      $invoked = Invoke-Element $button
+      if ($invoked -and (Wait-ClaudeCondition 16 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } })) { $closed += 1; continue }
+      $invoked = Invoke-ClaudeElementDefaultAction $button
+      if (-not $invoked) { break }
+      if (Wait-ClaudeCondition 16 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } }) { $closed += 1; continue }
+      break
     }
   } catch {
-    Write-ClaudeDebuggerLog "Ignoring Claude blocking overlay cleanup failure: $($_.Exception.Message)"
+    Write-ClaudeDebuggerLog "Ignoring Claude blocking web modal cleanup failure: $($_.Exception.Message)"
   }
   $closed
 }
@@ -1364,8 +1612,6 @@ if (-not $window) {
 [CslClaudeWin32]::BringWindowToTop($window.Hwnd) | Out-Null
 [CslClaudeWin32]::SetForegroundWindow($window.Hwnd) | Out-Null
 Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null
-Close-ClaudeBlockingOverlayWindows $window | Out-Null
-
 $developerNames = @('Developer', '开发者', '開發者')
 $debuggerNames = @(
   'Enable Main Process Debugger',
@@ -1373,6 +1619,49 @@ $debuggerNames = @(
   '启用主进程调试器',
   '啟用主進程偵錯器'
 )
+
+# Claude repaints its window asynchronously after activation. The in-window
+# Menu button takes a moment to enter the UIA tree, and when a popup (e.g. the
+# upgrade plan banner) is shown the Menu button stays hidden until the popup is
+# dismissed. Driving menu automation before the Menu button is visible makes
+# Open-ClaudeMenu fail and the whole debugger enablement throws out.
+#
+# Single poll loop: keep checking for the Menu button (signal #1 — when it
+# appears the window is ready and unobstructed, so stop and open the menu).
+# While the Menu button is still missing, look for any dismiss button
+# (Close/Not now, signal #2) across the whole tree and invoke it to clear the
+# popup. Once the Menu button appears, the dismiss search stops too.
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($window.Hwnd)
+$menuReady = $false
+for ($phase = 0; $phase -lt 8; $phase++) {
+  if (Find-ClaudeMenuButton $window) {
+    $menuReady = $true
+    Write-ClaudeDebuggerLog 'Claude in-window menu button appeared; proceeding to menu automation.'
+    break
+  }
+  Write-ClaudeDebuggerLog "Menu button not visible yet (phase $($phase + 1)); scanning for dismiss button."
+  $closeButton = Find-ClaudeCloseButton $root
+  if ($closeButton) {
+    Write-ClaudeDebuggerLog ("Invoking dismiss button: " + (Format-ClaudeElementForLog $closeButton))
+    $invoked = Invoke-Element $closeButton
+    if (-not $invoked) { $invoked = Invoke-ClaudeElementDefaultAction $closeButton }
+    if ($invoked) {
+      # Give the popup a moment to dismiss before the next Menu check.
+      Wait-ClaudeCondition 30 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } } | Out-Null
+    }
+  } else {
+    # No dismiss button found this round; briefly keep polling for the Menu
+    # button before the next full scan so the loop stays responsive.
+    if (Wait-ClaudeCondition 10 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } }) {
+      $menuReady = $true
+      Write-ClaudeDebuggerLog 'Claude in-window menu button appeared; proceeding to menu automation.'
+      break
+    }
+  }
+}
+if (-not $menuReady) {
+  Write-ClaudeDebuggerLog 'Claude in-window menu button did not appear after popup cleanup.'
+}
 
 $developer = $null
 if (-not (Open-ClaudeMenu $window $developerNames)) {
@@ -1436,7 +1725,27 @@ Write-ClaudeDebuggerLog 'Windows Main Process Debugger automation completed.'
         WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT,
     )
     .map(|_| ())
-    .map_err(|err| format!("Failed to request Claude main process debugger on Windows: {err}"))
+    .map_err(|err| {
+        // The PowerShell automation writes its own progress log, but a parse
+        // error or early crash happens before that log is ever written, leaving
+        // no trace. Mirror the failure (incl. PowerShell stderr) to a separate
+        // file so we can diagnose why the debugger never came up.
+        if let Ok(paths) = app_paths() {
+            let log_path = paths
+                .config_dir
+                .join("claude-desktop-patch")
+                .join("windows-main-debugger-error.log");
+            let _ = fs::write(
+                &log_path,
+                format!(
+                    "[{}] {}\n",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                    err
+                ),
+            );
+        }
+        format!("Failed to request Claude main process debugger on Windows: {err}")
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -1451,6 +1760,21 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 {script}
 "#
     );
+    // The debugger automation script is large (tens of KB). Passing it as a
+    // `-Command` argument overflows the Windows command-line length limit
+    // (32767 chars, os error 206 "filename or extension too long"), so
+    // PowerShell never starts. Write it to a temp .ps1 file (UTF-8 with BOM so
+    // Windows PowerShell 5.1 decodes the embedded CJK menu names correctly) and
+    // invoke with -File instead.
+    let temp_dir = env::temp_dir();
+    let script_path = temp_dir.join("codestudio-claude-debugger.ps1");
+    let mut bytes = Vec::with_capacity(script.len() + 3);
+    // UTF-8 BOM so PowerShell 5.1 reads the file as UTF-8, not system ANSI.
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(script.as_bytes());
+    fs::write(&script_path, &bytes)
+        .map_err(|err| format!("Failed to write PowerShell script to temp file: {err}"))?;
+
     let mut child = hidden_command("powershell.exe")
         .args([
             "-NoLogo",
@@ -1458,11 +1782,14 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-Command",
-            &script,
+            "-File",
+            &script_path.to_string_lossy(),
         ])
         .spawn()
-        .map_err(|err| format!("Failed to start PowerShell: {err}"))?;
+        .map_err(|err| {
+            let _ = fs::remove_file(&script_path);
+            format!("Failed to start PowerShell: {err}")
+        })?;
 
     let started = Instant::now();
     loop {
@@ -1470,19 +1797,25 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
             Ok(Some(_status)) => {
                 let output = child
                     .wait_with_output()
-                    .map_err(|err| format!("Failed to read PowerShell output: {err}"))?;
+                    .map_err(|err| {
+                        let _ = fs::remove_file(&script_path);
+                        format!("Failed to read PowerShell output: {err}")
+                    })?;
                 if !output.status.success() {
+                    let _ = fs::remove_file(&script_path);
                     return Err(format!(
                         "PowerShell execution failed: {}",
                         String::from_utf8_lossy(&output.stderr).trim()
                     ));
                 }
+                let _ = fs::remove_file(&script_path);
                 return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
             }
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = fs::remove_file(&script_path);
                     return Err(format!(
                         "PowerShell debugger automation timed out after {} seconds; waiting for manual Main Process Debugger activation.",
                         timeout.as_secs()
@@ -1493,6 +1826,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
             Err(err) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = fs::remove_file(&script_path);
                 return Err(format!(
                     "Failed to poll PowerShell debugger automation: {err}"
                 ));
@@ -4568,7 +4902,6 @@ mod tests {
                 concat!("Click", "-Point"),
                 concat!("Click", "-Element", "Center"),
                 concat!("System.Windows", ".Forms"),
-                concat!("Bounding", "Rectangle"),
                 concat!("$window", ".Left"),
                 concat!("$window", ".Top"),
                 concat!("$window", ".Right"),
@@ -4637,34 +4970,55 @@ mod tests {
     }
 
     #[test]
-    fn windows_debugger_automation_closes_anonymous_blocking_overlay_before_menu() {
+    fn windows_debugger_automation_closes_blocking_web_modals_before_menu() {
         let request_body = windows_debugger_request_body();
 
         assert_contains_all(
             request_body,
             &[
-                "function Close-ClaudeBlockingOverlayWindows($window)",
-                "function Find-ClaudeAnonymousOverlayCloseButton($root)",
-                "function Test-ClaudeOverlayCandidateText([string]$text)",
-                "if ($name.Length -gt 0) { continue }",
+                "function Close-ClaudeBlockingWebModals($window)",
+                "function Find-ClaudeBlockingWebModal($root)",
+                "function Find-ClaudeModalCloseButton($modal)",
+                "function Find-ClaudeBlockingWebCloseButton($root, $window)",
+                "function Test-ClaudeBlockingWebCloseButton($button, $rootRect)",
+                "function Test-ClaudeElementStillVisible($element)",
+                "function Find-ClaudeCloseButton($root)",
+                "ControlType.Window",
+                "$controlType -eq 'ControlType.Window'",
+                "if ($frameworkId -ne 'Chrome') { continue }",
+                "if ($className -eq 'WinCaptionButton') { continue }",
                 "InvokePatternIdentifiers.Pattern",
                 "ControlType.Button",
-                "Upgrade|Plan|Pro|Team|Try|Trial|Subscribe|Discount|Offer|New|Announcement|Promo",
-                "升级|订阅|套餐|试用|优惠|公告|新功能|推广|广告",
+                "$menuButton = Find-ClaudeMenuButton $window",
+                "$button = Wait-ClaudeCondition 40 50 { Find-ClaudeBlockingWebCloseButton $root $window }",
+                "ProgrammaticName -eq 'LegacyIAccessiblePatternIdentifiers.Pattern'",
+                "if (Find-ClaudeMenuButton $window) { break }",
             ],
         );
         assert_order(
             request_body,
-            "Close-ClaudeBlockingOverlayWindows $window | Out-Null",
+            "Find-ClaudeCloseButton $root",
             "if (-not (Open-ClaudeMenu $window $developerNames))",
-            "blocking overlay should be closed before menu automation",
+            "blocking web modals should be closed before menu automation",
         );
         assert_contains_none(
             request_body,
             &[
+                "Test-ClaudeOverlayCandidateText",
+                "Test-ClaudeRootHasBlockingOverlayText",
+                "Test-ClaudeOverlayCloseButtonName",
+                "Find-ClaudeAnonymousOverlayCloseButton",
+                "Close-ClaudeBlockingOverlayWindows",
+                "Upgrade|Plan|Pro|Team|Try|Trial|Subscribe|Discount|Offer|New|Announcement|Promo",
+                "message limit|free messages|keep chatting|out of free|usage limit|rate limit|limit reset",
+                "升级|订阅|套餐|试用|优惠|公告|新功能|推广|广告",
                 concat!("Set", "Cursor", "Pos"),
                 concat!("Click", "-Element", "Center"),
-                concat!("Bounding", "Rectangle"),
+                concat!("WM", "_KEY"),
+                concat!("keybd", "_event"),
+                "[System.Windows.Automation.LegacyIAccessiblePattern]::Pattern",
+                "SendInput",
+                "SendKeys",
             ],
         );
     }
