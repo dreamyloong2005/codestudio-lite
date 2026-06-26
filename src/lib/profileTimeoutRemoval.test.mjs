@@ -57,3 +57,20 @@ test("profiles table and preview content do not persist profile-level timeout", 
   assert.equal(between(api, "function mockProfileSqlPreviewContent", "function mockProfileIconPreview").includes("timeout_seconds"), false);
   assert.equal(api.includes("Network provider checks are not sent yet. Timeout is set"), false);
 });
+
+test("mock Codex official preview does not write an OpenAI provider override", () => {
+  const api = source("src/lib/api.ts");
+  const officialBranch = between(
+    api,
+    'if (profile.provider === "official")',
+    "const providerId = \"custom\";"
+  );
+
+  assert.equal(officialBranch.includes("model_providers.openai.wire_api"), false);
+  assert.equal(officialBranch.includes("model_providers.openai.requires_openai_auth"), false);
+  assert.equal(
+    officialBranch.includes("model_providers.openai.experimental_bearer_token"),
+    false
+  );
+  assert.equal(officialBranch.includes('key: "model_providers.openai"'), true);
+});

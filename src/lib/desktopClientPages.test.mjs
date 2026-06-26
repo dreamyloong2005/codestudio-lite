@@ -92,6 +92,29 @@ test("desktop client page entry hydrates cache before background refresh", () =>
   );
 });
 
+test("Claude Desktop keeps cached update plan visible and renders only download hash and install location", () => {
+  const route = read("src/routes/ClaudeDesktop.svelte");
+  const store = read("src/lib/claudeDesktopStore.ts");
+  const types = read("src/types.ts");
+  const coreTypes = read("src-tauri/src/core/types.rs");
+
+  assert.match(types, /export interface ClaudeDesktopPlan \{[\s\S]*downloadUrl: string;[\s\S]*sha256: string;[\s\S]*installLocation: string;/);
+  assert.match(coreTypes, /pub struct ClaudeDesktopPlan \{[\s\S]*pub download_url: String,[\s\S]*pub sha256: String,[\s\S]*pub install_location: String,/);
+  assert.match(store, /planRefreshing:\s*boolean/);
+  assert.match(store, /cachedClaudeDesktopPlan/);
+  assert.match(store, /hydrateClaudeDesktopPlanFromCache/);
+  assert.match(store, /applyClaudeDesktopPlan/);
+  assert.match(store, /planRefreshing:\s*true/);
+  assert.match(route, /activePlanDetails\s*=\s*kindView\.plan/);
+  assert.match(route, /\{activePlanDetails\.downloadUrl\}/);
+  assert.match(route, /\{activePlanDetails\.sha256\}/);
+  assert.match(route, /\{activePlanDetails\.installLocation\}/);
+  assert.doesNotMatch(route, /activePlan\.command \|\| \$t\("common\.none"\)/);
+  assert.doesNotMatch(route, /\{#each activePlan\.commands as command\}/);
+  assert.doesNotMatch(route, /\{#each activePlan\.steps as step\}/);
+  assert.doesNotMatch(route, /\{#each activePlan\.warnings as warning\}/);
+});
+
 test("Claude Desktop page supports install update and uninstall through the shared tool installer", () => {
   const route = read("src/routes/ClaudeDesktop.svelte");
   const store = read("src/lib/claudeDesktopStore.ts");
@@ -381,12 +404,15 @@ test("Claude Desktop isolates Windows App and EXE tab operation state", () => {
   assert.match(route, /activePlan\s*=\s*installed \? updatePlan : installPlan/);
   assert.match(route, /activePlanAvailable\s*=\s*Boolean\(activePlan\?\.canInstall\)/);
   assert.match(route, /\$t\("codexClient\.planTitle"\)/);
-  assert.match(route, /activePlan\.command \|\| \$t\("common\.none"\)/);
-  assert.match(route, /activePlan\.requiresAdmin \? \$t\("toolInstall\.adminMayPrompt"\) : \$t\("toolInstall\.userScope"\)/);
-  assert.match(route, /\{#each activePlan\.prerequisites as prerequisite\}/);
-  assert.match(route, /\{#each activePlan\.commands as command\}/);
-  assert.match(route, /\{#each activePlan\.steps as step\}/);
-  assert.match(route, /\{#if activePlanBlocker\}/);
+  assert.match(route, /activePlanDetails\s*=\s*kindView\.plan/);
+  assert.match(route, /\{activePlanDetails\.downloadUrl\}/);
+  assert.match(route, /\{activePlanDetails\.sha256\}/);
+  assert.match(route, /\{activePlanDetails\.installLocation\}/);
+  assert.doesNotMatch(route, /activePlan\.command \|\| \$t\("common\.none"\)/);
+  assert.doesNotMatch(route, /activePlan\.requiresAdmin \? \$t\("toolInstall\.adminMayPrompt"\) : \$t\("toolInstall\.userScope"\)/);
+  assert.doesNotMatch(route, /\{#each activePlan\.prerequisites as prerequisite\}/);
+  assert.doesNotMatch(route, /\{#each activePlan\.commands as command\}/);
+  assert.doesNotMatch(route, /\{#each activePlan\.steps as step\}/);
   assert.match(route, /busyAction\s*=\s*kindView\.busyAction/);
   assert.match(route, /progress\s*=\s*kindView\.progress/);
   assert.match(route, /progressPercent\s*=\s*progress\?\.percent/);
@@ -458,6 +484,8 @@ test("Claude Desktop Windows install uses official MSIX package instead of winge
   assert.match(installer, /Download and install the latest Claude Desktop MSIX/);
   assert.match(installer, /run_claude_desktop_windows_msix_install/);
   assert.match(installer, /download_url_to_file\(\s*CLAUDE_DESKTOP_WINDOWS_MSIX_URL/);
+  assert.match(installer, /sha256_file\(&target\)/);
+  assert.match(installer, /SHA-256 verification failed/);
   assert.match(installer, /emit_install_download_progress/);
   assert.match(installer, /progress_phase: Some\("downloading"\)/);
   assert.match(installer, /remove_stale_claude_desktop_windows_exe_uninstall_entries/);
@@ -500,6 +528,27 @@ test("Claude Desktop Windows install uses official MSIX package instead of winge
     wingetPackageFunction,
     /"claude-desktop"\s*=>\s*Some\("Anthropic\.Claude"\)/
   );
+});
+
+test("Claude Desktop macOS DMG install verifies and caches SHA-256 before installing", () => {
+  const installer = read("src-tauri/src/core/tool_installer.rs");
+  const installFunction = installer.slice(
+    installer.indexOf("fn run_macos_dmg_app_install"),
+    installer.indexOf("fn run_macos_app_uninstall")
+  );
+
+  assert.match(installFunction, /let url = claude_desktop_macos_dmg_url\(&latest\.version, &latest\.hash\);/);
+  assert.match(installFunction, /sha256_file\(&dmg_path\)/);
+  assert.match(installFunction, /load_cached_claude_desktop_plan\(\)[\s\S]*plan\.download_url == url/);
+  assert.match(installFunction, /SHA-256 verification failed/);
+  assert.match(installFunction, /store_cached_claude_desktop_plan\(&ClaudeDesktopPlan \{[\s\S]*download_url: url\.clone\(\),[\s\S]*sha256: actual_sha256,/);
+
+  const downloadIndex = installFunction.indexOf("download_url_to_file");
+  const verifyIndex = installFunction.indexOf("sha256_file(&dmg_path)");
+  const installIndex = installFunction.indexOf("package::install_macos_dmg");
+  assert.ok(downloadIndex >= 0, "macOS DMG install should download the official package");
+  assert.ok(verifyIndex > downloadIndex, "macOS DMG install should verify after downloading");
+  assert.ok(installIndex > verifyIndex, "macOS DMG install should install only after SHA-256 verification");
 });
 
 test("macOS app bundle is signed as a bundle for stable Accessibility trust", () => {

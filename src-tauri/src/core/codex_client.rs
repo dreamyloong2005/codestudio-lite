@@ -848,7 +848,7 @@ pub fn launch() -> Result<(), String> {
     let args = codex_patch_launch_args(debug_port);
     launch_installed_codex(&installed, &args)?;
     if settings.patch_force_plugin_unlock {
-        inject_plugin_unlock(debug_port)?;
+        spawn_plugin_unlock_injection(debug_port);
     }
     let _ = activity_log::append(Severity::Info, "Launched Codex.");
     Ok(())
@@ -2459,6 +2459,11 @@ fn terminate_codex_process_for_restart(
     root: Option<&Path>,
     notes: &mut Vec<String>,
 ) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        let _ = root;
+        return terminate_macos_codex_process_for_restart(notes);
+    }
+
     if !cfg!(target_os = "windows") {
         return Ok(());
     }
@@ -2563,6 +2568,104 @@ foreach ($id in $targetIds) {{
     Ok(())
 }
 
+fn terminate_macos_codex_process_for_restart(notes: &mut Vec<String>) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    let pids = macos_codex_process_ids()?;
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    for pid in &pids {
+        let _ = hidden_command("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+    }
+    wait_for_macos_codex_process_exit(&pids, Duration::from_secs(8));
+
+    let remaining_after_term = pids
+        .iter()
+        .copied()
+        .filter(|pid| macos_codex_pid_alive(*pid))
+        .collect::<Vec<_>>();
+    let mut forced = 0;
+    for pid in &remaining_after_term {
+        let output = hidden_command("kill")
+            .args(["-KILL", &pid.to_string()])
+            .output()
+            .map_err(|err| format!("Failed to force-close Codex desktop: {err}"))?;
+        if output.status.success() {
+            forced += 1;
+        }
+    }
+    wait_for_macos_codex_process_exit(&remaining_after_term, Duration::from_millis(500));
+
+    let remaining = pids
+        .iter()
+        .copied()
+        .filter(|pid| macos_codex_pid_alive(*pid))
+        .count();
+    if remaining > 0 {
+        return Err(
+            "A Codex desktop process is still running; restart was not continued.".to_string(),
+        );
+    }
+
+    if forced > 0 {
+        notes.push(format!(
+            "Force-closed {forced} running Codex desktop process(es)."
+        ));
+    } else {
+        notes.push("Closed the running Codex desktop process.".to_string());
+    }
+    Ok(())
+}
+
+fn macos_codex_process_ids() -> Result<Vec<u32>, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(Vec::new());
+    }
+    let output = hidden_command("pgrep")
+        .args(["-x", "Codex"])
+        .output()
+        .map_err(|err| format!("Failed to inspect running Codex processes: {err}"))?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let current_pid = std::process::id();
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != current_pid)
+        .collect())
+}
+
+fn wait_for_macos_codex_process_exit(pids: &[u32], timeout: Duration) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let started_at = Instant::now();
+    while started_at.elapsed() < timeout {
+        if pids.iter().all(|pid| !macos_codex_pid_alive(*pid)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn macos_codex_pid_alive(pid: u32) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    hidden_command("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn launch_installed_codex(installed: &InstalledCodexClient, args: &[String]) -> Result<(), String> {
     if installed.source == "portable" {
         let exe = Path::new(&installed.path).join(CODEX_EXE_NAME);
@@ -2648,6 +2751,20 @@ fn inject_plugin_unlock(debug_port: u16) -> Result<(), String> {
         }
     }
     Err(last_error.unwrap_or_else(|| "Codex patch injection failed.".to_string()))
+}
+
+fn spawn_plugin_unlock_injection(debug_port: u16) {
+    thread::spawn(move || match inject_plugin_unlock(debug_port) {
+        Ok(()) => {
+            let _ = activity_log::append(Severity::Ok, "Applied Codex plugin unlock patch.");
+        }
+        Err(err) => {
+            let _ = activity_log::append(
+                Severity::Error,
+                format!("Codex plugin unlock patch failed: {err}"),
+            );
+        }
+    });
 }
 
 fn try_inject_plugin_unlock(debug_port: u16) -> Result<(), String> {
@@ -3279,114 +3396,5 @@ fn url_host(url: &str) -> &str {
 
 #[cfg(test)]
 #[cfg(target_os = "windows")]
-mod tests {
-    use super::*;
-
-    fn installed(source: &str) -> InstalledCodexClient {
-        InstalledCodexClient {
-            path: "C:\\Program Files\\WindowsApps\\OpenAI.Codex".to_string(),
-            version: "1.0.0.0".to_string(),
-            arch: None,
-            source: source.to_string(),
-            package_family_name: if source == "msix" {
-                Some("OpenAI.Codex_abc".to_string())
-            } else {
-                None
-            },
-            installed_at: None,
-        }
-    }
-
-    #[test]
-    fn existing_msix_update_keeps_msix_route() {
-        let mut settings = CodexClientSettings::default();
-        settings.windows_install_mode = "portable".to_string();
-        let installed = installed("msix");
-
-        assert_eq!(
-            select_install_route(&settings, Some(&installed)),
-            "msix-sideload"
-        );
-    }
-
-    #[test]
-    fn existing_portable_update_keeps_portable_route() {
-        let settings = CodexClientSettings::default();
-        let installed = installed("portable");
-
-        assert_eq!(
-            select_install_route(&settings, Some(&installed)),
-            "portable-fallback"
-        );
-    }
-
-    #[test]
-    fn default_windows_install_stays_msix_without_capability_fallback() {
-        let settings = CodexClientSettings::default();
-
-        assert_eq!(select_install_route(&settings, None), "msix-sideload");
-    }
-
-    #[test]
-    fn windows_checksum_matches_package_moniker_not_first_msix() {
-        let checksums = "\
-744d1b7500ae59ddb24c60aeaa9a861b33aaf0a72fa4f90f5a26e3017d6cd408  OpenAI.Codex_26.616.9593.0_arm64__2p2nqsd0c76g0.Msix
-d0d57caccde4e95b6326c8ab8f5ebb610cbbaff4f80197d34e586432d57ad84d  OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix
-";
-
-        assert_eq!(
-            checksum_for_windows(checksums, "OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0")
-                .as_deref(),
-            Some("d0d57caccde4e95b6326c8ab8f5ebb610cbbaff4f80197d34e586432d57ad84d")
-        );
-    }
-
-    #[test]
-    fn stale_staged_package_falls_back_when_canonical_path_is_not_removable() {
-        let root = std::env::temp_dir().join(format!(
-            "codestudio-lite-codex-client-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let canonical = root.join("OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix");
-        fs::create_dir(&canonical).unwrap();
-
-        let target = staged_package_target(
-            &canonical,
-            "d0d57caccde4e95b6326c8ab8f5ebb610cbbaff4f80197d34e586432d57ad84d",
-        )
-        .unwrap();
-        let StagedPackageTarget::Download(fallback) = target else {
-            panic!("expected a fallback download target");
-        };
-
-        assert_ne!(fallback, canonical);
-        assert_eq!(
-            fallback.file_name().and_then(|name| name.to_str()),
-            Some("OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0-d0d57cac.Msix")
-        );
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn download_temp_path_is_unique_for_the_same_target() {
-        let target = PathBuf::from(r"C:\Temp\OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix");
-
-        let first = download_temp_path(&target);
-        let second = download_temp_path(&target);
-
-        assert_ne!(first, target);
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), target.parent());
-        assert!(first
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name
-                .starts_with("OpenAI.Codex_26.616.9593.0_x64__2p2nqsd0c76g0.Msix.download.")));
-    }
-}
+#[path = "codex_client_tests.rs"]
+mod codex_client_tests;

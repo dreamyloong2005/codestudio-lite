@@ -7,6 +7,7 @@ import {
   listenToolInstallProgress,
   loadCachedDetection,
   openClaudeDesktopPath,
+  planClaudeDesktopUpdate,
   planToolInstall,
   planToolUpdate,
   uninstallTool,
@@ -15,6 +16,7 @@ import {
 import type {
   ClaudeDesktopInstallKinds,
   ClaudeDesktopPendingLaunch,
+  ClaudeDesktopPlan,
   CodexClientCapability,
   DetectionSnapshot,
   ToolInstallPlan,
@@ -33,6 +35,8 @@ interface ClaudeDesktopKindViewState {
   status: ToolStatus | null;
   installPlan: ToolInstallPlan | null;
   updatePlan: ToolInstallPlan | null;
+  plan: ClaudeDesktopPlan | null;
+  planRefreshing: boolean;
   loading: boolean;
   loaded: boolean;
   busyAction: ClaudeDesktopBusyAction | null;
@@ -65,6 +69,7 @@ interface ClaudeDesktopViewState {
 const INSTALL_KINDS: ClaudeDesktopInstallKind[] = ["msix", "exe"];
 const LOCALIZE_LAUNCH_STORAGE_KEY = "codestudio-lite-claude-localize-launch";
 const LOCALIZE_LAUNCH_INITIALIZED_KEY = "codestudio-lite-claude-localize-launch-initialized";
+const PLAN_CACHE_KEY = "codestudio-lite:claude-desktop-plan";
 
 function readPersistedLocalizeLaunch(): boolean {
   if (typeof localStorage === "undefined") {
@@ -97,6 +102,8 @@ function emptyKindView(): ClaudeDesktopKindViewState {
     status: null,
     installPlan: null,
     updatePlan: null,
+    plan: null,
+    planRefreshing: false,
     loading: false,
     loaded: false,
     busyAction: null,
@@ -151,6 +158,29 @@ function patchKind(
 
 function selectedKindView(view = get(claudeDesktopView)) {
   return view.kindViews[view.selectedKind];
+}
+
+function cachedClaudeDesktopPlan(): ClaudeDesktopPlan | null {
+  if (typeof localStorage === "undefined") {
+    return null;
+  }
+  try {
+    const raw = localStorage.getItem(PLAN_CACHE_KEY);
+    return raw ? JSON.parse(raw) as ClaudeDesktopPlan : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeClaudeDesktopPlan(plan: ClaudeDesktopPlan) {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  localStorage.setItem(PLAN_CACHE_KEY, JSON.stringify(plan));
+}
+
+function applyClaudeDesktopPlan(plan: ClaudeDesktopPlan | null) {
+  patchKind("msix", { plan });
 }
 
 function claudeDesktopExeInstallDetected(installKinds: ClaudeDesktopInstallKinds | null): boolean {
@@ -418,6 +448,7 @@ export async function ensureClaudeDesktopLoaded() {
   if (hasBusyAction(snapshot)) {
     return;
   }
+  hydrateClaudeDesktopPlanFromCache();
   // Before the first in-memory scan lands, hydrate the view from the on-disk
   // detection cache so the page renders immediately with a prior scan's
   // results instead of blocking on a fresh detect. The cache is then
@@ -452,6 +483,13 @@ async function hydrateClaudeDesktopFromCache() {
   }
 }
 
+function hydrateClaudeDesktopPlanFromCache() {
+  const plan = cachedClaudeDesktopPlan();
+  if (plan) {
+    applyClaudeDesktopPlan(plan);
+  }
+}
+
 export async function refreshClaudeDesktop(
   force = false,
   installKind: ClaudeDesktopInstallKind = get(claudeDesktopView).selectedKind
@@ -463,6 +501,9 @@ export async function refreshClaudeDesktop(
   patchKind(installKind, { loading: true });
   patch({ error: null });
   try {
+    if (installKind === "msix") {
+      patchKind("msix", { planRefreshing: true });
+    }
     // Use the fresh (cache-invalidating) detection so a manual refresh or a
     // post-install re-detect always re-resolves from scratch instead of
     // serving a stale in-process install cache (e.g. MSIX Get-AppxPackage
@@ -472,12 +513,17 @@ export async function refreshClaudeDesktop(
       planToolInstall(CLAUDE_DESKTOP_TOOL_ID).catch(() => null),
       planToolUpdate(CLAUDE_DESKTOP_TOOL_ID).catch(() => null)
     ]);
+    const plan = await planClaudeDesktopUpdate().catch(() => null);
+    if (plan) {
+      storeClaudeDesktopPlan(plan);
+      applyClaudeDesktopPlan(plan);
+    }
     const capabilities = await detectClaudeCapabilities().catch(() => []);
     applyKindStatusesFromSnapshot(snapshot, installPlan, updatePlan, capabilities);
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });
   } finally {
-    patchKind(installKind, { loading: false });
+    patchKind(installKind, { loading: false, planRefreshing: false });
   }
 }
 

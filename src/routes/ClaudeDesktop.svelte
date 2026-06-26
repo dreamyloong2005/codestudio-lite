@@ -38,6 +38,8 @@
   $: status = kindView.status;
   $: installPlan = kindView.installPlan;
   $: updatePlan = kindView.updatePlan;
+  $: activePlanDetails = kindView.plan;
+  $: planRefreshing = kindView.planRefreshing;
   $: busyAction = kindView.busyAction;
   $: progress = kindView.progress;
   $: progressPercent = progress?.percent ?? null;
@@ -55,9 +57,9 @@
   $: canLaunch = installed && busyAction === null && !launching;
   $: activePlan = installed ? updatePlan : installPlan;
   $: activePlanAvailable = Boolean(activePlan?.canInstall);
-  $: activePlanUpToDate = Boolean(installed && activePlan && !status?.updateAvailable);
+  $: activePlanUpToDate = Boolean(installed && activePlanDetails && !status?.updateAvailable);
   $: activePlanBlocker = activePlan?.blocker && !activePlanUpToDate ? activePlan.blocker : null;
-  $: activePlanStatus = !activePlan
+  $: activePlanStatus = !activePlanDetails
     ? $t("codexClient.planNotLoaded")
     : activePlanBlocker
       ? activePlanBlocker
@@ -437,59 +439,40 @@
     <div class="section-heading">
       <div>
         <h2>{$t("codexClient.planTitle")}</h2>
-        <p>{activePlanStatus}</p>
+        <p>{planRefreshing && activePlanDetails ? $t("codexClient.planRefreshing") : activePlanStatus}</p>
       </div>
       <div class="section-actions">
-        {#if activePlan}
+        {#if activePlanDetails}
           <StatusPill
             status={activePlanAvailable ? "warning" : activePlanBlocker ? "warning" : "ok"}
             label={activePlanAvailable ? $t("codexClient.updateAvailable") : activePlanBlocker ? $t("status.warning") : $t("codexClient.upToDate")}
           />
+          {#if planRefreshing}
+            <StatusPill status="info" label={$t("codexClient.planRefreshing")} />
+          {/if}
         {/if}
       </div>
     </div>
     <div class="preview-list codex-client-list">
-      {#if activePlan}
-        <div>
-          <strong>{$t("toolInstall.command")}</strong>
-          <span>{activePlan.command || $t("common.none")}</span>
-        </div>
-        <div>
-          <strong>{$t("toolInstall.manager", { manager: activePlan.manager })}</strong>
-          <span>{activePlan.requiresAdmin ? $t("toolInstall.adminMayPrompt") : $t("toolInstall.userScope")}</span>
-        </div>
-        {#if activePlan.prerequisites.length > 0}
-          {#each activePlan.prerequisites as prerequisite}
-            <div>
-              <strong>{prerequisite.toolName}</strong>
-              <span>{prerequisite.reason || prerequisite.command}</span>
-            </div>
-          {/each}
-        {/if}
-        {#each activePlan.commands as command}
-          <div>
-            <strong>{command.stage === "prerequisite" ? $t("toolInstall.stage.prerequisite") : command.stage === "update" ? $t("common.update") : $t("toolInstall.stage.target")}</strong>
-            <span>{command.command}</span>
-          </div>
-        {/each}
-        {#each activePlan.steps as step}
-          <div>
-            <strong>{step.label}</strong>
-            <span>{step.detail}</span>
-          </div>
-        {/each}
-        {#if activePlanBlocker}
-          <div class="warning-row">
-            <strong>{$t("status.warning")}</strong>
-            <span>{activePlanBlocker}</span>
+      {#if activePlanDetails}
+        {#if planRefreshing}
+          <div class="empty-row">
+            <AppIcon name="loading" class="spin" size={18} />
+            {$t("codexClient.planRefreshing")}
           </div>
         {/if}
-        {#each activePlan.warnings as warning}
-          <div class="warning-row">
-            <strong>{$t("status.warning")}</strong>
-            <span>{warning}</span>
-          </div>
-        {/each}
+        <div>
+          <strong>{$t("codexClient.downloadUrl")}</strong>
+          <span>{activePlanDetails.downloadUrl}</span>
+        </div>
+        <div>
+          <strong>SHA-256</strong>
+          <span>{activePlanDetails.sha256}</span>
+        </div>
+        <div>
+          <strong>{$t("codexClient.installRoot")}</strong>
+          <span>{activePlanDetails.installLocation}</span>
+        </div>
       {:else}
         <div class="empty-row">{$t("codexClient.planNotLoaded")}</div>
       {/if}

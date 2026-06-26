@@ -1,0 +1,1617 @@
+use super::*;
+
+fn test_app_config() -> AppConfig {
+    AppConfig {
+        active_profiles_by_mode: ActiveProfilesByMode::default(),
+        ui: UiConfig {
+            theme: "system".to_string(),
+            language: "zh-CN".to_string(),
+            language_set_by_user: false,
+        },
+        security: SecurityConfig {
+            backup_before_write: true,
+            redact_secrets: true,
+            confirm_install_commands: true,
+            confirm_config_writes: true,
+            preserve_codex_official_auth: true,
+        },
+    }
+}
+
+#[test]
+fn sync_codex_config_profile_marks_matching_official_profile_active() {
+    let mut config = test_app_config();
+    let drafts = builtin_official_profiles();
+    let codex_config: toml::Value = toml::from_str(
+        r#"
+model_provider = "openai"
+
+[model_providers.openai]
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+    )
+    .expect("config should parse");
+
+    assert!(sync_codex_config_profile(
+        &mut config,
+        &drafts,
+        &codex_config
+    ));
+    assert_eq!(
+        config.active_profiles_by_mode.config.get("codex"),
+        Some(&builtin_official_profile_id("codex"))
+    );
+}
+
+#[test]
+fn sync_codex_config_profile_marks_empty_config_as_official() {
+    let mut config = test_app_config();
+    let drafts = builtin_official_profiles();
+    let codex_config = parse_toml_or_empty("", "Codex config").expect("config should parse");
+
+    assert!(sync_codex_config_profile(
+        &mut config,
+        &drafts,
+        &codex_config
+    ));
+    assert_eq!(
+        config.active_profiles_by_mode.config.get("codex"),
+        Some(&builtin_official_profile_id("codex"))
+    );
+}
+
+#[test]
+fn sync_codex_config_profile_clears_stale_config_active_profile() {
+    let mut config = test_app_config();
+    config
+        .active_profiles_by_mode
+        .config
+        .insert("codex".to_string(), builtin_official_profile_id("codex"));
+    let drafts = builtin_official_profiles();
+    let codex_config: toml::Value = toml::from_str(
+        r#"
+model_provider = "other"
+
+[model_providers.other]
+requires_openai_auth = true
+"#,
+    )
+    .expect("config should parse");
+
+    assert!(sync_codex_config_profile(
+        &mut config,
+        &drafts,
+        &codex_config
+    ));
+    assert!(!config.active_profiles_by_mode.config.contains_key("codex"));
+}
+
+#[test]
+fn sync_codex_config_profile_rejects_managed_openai_override() {
+    let mut config = test_app_config();
+    config
+        .active_profiles_by_mode
+        .config
+        .insert("codex".to_string(), builtin_official_profile_id("codex"));
+    let drafts = builtin_official_profiles();
+    let codex_config: toml::Value = toml::from_str(
+        r#"
+model_provider = "openai"
+
+[model_providers.openai]
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://example.test/v1"
+"#,
+    )
+    .expect("config should parse");
+
+    assert!(sync_codex_config_profile(
+        &mut config,
+        &drafts,
+        &codex_config
+    ));
+    assert!(!config.active_profiles_by_mode.config.contains_key("codex"));
+}
+
+#[test]
+fn official_non_codex_configs_match_when_not_managed() {
+    let drafts = builtin_official_profiles();
+
+    assert!(sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "claude",
+        |profile| claude_config_matches_profile(&serde_json::json!({}), profile)
+    ));
+    assert!(sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "gemini",
+        |profile| gemini_env_matches_profile(&HashMap::new(), profile)
+    ));
+    assert!(sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "gemini-code-assist",
+        |profile| { gemini_code_assist_settings_match_profile(&serde_json::json!({}), profile) }
+    ));
+    assert!(sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "opencode",
+        |profile| opencode_config_matches_profile(&serde_json::json!({}), profile)
+    ));
+    assert!(sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "openclaw",
+        |profile| openclaw_config_matches_profile(&serde_json::json!({}), profile)
+    ));
+    assert!(sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "hermes",
+        |profile| {
+            hermes_config_matches_profile(
+                &serde_norway::Value::Mapping(Default::default()),
+                profile,
+            )
+        }
+    ));
+}
+
+#[test]
+fn official_non_codex_configs_do_not_match_managed_values() {
+    let drafts = builtin_official_profiles();
+
+    assert!(!sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "claude",
+        |profile| claude_config_matches_profile(
+            &serde_json::json!({ "env": { "ANTHROPIC_BASE_URL": "https://example.test" } }),
+            profile,
+        )
+    ));
+    assert!(!sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "gemini",
+        |profile| {
+            let env = HashMap::from([(
+                "GOOGLE_GEMINI_BASE_URL".to_string(),
+                "https://example.test".to_string(),
+            )]);
+            gemini_env_matches_profile(&env, profile)
+        }
+    ));
+    assert!(!sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "opencode",
+        |profile| opencode_config_matches_profile(
+            &serde_json::json!({ "provider": { "custom": {} } }),
+            profile,
+        )
+    ));
+    assert!(!sync_native_config_profile(
+        &mut test_app_config(),
+        &drafts,
+        "openclaw",
+        |profile| openclaw_config_matches_profile(
+            &serde_json::json!({ "models": { "providers": { "custom": {} } } }),
+            profile,
+        )
+    ));
+}
+
+#[test]
+fn detects_codex_custom_native_profile() {
+    let value: toml::Value = toml::from_str(
+        r#"
+model_provider = "codestudio-openrouter"
+model = "gpt-5.5"
+
+[model_providers.codestudio-openrouter]
+name = "CodeStudio OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "sk-router"
+"#,
+    )
+    .expect("config should parse");
+    let detected = detect_codex_native_profile(&value).expect("custom profile should import");
+
+    assert_eq!(detected.app, "codex");
+    assert_eq!(
+        normalize_detected_provider(&detected.provider, &detected.base_url),
+        "openrouter.ai"
+    );
+    assert_eq!(detected.protocol, PROTOCOL_OPENAI_RESPONSES);
+    assert_eq!(detected.model, "gpt-5.5");
+    assert_eq!(detected.base_url, "https://openrouter.ai/api/v1");
+    assert_eq!(detected.api_key, "sk-router");
+}
+
+#[test]
+fn provider_slug_preserves_second_level_domain() {
+    assert_eq!(
+        provider_slug_from_base_url("https://api.apikey.fun/v1").as_deref(),
+        Some("apikey.fun")
+    );
+    assert_eq!(
+        provider_slug_from_base_url("https://openrouter.ai/api/v1").as_deref(),
+        Some("openrouter.ai")
+    );
+}
+
+#[test]
+fn detected_provider_preserves_dotted_display_tokens() {
+    assert_eq!(
+        normalize_detected_provider("APIKEY.FUN", "https://api.apikey.fun/v1"),
+        "apikey.fun"
+    );
+    assert_eq!(
+        normalize_detected_provider("CodeStudio OpenRouter", "https://openrouter.ai/api/v1"),
+        "openrouter.ai"
+    );
+}
+
+#[test]
+fn auto_detected_native_profile_name_allows_provider_correction() {
+    assert!(is_auto_detected_native_profile_name(
+        "Claude Code fun",
+        "claude",
+        "fun"
+    ));
+    assert!(is_auto_detected_native_profile_name(
+        "Claude Code fun 1",
+        "claude",
+        "fun"
+    ));
+    assert!(!is_auto_detected_native_profile_name(
+        "My Claude Code fun",
+        "claude",
+        "fun"
+    ));
+}
+
+#[test]
+fn detects_codex_native_profile_with_api_key_from_auth_json() {
+    let value: toml::Value = toml::from_str(
+        r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "APIKEY.FUN"
+base_url = "https://api.apikey.fun/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+    )
+    .expect("config should parse");
+    let auth = serde_json::json!({
+        "OPENAI_API_KEY": "sk-auth-json"
+    });
+
+    let detected = detect_codex_native_profile_with_auth(&value, Some(&auth))
+        .expect("auth json backed profile should import");
+
+    assert_eq!(detected.app, "codex");
+    assert_eq!(
+        normalize_detected_provider(&detected.provider, &detected.base_url),
+        "apikey.fun"
+    );
+    assert_eq!(detected.protocol, PROTOCOL_OPENAI_RESPONSES);
+    assert_eq!(detected.model, "gpt-5.5");
+    assert_eq!(detected.base_url, "https://api.apikey.fun/v1");
+    assert_eq!(detected.api_key, "sk-auth-json");
+}
+
+#[test]
+fn codex_direct_profile_matches_auth_json_without_keychain_read() {
+    let value: toml::Value = toml::from_str(
+        r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "APIKEY.FUN"
+base_url = "https://api.apikey.fun/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+    )
+    .expect("config should parse");
+    let auth = serde_json::json!({
+        "OPENAI_API_KEY": "sk-auth-json"
+    });
+    let profile = ProfileDraft {
+        id: "detected-codex".to_string(),
+        name: "Detected Codex API".to_string(),
+        icon: None,
+        remark: None,
+        app: "codex".to_string(),
+        is_builtin: false,
+        mode: ProviderApplyMode::Config,
+        provider: "apikey.fun".to_string(),
+        protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
+        model: "gpt-5.5".to_string(),
+        base_url: "https://api.apikey.fun/v1".to_string(),
+        auth_ref: Some("keychain:test/codex-auth-json/api_key".to_string()),
+        created_at: None,
+        updated_at: None,
+        last_test_status: Some("detected".to_string()),
+        usage_enabled: false,
+        sort_order: 0,
+    };
+    assert!(codex_direct_config_matches_profile(
+        &value,
+        Some(&auth),
+        &profile
+    ));
+}
+
+#[test]
+fn native_profile_matching_does_not_require_reading_keychain_secret() {
+    let value: toml::Value = toml::from_str(
+        r#"
+model_provider = "codestudio-openrouter"
+model = "gpt-5.5"
+
+[model_providers.codestudio-openrouter]
+name = "CodeStudio openrouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "sk-config-token"
+"#,
+    )
+    .expect("config should parse");
+    let profile = ProfileDraft {
+        id: "detected-codex".to_string(),
+        name: "Detected Codex API".to_string(),
+        icon: None,
+        remark: None,
+        app: "codex".to_string(),
+        is_builtin: false,
+        mode: ProviderApplyMode::Config,
+        provider: "openrouter".to_string(),
+        protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
+        model: "gpt-5.5".to_string(),
+        base_url: "https://openrouter.ai/api/v1".to_string(),
+        auth_ref: Some("keychain:test/missing-secret/api_key".to_string()),
+        created_at: None,
+        updated_at: None,
+        last_test_status: Some("detected".to_string()),
+        usage_enabled: false,
+        sort_order: 0,
+    };
+
+    assert!(codex_direct_config_matches_profile(&value, None, &profile));
+}
+
+#[test]
+fn codex_direct_config_rewrites_legacy_inline_provider_to_custom_table() {
+    let mut profile = test_profile("codex", ProviderApplyMode::Config);
+    profile.provider = "compatible".to_string();
+    profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    profile.model = "gpt-5.5".to_string();
+    profile.base_url = "https://api.apikey.fun/v1".to_string();
+
+    let config = codex_direct_config_content_with_api_key(
+            r#"
+        model_provider = "custom"
+        model_providers = { custom = { name = "APIKEY.FUN", wire_api = "responses", base_url = "https://api.apikey.fun/v1", requires_openai_auth = false, experimental_bearer_token = "sk-1" } , openai = { name = "OpenAI", wire_api = "responses", requires_openai_auth = true } }
+model_reasoning_effort = "xhigh"
+"#,
+            &profile,
+            "sk-new",
+        )
+        .expect("config should render");
+    let value: toml::Value = toml::from_str(&config).expect("config should parse");
+
+    assert_eq!(
+        read_toml_string(&value, "model_provider").as_deref(),
+        Some("custom")
+    );
+    assert_eq!(
+        read_toml_string(&value, "model").as_deref(),
+        Some("gpt-5.5")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.name").and_then(|item| item.as_str()),
+        Some("compatible")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
+        Some("https://api.apikey.fun/v1")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.wire_api").and_then(|item| item.as_str()),
+        Some("responses")
+    );
+    assert!(config.contains("[model_providers]\n"));
+    assert!(config.contains("[model_providers.custom]\n"));
+    assert!(!config.contains("model_providers = {"));
+    assert!(!config.contains("codestudio-"));
+}
+
+#[test]
+fn codex_gateway_config_uses_custom_provider_table() {
+    let mut profile = test_profile("codex", ProviderApplyMode::Gateway);
+    profile.model = "gpt-5.5".to_string();
+    let config = codex_gateway_config_content(
+            r#"
+model_provider = "codestudio-local"
+model_providers = { codestudio-local = { name = "CodeStudio Lite Local Gateway", wire_api = "responses", base_url = "http://127.0.0.1:43112/tools/codex/v1", requires_openai_auth = true, experimental_bearer_token = "codestudio-local-old" } }
+"#,
+            &profile,
+        )
+        .expect("config should render");
+    let value: toml::Value = toml::from_str(&config).expect("config should parse");
+
+    assert_eq!(
+        read_toml_string(&value, "model_provider").as_deref(),
+        Some("custom")
+    );
+    assert_eq!(
+        read_toml_string(&value, "model").as_deref(),
+        Some("gpt-5.5")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.wire_api").and_then(|item| item.as_str()),
+        Some("responses")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.requires_openai_auth")
+            .and_then(|item| item.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
+        Some("http://127.0.0.1:43112/tools/codex/v1")
+    );
+    assert!(config.contains("[model_providers]\n"));
+    assert!(config.contains("[model_providers.custom]\n"));
+    assert!(!config.contains("model_providers.codestudio-local"));
+    assert!(!config.contains("model_providers = {"));
+}
+
+#[test]
+fn codex_direct_config_without_model_does_not_write_legacy_default_model() {
+    let mut profile = test_profile("codex", ProviderApplyMode::Config);
+    profile.provider = "compatible".to_string();
+    profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    profile.model = String::new();
+
+    let config =
+        codex_direct_config_content_with_api_key("model = \"old-model\"\n", &profile, "sk-new")
+            .expect("config should render");
+    let value: toml::Value = toml::from_str(&config).expect("config should parse");
+
+    assert!(read_toml_string(&value, "model").is_none());
+    assert!(!config.contains("codestudio-default"));
+}
+
+#[test]
+fn gateway_configs_use_profile_model_instead_of_legacy_default_model() {
+    let mut profile = test_profile("claude", ProviderApplyMode::Gateway);
+    profile.model = "gpt-5.5".to_string();
+
+    let claude = claude_gateway_config_content("{}", &profile).expect("Claude config");
+    assert!(claude.contains("gpt-5.5"));
+    assert!(!claude.contains("codestudio-default"));
+
+    profile.app = "gemini".to_string();
+    let gemini = gemini_gateway_env_content("", &profile).expect("Gemini env");
+    let gemini_env = parse_env_content(&gemini);
+    assert_eq!(
+        gemini_env.get("GEMINI_MODEL").map(String::as_str),
+        Some("gpt-5.5")
+    );
+    assert!(!gemini.contains("codestudio-default"));
+
+    profile.app = "opencode".to_string();
+    let opencode = opencode_gateway_config_content("{}", &profile).expect("OpenCode config");
+    assert!(opencode.contains("custom/gpt-5.5"));
+    assert!(!opencode.contains("codestudio-default"));
+
+    profile.app = "openclaw".to_string();
+    let openclaw = openclaw_gateway_config_content("{}", &profile).expect("OpenClaw config");
+    assert!(openclaw.contains("custom/gpt-5.5"));
+    assert!(!openclaw.contains("codestudio-default"));
+
+    profile.app = "hermes".to_string();
+    let hermes = hermes_gateway_config_content("", &profile).expect("Hermes config");
+    let hermes_yaml = parse_yaml_or_empty(&hermes, "Hermes config").expect("Hermes YAML");
+    assert_eq!(
+        yaml_string_lookup(&hermes_yaml, &["model", "default"]).as_deref(),
+        Some("gpt-5.5")
+    );
+    assert!(!hermes.contains("codestudio-default"));
+}
+
+#[test]
+fn json_provider_configs_use_custom_provider_id() {
+    let mut profile = test_profile("opencode", ProviderApplyMode::Config);
+    profile.provider = "compatible".to_string();
+    profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    profile.model = "gpt-5.5".to_string();
+    profile.base_url = "https://api.apikey.fun/v1".to_string();
+
+    let config = opencode_config_content_with_api_key(
+        r#"{"provider":{"custom":{"name":"old"}}}"#,
+        &profile,
+        "sk-new",
+    )
+    .expect("opencode config should render");
+    let value = parse_json5_or_empty(&config, "OpenCode config").expect("json");
+    assert_eq!(
+        json_string_lookup(&value, &["model"]).as_deref(),
+        Some("custom/gpt-5.5")
+    );
+    assert_eq!(
+        json_string_lookup(&value, &["provider", "custom", "name"]).as_deref(),
+        Some("compatible")
+    );
+    assert!(!config.contains("codestudio-"));
+
+    profile.app = "openclaw".to_string();
+    profile.protocol = PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string();
+    let config = openclaw_config_content_with_api_key(
+        r#"{"models":{"providers":{"custom":{"name":"old"}}}}"#,
+        &profile,
+        "sk-new",
+    )
+    .expect("openclaw config should render");
+    let value = parse_json5_or_empty(&config, "OpenClaw config").expect("json");
+    assert_eq!(
+        json_string_lookup(&value, &["agents", "defaults", "model", "primary"]).as_deref(),
+        Some("custom/gpt-5.5")
+    );
+    assert_eq!(
+        json_string_lookup(&value, &["models", "providers", "custom", "name"]).as_deref(),
+        Some("compatible")
+    );
+    assert!(!config.contains("codestudio-"));
+}
+
+#[test]
+fn skips_official_and_local_gateway_native_profiles() {
+    let official: toml::Value = toml::from_str(
+        r#"
+model_provider = "openai"
+
+[model_providers.openai]
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+    )
+    .expect("config should parse");
+    assert!(detect_codex_native_profile(&official).is_none());
+
+    let gateway: toml::Value = toml::from_str(
+        r#"
+model_provider = "codestudio-local"
+model = "codestudio-default"
+
+[model_providers.codestudio-local]
+base_url = "http://127.0.0.1:43112/tools/codex/v1"
+wire_api = "responses"
+experimental_bearer_token = "codestudio-local-token"
+"#,
+    )
+    .expect("config should parse");
+    assert!(detect_codex_native_profile(&gateway).is_none());
+
+    let env = HashMap::from([
+        (
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            "http://127.0.0.1:43112/tools/gemini".to_string(),
+        ),
+        (
+            "GEMINI_API_KEY".to_string(),
+            "codestudio-local-token".to_string(),
+        ),
+    ]);
+    assert!(detect_gemini_native_profile(&env).is_none());
+}
+
+#[test]
+fn detects_json_env_native_profiles() {
+    let claude = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.test/v1",
+            "ANTHROPIC_AUTH_TOKEN": "sk-claude"
+        }
+    });
+    let detected = detect_claude_native_profile(&claude).expect("claude profile");
+    assert_eq!(detected.app, "claude");
+    assert_eq!(detected.protocol, PROTOCOL_ANTHROPIC_MESSAGES);
+    assert_eq!(detected.model, "claude-sonnet-4-6");
+    assert_eq!(detected.base_url, "https://api.anthropic.test/v1");
+    assert_eq!(detected.api_key, "sk-claude");
+
+    let gemini = HashMap::from([
+        (
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        ),
+        ("GEMINI_API_KEY".to_string(), "sk-gemini".to_string()),
+        ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
+    ]);
+    let detected = detect_gemini_native_profile(&gemini).expect("gemini profile");
+    assert_eq!(detected.app, "gemini");
+    assert_eq!(detected.protocol, PROTOCOL_GOOGLE_GEMINI);
+    assert_eq!(detected.model, "gemini-3-pro");
+
+    let gemini_code_assist =
+        serde_json::json!({ GEMINI_CODE_ASSIST_API_KEY_SETTING: "sk-code-assist" });
+    let detected = detect_gemini_code_assist_native_profile(&gemini_code_assist)
+        .expect("gemini code assist profile");
+    assert_eq!(detected.app, "gemini-code-assist");
+    assert_eq!(detected.protocol, PROTOCOL_GOOGLE_GEMINI);
+    assert_eq!(
+        detected.base_url,
+        "https://generativelanguage.googleapis.com/v1beta"
+    );
+}
+
+#[test]
+fn detects_json_provider_native_profiles() {
+    let opencode = serde_json::json!({
+        "model": "openrouter/gpt-5.5",
+        "provider": {
+            "openrouter": {
+                "name": "OpenRouter",
+                "options": {
+                    "baseURL": "https://openrouter.ai/api/v1",
+                    "apiKey": "sk-openrouter"
+                }
+            }
+        }
+    });
+    let detected = detect_opencode_native_profile(&opencode).expect("opencode profile");
+    assert_eq!(detected.app, "opencode");
+    assert_eq!(detected.provider, "OpenRouter");
+    assert_eq!(detected.protocol, PROTOCOL_OPENAI_CHAT_COMPLETIONS);
+    assert_eq!(detected.model, "gpt-5.5");
+
+    let openclaw = serde_json::json!({
+        "agents": {
+            "defaults": {
+                "model": {
+                    "primary": "openrouter/claude-sonnet"
+                }
+            }
+        },
+        "models": {
+            "providers": {
+                "openrouter": {
+                    "name": "OpenRouter",
+                    "baseUrl": "https://openrouter.ai/api/v1",
+                    "apiKey": "sk-openrouter"
+                }
+            }
+        }
+    });
+    let detected = detect_openclaw_native_profile(&openclaw).expect("openclaw profile");
+    assert_eq!(detected.app, "openclaw");
+    assert_eq!(detected.provider, "OpenRouter");
+    assert_eq!(detected.model, "claude-sonnet");
+}
+
+#[test]
+fn detects_hermes_native_profile() {
+    let value = parse_yaml_or_empty(
+        r#"
+model:
+  provider: custom
+  base_url: https://openrouter.ai/api/v1
+  api_key: sk-hermes
+  api_mode: chat_completions
+  default: gpt-5.5
+"#,
+        "Hermes config",
+    )
+    .expect("yaml should parse");
+    let detected = detect_hermes_native_profile(&value).expect("hermes profile");
+
+    assert_eq!(detected.app, "hermes");
+    assert_eq!(detected.protocol, PROTOCOL_OPENAI_CHAT_COMPLETIONS);
+    assert_eq!(detected.model, "gpt-5.5");
+    assert_eq!(detected.base_url, "https://openrouter.ai/api/v1");
+    assert_eq!(detected.api_key, "sk-hermes");
+}
+
+#[test]
+fn codex_native_config_uses_relay_injection_with_official_auth() {
+    let profile = test_profile("codex", ProviderApplyMode::Gateway);
+    let config = codex_gateway_config_content("", &profile).expect("config should render");
+    let value: toml::Value = toml::from_str(&config).expect("config should parse");
+
+    assert_eq!(
+        read_toml_string(&value, "model_provider").as_deref(),
+        Some("custom")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.wire_api").and_then(|item| item.as_str()),
+        Some("responses")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.requires_openai_auth")
+            .and_then(|item| item.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
+        Some("http://127.0.0.1:43112/tools/codex/v1")
+    );
+}
+
+#[test]
+fn codex_official_config_does_not_write_openai_provider_override() {
+    let profile = builtin_official_profiles()
+        .into_iter()
+        .find(|profile| profile.app == "codex")
+        .expect("codex official profile");
+    let config = codex_official_config_content(
+        r#"
+experimental_bearer_token = "legacy-top-level"
+
+[auth]
+api_key = "legacy-auth-key"
+
+[model_providers.openai]
+base_url = "https://example.invalid/v1"
+experimental_bearer_token = "legacy-provider-key"
+"#,
+        &profile,
+    )
+    .expect("config should render");
+    let value: toml::Value = toml::from_str(&config).expect("config should parse");
+
+    assert_eq!(
+        read_toml_string(&value, "model_provider").as_deref(),
+        Some("openai")
+    );
+    assert!(toml_lookup(&value, "model_providers.openai").is_none());
+    assert!(toml_lookup(&value, "experimental_bearer_token").is_none());
+    assert!(toml_lookup(&value, "auth.api_key").is_none());
+    assert!(!config.contains("[model_providers.openai]"));
+    assert!(!config.contains("model_providers = { openai"));
+}
+
+#[test]
+fn codex_auth_status_infers_chatgpt_cache_without_exposing_values() {
+    let auth_path = Path::new("auth.json");
+    let status = codex_auth_status_from_file_content(
+        auth_path,
+        "file",
+        r#"{
+  "tokens": {
+    "access_token": "secret-access-token",
+    "refresh_token": "secret-refresh-token"
+  },
+  "account_id": "acct-secret"
+}"#,
+    );
+
+    assert!(status.available);
+    assert!(matches!(status.method, CodexAuthMethod::ChatGpt));
+    assert!(matches!(status.storage, CodexAuthStorage::AuthJson));
+    assert!(!status.detail.contains("secret-access-token"));
+    assert!(!status.detail.contains("secret-refresh-token"));
+}
+
+#[test]
+fn codex_auth_status_infers_api_key_cache_without_exposing_values() {
+    let auth_path = Path::new("auth.json");
+    let status = codex_auth_status_from_file_content(
+        auth_path,
+        "file",
+        r#"{
+  "openai_api_key": "sk-secret"
+}"#,
+    );
+
+    assert!(status.available);
+    assert!(matches!(status.method, CodexAuthMethod::ApiKey));
+    assert!(!status.detail.contains("sk-secret"));
+
+    let upper_status = codex_auth_status_from_file_content(
+        auth_path,
+        "file",
+        r#"{
+  "OPENAI_API_KEY": "sk-secret"
+}"#,
+    );
+
+    assert!(upper_status.available);
+    assert!(matches!(upper_status.method, CodexAuthMethod::ApiKey));
+    assert!(!upper_status.detail.contains("sk-secret"));
+}
+
+#[test]
+fn codex_preserved_auth_repair_removes_legacy_key_locations() {
+    let mut document = r#"
+experimental_bearer_token = "top-level-key"
+
+[auth]
+OPENAI_API_KEY = "auth-key"
+api_key = "auth-key-legacy"
+
+[env]
+OPENAI_API_KEY = "env-key"
+OTHER = "keep"
+
+[model_providers.custom]
+experimental_bearer_token = "provider-key"
+"#
+    .parse::<toml_edit::DocumentMut>()
+    .expect("config should parse");
+
+    repair_codex_preserved_auth_config(&mut document);
+    let value: toml::Value = toml::from_str(&document.to_string()).expect("config toml");
+
+    assert!(toml_lookup(&value, "experimental_bearer_token").is_none());
+    assert!(toml_lookup(&value, "auth.OPENAI_API_KEY").is_none());
+    assert!(toml_lookup(&value, "auth.api_key").is_none());
+    assert!(toml_lookup(&value, "env.OPENAI_API_KEY").is_none());
+    assert_eq!(
+        toml_lookup(&value, "env.OTHER").and_then(|item| item.as_str()),
+        Some("keep")
+    );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.experimental_bearer_token")
+            .and_then(|item| item.as_str()),
+        Some("provider-key")
+    );
+}
+
+#[test]
+fn claude_desktop_profile_uses_3p_gateway_shape() {
+    let value = claude_desktop_gateway_profile_value(
+        "http://127.0.0.1:43112/tools/claude-desktop",
+        "local-token",
+        Some(&[ClaudeDesktopInferenceModelSpec {
+            name: "claude-sonnet-4-6".to_string(),
+            label_override: Some("Upstream Model".to_string()),
+            supports_1m: true,
+        }]),
+    );
+
+    assert_eq!(value["inferenceProvider"].as_str(), Some("gateway"));
+    assert_eq!(
+        value["inferenceGatewayBaseUrl"].as_str(),
+        Some("http://127.0.0.1:43112/tools/claude-desktop")
+    );
+    assert_eq!(
+        value["inferenceGatewayApiKey"].as_str(),
+        Some("local-token")
+    );
+    assert_eq!(
+        value["inferenceModels"][0]["name"].as_str(),
+        Some("claude-sonnet-4-6")
+    );
+    assert_eq!(
+        value["inferenceModels"][0]["labelOverride"].as_str(),
+        Some("Upstream Model")
+    );
+    assert_eq!(
+        value["inferenceModels"][0]["supports1m"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn claude_desktop_meta_apply_and_restore_updates_managed_entry() {
+    let applied = claude_desktop_meta_content(
+        r#"{"entries":[{"id":"other","name":"Other"}],"appliedId":"other"}"#,
+        true,
+    )
+    .expect("meta should render");
+    let value = parse_json5_or_empty(&applied, "meta").expect("json");
+    assert_eq!(
+        json_string_lookup(&value, &["appliedId"]).as_deref(),
+        Some(CLAUDE_DESKTOP_PROFILE_ID)
+    );
+    assert!(value["entries"].as_array().unwrap().iter().any(|entry| {
+        entry.get("id").and_then(serde_json::Value::as_str) == Some(CLAUDE_DESKTOP_PROFILE_ID)
+    }));
+
+    let restored =
+        claude_desktop_meta_content(&applied, false).expect("restore meta should render");
+    let value = parse_json5_or_empty(&restored, "meta").expect("json");
+    assert_ne!(
+        json_string_lookup(&value, &["appliedId"]).as_deref(),
+        Some(CLAUDE_DESKTOP_PROFILE_ID)
+    );
+    assert!(!value["entries"].as_array().unwrap().iter().any(|entry| {
+        entry.get("id").and_then(serde_json::Value::as_str) == Some(CLAUDE_DESKTOP_PROFILE_ID)
+    }));
+}
+
+#[test]
+fn claude_desktop_deployment_mode_preserves_unrelated_config() {
+    let config = claude_desktop_deployment_config_content(
+        r#"{"foo":"bar","enterpriseConfig":{"inferenceProvider":"gateway","keep":"yes"}}"#,
+        "1p",
+        true,
+    )
+    .expect("deployment config should render");
+    let value = parse_json5_or_empty(&config, "deployment").expect("json");
+
+    assert_eq!(
+        json_string_lookup(&value, &["deploymentMode"]).as_deref(),
+        Some("1p")
+    );
+    assert_eq!(json_string_lookup(&value, &["foo"]).as_deref(), Some("bar"));
+    assert_eq!(
+        json_string_lookup(&value, &["enterpriseConfig", "keep"]).as_deref(),
+        Some("yes")
+    );
+    assert!(json_string_lookup(&value, &["enterpriseConfig", "inferenceProvider"]).is_none());
+}
+
+#[test]
+fn claude_desktop_developer_settings_enable_devtools_preserving_values() {
+    let config =
+        claude_desktop_developer_settings_content(r#"{"foo":"bar","allowDevTools":false}"#)
+            .expect("developer settings should render");
+    let value = parse_json5_or_empty(&config, "developer settings").expect("json");
+
+    assert_eq!(json_string_lookup(&value, &["foo"]).as_deref(), Some("bar"));
+    assert_eq!(
+        value
+            .get("allowDevTools")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert!(claude_desktop_developer_mode_enabled(&config).expect("settings should parse"));
+}
+
+#[test]
+fn claude_desktop_developer_settings_plan_only_when_disabled() {
+    let mut paths = claude_desktop_paths_from_dirs(
+        PathBuf::from("C:/Users/example/AppData/Local/Claude"),
+        PathBuf::from("C:/Users/example/AppData/Local/Claude-3p"),
+        vec![PathBuf::from(
+            "C:/Users/example/AppData/Roaming/Claude/developer_settings.json",
+        )],
+    );
+    paths.developer_settings_paths = vec![paths
+        .developer_settings_paths
+        .first()
+        .expect("path")
+        .clone()];
+
+    let plans = build_claude_desktop_developer_settings_plans(&paths).expect("plan should build");
+    assert_eq!(plans.len(), 1);
+    assert!(plans[0].content.contains("\"allowDevTools\": true"));
+}
+
+#[test]
+fn claude_desktop_gateway_base_url_strips_v1_suffix() {
+    assert_eq!(
+        claude_desktop_gateway_profile_base_url("http://127.0.0.1:43112/tools/claude-desktop/v1"),
+        "http://127.0.0.1:43112/tools/claude-desktop"
+    );
+}
+
+#[test]
+fn claude_desktop_safe_model_ids_match_desktop_routes() {
+    assert!(claude_desktop_safe_model_id("claude-sonnet-4-6"));
+    assert!(claude_desktop_safe_model_id("anthropic/claude-haiku-4-5"));
+    assert!(!claude_desktop_safe_model_id("claude-sonnet-4-6[1m]"));
+    assert!(!claude_desktop_safe_model_id("gpt-5.5"));
+}
+
+#[test]
+fn native_config_paths_route_supported_tools() {
+    let paths = test_paths();
+    let mut profile = test_profile("claude", ProviderApplyMode::Config);
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Config)
+            .expect("path should resolve"),
+        Some(paths.home_dir.join(".claude").join("settings.json"))
+    );
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("gateway path should resolve"),
+        Some(paths.home_dir.join(".claude").join("settings.json"))
+    );
+
+    profile.app = "opencode".to_string();
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Config)
+            .expect("path should resolve"),
+        Some(
+            paths
+                .home_dir
+                .join(".config")
+                .join("opencode")
+                .join("opencode.json")
+        )
+    );
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("gateway path should resolve"),
+        Some(
+            paths
+                .home_dir
+                .join(".config")
+                .join("opencode")
+                .join("opencode.json")
+        )
+    );
+
+    profile.app = "hermes".to_string();
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Config)
+            .expect("path should resolve"),
+        Some(paths.home_dir.join(".hermes").join("config.yaml"))
+    );
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("gateway path should resolve"),
+        Some(paths.home_dir.join(".hermes").join("config.yaml"))
+    );
+
+    profile.app = "codex-app".to_string();
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("codex gateway path should resolve"),
+        Some(paths.home_dir.join(".codex").join("config.toml"))
+    );
+
+    profile.app = "gemini".to_string();
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("gateway path should resolve"),
+        Some(paths.home_dir.join(".gemini").join(".env"))
+    );
+
+    profile.app = "openclaw".to_string();
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("gateway path should resolve"),
+        Some(paths.home_dir.join(".openclaw").join("openclaw.json"))
+    );
+
+    profile.app = "claude-desktop".to_string();
+    let claude_desktop_profile_path = claude_desktop_paths(&paths)
+        .expect("claude desktop paths should resolve")
+        .profile_path;
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Config)
+            .expect("claude desktop config path should resolve"),
+        Some(claude_desktop_profile_path.clone())
+    );
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("claude desktop gateway path should resolve"),
+        Some(claude_desktop_profile_path)
+    );
+
+    profile.app = "gemini-code-assist".to_string();
+    assert_eq!(
+        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
+            .expect("unsupported gateway path should not resolve"),
+        None
+    );
+}
+
+#[test]
+fn lifecycle_restore_targets_include_gateway_apps() {
+    let mut active = ActiveProfilesByMode::default();
+    active
+        .config
+        .insert("codex-app".to_string(), "codex-config".to_string());
+    active
+        .gateway
+        .insert("claude-vscode".to_string(), "claude-gateway".to_string());
+
+    assert_eq!(
+        lifecycle_target_apps(&active, ProviderApplyMode::Config, true),
+        vec!["claude".to_string(), "codex".to_string()]
+    );
+    assert_eq!(
+        lifecycle_target_apps(&active, ProviderApplyMode::Gateway, false),
+        vec!["claude".to_string()]
+    );
+}
+
+#[test]
+fn official_cleanup_removes_only_gateway_fields() {
+    let profile = test_profile("claude", ProviderApplyMode::Gateway);
+    let gateway_content = claude_gateway_config_content(
+        r#"{
+  "env": {
+    "OTHER_VALUE": "keep"
+  }
+}"#,
+        &profile,
+    )
+    .expect("gateway config should render");
+    let cleaned = claude_gateway_cleanup_config_content(&gateway_content, "claude")
+        .expect("cleanup config should render");
+    let value = parse_json5_or_empty(&cleaned, "Claude settings").expect("cleaned JSON");
+
+    assert_eq!(
+        json_string_lookup(&value, &["env", "OTHER_VALUE"]).as_deref(),
+        Some("keep")
+    );
+    assert!(json_string_lookup(&value, &["env", "ANTHROPIC_BASE_URL"]).is_none());
+    assert!(json_string_lookup(&value, &["env", "ANTHROPIC_AUTH_TOKEN"]).is_none());
+    assert!(json_string_lookup(&value, &["env", "ANTHROPIC_MODEL"]).is_none());
+    assert!(json_string_lookup(&value, &["model"]).is_none());
+
+    let profile = test_profile("opencode", ProviderApplyMode::Gateway);
+    let gateway_content =
+        opencode_gateway_config_content("{}", &profile).expect("gateway config should render");
+    let cleaned = opencode_gateway_cleanup_config_content(&gateway_content, "opencode")
+        .expect("cleanup config should render");
+    let value = parse_json5_or_empty(&cleaned, "OpenCode config").expect("cleaned JSON");
+
+    assert!(json_lookup(&value, &["provider", "custom"]).is_none());
+    assert!(json_string_lookup(&value, &["model"]).is_none());
+}
+
+#[test]
+fn non_codex_native_preview_includes_redacted_content() {
+    let paths = test_paths();
+    let profile = test_profile("claude", ProviderApplyMode::Gateway);
+    let preview = build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Gateway)
+        .expect("preview should build");
+    let preview =
+        attach_native_config_content_preview(preview, &profile, &paths, ProviderApplyMode::Gateway)
+            .expect("preview should be available");
+    let content = preview.content.expect("content preview should be included");
+
+    assert!(content.contains("ANTHROPIC_BASE_URL"));
+    assert!(content.contains("<redacted>"));
+    assert!(!content.contains("codestudio-local-test"));
+}
+
+#[test]
+fn non_codex_config_preview_includes_placeholder_content_without_keychain_secret() {
+    let paths = test_paths();
+    let mut profile = test_profile("claude", ProviderApplyMode::Config);
+    profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+    let preview = build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Config)
+        .expect("preview should build");
+    let preview =
+        attach_native_config_content_preview(preview, &profile, &paths, ProviderApplyMode::Config)
+            .expect("preview should be available");
+    let content = preview.content.expect("content preview should be included");
+
+    assert!(content.contains("ANTHROPIC_BASE_URL"));
+    assert!(content.contains("keychain:****"));
+}
+
+#[test]
+fn official_claude_config_preview_includes_restore_content() {
+    let paths = test_paths();
+    let settings_path = paths.home_dir.join(".claude").join("settings.json");
+    fs::create_dir_all(settings_path.parent().expect("settings parent"))
+        .expect("settings parent should be created");
+    fs::write(
+        &settings_path,
+        r#"{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://example.test/v1",
+    "ANTHROPIC_AUTH_TOKEN": "sk-test",
+    "ANTHROPIC_MODEL": "claude-test",
+    "OTHER_VALUE": "keep"
+  },
+  "model": "claude-test"
+}"#,
+    )
+    .expect("settings should be written");
+    let mut profile = test_profile("claude", ProviderApplyMode::Config);
+    profile.provider = "official".to_string();
+    profile.auth_ref = None;
+    profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+    let preview = build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Config)
+        .expect("preview should build");
+    let preview =
+        attach_native_config_content_preview(preview, &profile, &paths, ProviderApplyMode::Config)
+            .expect("preview should be available");
+    assert!(preview
+        .changes
+        .iter()
+        .any(|change| { change.key == "env.ANTHROPIC_BASE_URL" && change.action == "remove" }));
+    let content = preview.content.expect("content preview should be included");
+
+    assert!(content.contains("OTHER_VALUE"));
+    assert!(!content.contains("ANTHROPIC_BASE_URL"));
+    assert!(!content.contains("ANTHROPIC_AUTH_TOKEN"));
+    assert!(!content.contains("keychain:****"));
+}
+
+#[test]
+fn unchanged_native_preview_is_not_write_enabled() {
+    let paths = test_paths();
+    let mut profile = test_profile("gemini", ProviderApplyMode::Config);
+    profile.provider = "official".to_string();
+    profile.auth_ref = None;
+    profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
+
+    let preview = build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Config)
+        .expect("preview should build");
+    let preview =
+        attach_native_config_content_preview(preview, &profile, &paths, ProviderApplyMode::Config)
+            .expect("preview should be available");
+
+    assert!(!preview.write_enabled);
+    assert!(preview.changes.is_empty());
+    assert!(preview.content.is_none());
+}
+
+#[test]
+fn unchanged_native_apply_plan_is_filtered_out() {
+    let paths = test_paths();
+    let profile = test_profile("gemini", ProviderApplyMode::Gateway);
+    let plans = build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Gateway, false)
+        .expect("plan should build");
+    assert_eq!(plans.len(), 1);
+
+    let path = plans[0].path.clone();
+    fs::create_dir_all(path.parent().expect("env parent")).expect("env parent should be created");
+    fs::write(&path, &plans[0].content).expect("env content should be written");
+
+    let plans = filter_native_write_plans(
+        build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Gateway, false)
+            .expect("plan should rebuild"),
+    )
+    .expect("plans should filter");
+    assert!(plans.is_empty());
+}
+
+#[test]
+fn gemini_env_update_preserves_unrelated_values_and_removes_empty_model() {
+    let current = "# user note\nOTHER=1\nGEMINI_MODEL=\"old\"\n";
+    let updated = update_env_content(
+        current,
+        &[
+            ("GEMINI_API_KEY", Some("secret-key".to_string())),
+            (
+                "GOOGLE_GEMINI_BASE_URL",
+                Some("https://example.test/v1".to_string()),
+            ),
+            ("GEMINI_MODEL", None),
+        ],
+    );
+    let env = parse_env_content(&updated);
+
+    assert!(updated.contains("# user note"));
+    assert_eq!(env.get("OTHER").map(String::as_str), Some("1"));
+    assert_eq!(
+        env.get("GEMINI_API_KEY").map(String::as_str),
+        Some("secret-key")
+    );
+    assert_eq!(
+        env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+        Some("https://example.test/v1")
+    );
+    assert!(!env.contains_key("GEMINI_MODEL"));
+}
+
+#[test]
+fn json5_preview_parser_accepts_comments() {
+    let value = parse_json5_or_empty(
+        r#"
+            {
+              // comment from a JSONC-style config
+              provider: {
+                codestudio_openai: {
+                  options: {
+                    baseURL: "https://example.test/v1",
+                  },
+                },
+              },
+            }
+            "#,
+        "test config",
+    )
+    .expect("json5 should parse");
+
+    assert_eq!(
+        json_string_lookup(
+            &value,
+            &["provider", "codestudio_openai", "options", "baseURL"]
+        )
+        .as_deref(),
+        Some("https://example.test/v1")
+    );
+}
+
+#[test]
+fn legacy_protocol_alias_is_rejected() {
+    assert!(normalize_protocol(Some("openai-compatible")).is_err());
+    assert!(normalize_protocol(Some("claude-messages")).is_err());
+    assert!(normalize_protocol(None).is_err());
+    assert_eq!(
+        normalize_protocol(Some("openai-responses")).as_deref(),
+        Ok(PROTOCOL_OPENAI_RESPONSES)
+    );
+    assert_eq!(
+        normalize_protocol(Some("anthropic-messages")).as_deref(),
+        Ok(PROTOCOL_ANTHROPIC_MESSAGES)
+    );
+}
+
+#[test]
+fn builtin_official_profiles_use_tool_native_protocols() {
+    let profiles = builtin_official_profiles();
+
+    assert_eq!(
+        profiles
+            .iter()
+            .find(|profile| profile.app == "codex")
+            .map(|profile| profile.protocol.as_str()),
+        Some(PROTOCOL_OPENAI_RESPONSES)
+    );
+    assert_eq!(
+        profiles
+            .iter()
+            .find(|profile| profile.app == "claude")
+            .map(|profile| profile.protocol.as_str()),
+        Some(PROTOCOL_ANTHROPIC_MESSAGES)
+    );
+    assert_eq!(
+        profiles
+            .iter()
+            .find(|profile| profile.app == "claude-desktop")
+            .map(|profile| profile.protocol.as_str()),
+        Some(PROTOCOL_ANTHROPIC_MESSAGES)
+    );
+    assert_eq!(
+        profiles
+            .iter()
+            .any(|profile| profile.app == "claude-vscode"),
+        false
+    );
+    assert_eq!(
+        profiles
+            .iter()
+            .find(|profile| profile.app == "gemini")
+            .map(|profile| profile.protocol.as_str()),
+        Some(PROTOCOL_GOOGLE_GEMINI)
+    );
+    assert_eq!(
+        profiles
+            .iter()
+            .find(|profile| profile.app == "gemini-code-assist")
+            .map(|profile| profile.protocol.as_str()),
+        Some(PROTOCOL_GOOGLE_GEMINI)
+    );
+    assert_eq!(
+        profiles
+            .iter()
+            .find(|profile| profile.app == "openclaw")
+            .map(|profile| profile.protocol.as_str()),
+        Some(PROTOCOL_OPENAI_CHAT_COMPLETIONS)
+    );
+    assert_eq!(
+        profiles
+            .iter()
+            .find(|profile| profile.app == "hermes")
+            .map(|profile| profile.protocol.as_str()),
+        Some(PROTOCOL_OPENAI_CHAT_COMPLETIONS)
+    );
+}
+
+#[test]
+fn claude_desktop_restart_uses_packaged_app_fallback() {
+    let targets = restart_targets_for_app("claude-desktop", RestartContext::default());
+
+    assert_eq!(targets.len(), 1);
+    if cfg!(target_os = "windows") {
+        assert!(matches!(
+            targets[0].launch,
+            RestartLaunch::MsixPackage {
+                package_identities: &["Claude", "Anthropic.Claude"]
+            }
+        ));
+    } else {
+        assert!(matches!(
+            targets[0].launch,
+            RestartLaunch::ExistingProcessPath {
+                fallback_command: "Claude",
+                hidden: false
+            }
+        ));
+    }
+}
+
+#[test]
+fn codex_restart_targets_cover_client_cli_and_vscode_backend() {
+    let targets = restart_targets_for_app("codex", RestartContext::default());
+
+    assert_eq!(targets.len(), 3);
+    assert_eq!(targets[0].label, "Codex");
+    assert!(matches!(targets[0].launch, RestartLaunch::CodexClient));
+    assert_eq!(targets[1].label, "Codex VS Code extension backend");
+    assert!(matches!(targets[1].launch, RestartLaunch::CloseOnly));
+    assert!(targets[1]
+        .command_markers
+        .iter()
+        .any(|marker| marker.contains("openai.chatgpt")));
+    assert_eq!(targets[2].label, "Codex CLI");
+    assert!(matches!(
+        targets[2].launch,
+        RestartLaunch::Command {
+            command: "codex",
+            hidden: true
+        }
+    ));
+}
+
+#[test]
+fn claude_restart_targets_only_include_vscode_backend_when_synced() {
+    let base_targets = restart_targets_for_app("claude", RestartContext::default());
+    assert_eq!(base_targets.len(), 1);
+    assert_eq!(base_targets[0].label, "Claude Code");
+
+    let synced_targets = restart_targets_for_app(
+        "claude",
+        RestartContext {
+            sync_claude_vs_code: true,
+        },
+    );
+    assert_eq!(synced_targets.len(), 2);
+    assert_eq!(synced_targets[0].label, "Claude Code");
+    assert_eq!(synced_targets[1].label, "Claude VS Code extension backend");
+    assert!(matches!(synced_targets[1].launch, RestartLaunch::CloseOnly));
+    assert!(synced_targets[1]
+        .command_markers
+        .iter()
+        .any(|marker| marker.contains("anthropic.claude-code")));
+}
+
+#[test]
+fn custom_codex_oauth_profile_write_plan_is_allowed_without_api_key() {
+    let plan = build_profile_write_plan(
+        "Codex OAuth Test",
+        "codex",
+        Some(&ProviderApplyMode::Config),
+        "official",
+        Some(PROTOCOL_OPENAI_RESPONSES),
+        "",
+        "",
+        false,
+    )
+    .expect("codex oauth profile should be allowed");
+
+    assert_eq!(plan.app, "codex");
+    assert_eq!(plan.provider, "official");
+    assert_eq!(plan.mode, ProviderApplyMode::Config);
+    assert_eq!(plan.secret_status, "oauth");
+    assert!(plan.auth_ref.is_none());
+}
+
+#[test]
+fn custom_official_profile_write_plan_rejects_non_codex_tools() {
+    let result = build_profile_write_plan(
+        "Claude Official Copy",
+        "claude",
+        Some(&ProviderApplyMode::Config),
+        "official",
+        Some(PROTOCOL_ANTHROPIC_MESSAGES),
+        "",
+        "",
+        false,
+    );
+    let error = match result {
+        Ok(_) => panic!("non-codex official profiles should remain built-in only"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        "Only Codex OAuth profiles can be saved as custom official profiles."
+    );
+}
+
+#[test]
+fn profile_icon_normalization_accepts_short_text_and_image_data() {
+    assert_eq!(
+        normalize_profile_icon(Some(" API ")).expect("short icon should be accepted"),
+        Some("API".to_string())
+    );
+    assert_eq!(
+        normalize_profile_icon(Some(" data:image/png;base64,abcd "))
+            .expect("image data url should be accepted"),
+        Some("data:image/png;base64,abcd".to_string())
+    );
+    assert_eq!(
+        normalize_profile_icon(Some("")).expect("blank icon should clear"),
+        None
+    );
+    assert!(normalize_profile_icon(Some("TOO-LONG")).is_err());
+}
+
+#[test]
+fn replace_deleted_active_profile_uses_official_for_config_mode() {
+    let mut config = test_app_config();
+    config
+        .active_profiles_by_mode
+        .config
+        .insert("codex".to_string(), "delete-me".to_string());
+    config
+        .active_profiles_by_mode
+        .gateway
+        .insert("codex".to_string(), "delete-me".to_string());
+    config
+        .active_profiles_by_mode
+        .gateway
+        .insert("gemini".to_string(), "keep-me".to_string());
+
+    assert!(replace_deleted_active_profile_with_official(
+        &mut config,
+        "codex",
+        "delete-me"
+    ));
+    assert_eq!(
+        config.active_profiles_by_mode.config.get("codex"),
+        Some(&builtin_official_profile_id("codex"))
+    );
+    assert!(!config.active_profiles_by_mode.gateway.contains_key("codex"));
+    assert_eq!(
+        config.active_profiles_by_mode.gateway.get("gemini"),
+        Some(&"keep-me".to_string())
+    );
+}
+
+#[test]
+fn claude_vscode_alias_uses_claude_profile_category() {
+    assert_eq!(canonical_profile_app("claude-vscode"), "claude");
+    assert_eq!(canonical_profile_app("claude-code-vscode"), "claude");
+    assert_eq!(
+        builtin_official_profile_id("claude-vscode"),
+        "builtin-official-claude"
+    );
+}
+
+fn test_profile(app: &str, mode: ProviderApplyMode) -> ProfileDraft {
+    ProfileDraft {
+        id: format!("{app}-custom"),
+        name: "Custom".to_string(),
+        icon: None,
+        remark: None,
+        app: app.to_string(),
+        is_builtin: false,
+        mode,
+        provider: "openai".to_string(),
+        protocol: PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string(),
+        model: String::new(),
+        base_url: "https://example.test/v1".to_string(),
+        auth_ref: Some(format!("keychain:test/{app}/api_key")),
+        created_at: None,
+        updated_at: None,
+        last_test_status: None,
+        usage_enabled: false,
+        sort_order: 0,
+    }
+}
+
+fn test_paths() -> crate::core::app_paths::AppPaths {
+    let root = env::temp_dir().join(format!(
+        "codestudio-lite-profile-test-{}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    crate::core::app_paths::AppPaths {
+        home_dir: root.clone(),
+        config_dir: root.join(".codestudio-lite"),
+        downloads_dir: root.join(".codestudio-lite").join("downloads"),
+        database_file: root.join(".codestudio-lite").join("app_state.sqlite"),
+    }
+}

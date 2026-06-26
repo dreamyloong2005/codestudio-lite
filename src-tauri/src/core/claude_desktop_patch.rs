@@ -93,12 +93,7 @@ pub fn launch_with_app(localize: bool, app: Option<tauri::AppHandle>) -> Result<
         if localize {
             launch_macos_claude_desktop_localized()?;
         } else {
-            let mut command = hidden_command("open");
-            command.args(["-a", "Claude"]);
-            command
-                .spawn()
-                .map(|_| ())
-                .map_err(|err| format!("Failed to launch Claude Desktop: {err}"))?;
+            launch_macos_claude_desktop_plain_restart()?;
         }
     }
 
@@ -2732,6 +2727,45 @@ echo "[claude-zh] Claude main process debugger is ready." >&2
         "__CLAUDE_NODE_INSPECT_PORT__",
         &CLAUDE_NODE_INSPECT_PORT.to_string(),
     )
+}
+
+#[cfg(target_os = "macos")]
+fn launch_macos_claude_desktop_plain_restart() -> Result<(), String> {
+    hidden_command("sh")
+        .arg("-c")
+        .arg(macos_plain_launch_script())
+        .status()
+        .map_err(|err| format!("Failed to restart Claude Desktop: {err}"))
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Failed to restart Claude Desktop.".to_string())
+            }
+        })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_plain_launch_script() -> String {
+    r#"set -eu
+if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
+  /usr/bin/pkill -TERM -x Claude >/dev/null 2>&1 || true
+fi
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  /usr/bin/pgrep -x Claude >/dev/null 2>&1 || break
+  /bin/sleep 0.25
+done
+if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
+  /usr/bin/pkill -KILL -x Claude >/dev/null 2>&1 || true
+  /bin/sleep 0.5
+fi
+if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
+  echo "Claude Desktop is still running; restart was not continued." >&2
+  exit 1
+fi
+/usr/bin/open -a Claude
+"#
+    .to_string()
 }
 
 fn sh_single_quote(value: &str) -> String {

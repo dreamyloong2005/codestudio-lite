@@ -534,6 +534,34 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
 }
 
 #[test]
+fn macos_plain_claude_launch_restarts_instead_of_activating_existing_process() {
+    let launch_body = patch_between(
+        "pub fn launch_with_app(",
+        "pub fn take_pending_claude_desktop_launch_after_restart",
+        "Claude Desktop launch",
+    );
+    assert_contains_all(
+        launch_body,
+        &[
+            "launch_macos_claude_desktop_plain_restart()?",
+            "localize",
+            "launch_macos_claude_desktop_localized()?",
+        ],
+    );
+
+    let script = macos_plain_launch_script();
+    assert_contains_all(
+        &script,
+        &[
+            "/usr/bin/pgrep -x Claude",
+            "/usr/bin/pkill -TERM -x Claude",
+            "/usr/bin/pkill -KILL -x Claude",
+            "/usr/bin/open -a Claude",
+        ],
+    );
+}
+
+#[test]
 fn windows_launch_script_launches_cleanly_without_debug_args() {
     let script = windows_launch_script(true);
     // Both localized and non-localized scripts activate by MSIX app
@@ -796,7 +824,8 @@ fn windows_debugger_automation_prefers_existing_window_before_appx_activation() 
         &[
             "$window = Get-ClaudeMainWindow",
             "if ($window) {",
-            "} else {\n  Start-ClaudeWindowsApp",
+            "} else {",
+            "Start-ClaudeWindowsApp",
             "Wait-ClaudeCondition 30 40",
             "if (-not $window) {",
             "Wait-ClaudeCondition 50 100",

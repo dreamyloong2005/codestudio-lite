@@ -17,7 +17,7 @@ test("Codex client exposes a single patch-backed launch entrypoint", () => {
   assert.doesNotMatch(store, /launchManagedCodexClientPatched|launchPatchedCodexClient|patchLaunch/);
   assert.match(api, /invoke\("launch_codex_client"\)/);
   assert.doesNotMatch(api, /launchPatchedCodexClient|launch_codex_client_patched/);
-  assert.match(commands, /pub fn launch_codex_client\(\)/);
+  assert.match(commands, /pub async fn launch_codex_client\(\)/);
   assert.doesNotMatch(commands, /launch_codex_client_patched|launch_patched/);
   assert.doesNotMatch(lib, /launch_codex_client_patched/);
   assert.match(core, /pub fn launch\(\) -> Result<\(\), String> \{[\s\S]*codex_patch_launch_args/);
@@ -37,6 +37,22 @@ test("Codex plugin force unlock includes modern marketplace request patches", ()
   assert.match(core, /app-server-manager-signals-/);
   assert.match(core, /Array\.prototype\.filter/);
   assert.match(core, /plugin_marketplace_hidden_filter_bypassed/);
+});
+
+test("Codex plugin force unlock injection runs after launch without blocking the command", () => {
+  const commands = read("src-tauri/src/commands/codex_client.rs");
+  const core = read("src-tauri/src/core/codex_client.rs");
+  const launchBody = core
+    .split("pub fn launch() -> Result<(), String> {")
+    .at(1)
+    ?.split("pub fn restart()")
+    .at(0);
+
+  assert.ok(launchBody, "Codex launch body should be present");
+  assert.match(commands, /pub async fn launch_codex_client\(\) -> Result<\(\), String>/);
+  assert.match(commands, /spawn_blocking\(\|\| codex_client::launch\(\)\)/);
+  assert.doesNotMatch(launchBody, /inject_plugin_unlock\(debug_port\)\?/);
+  assert.match(launchBody, /spawn_plugin_unlock_injection\(debug_port\)/);
 });
 
 test("Codex client notices are localized and dismiss with an icon", () => {

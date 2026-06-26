@@ -172,6 +172,12 @@ export interface ClaudeDesktopPendingLaunch {
   requestedAt: string | null;
 }
 
+export interface ClaudeDesktopPlan {
+  downloadUrl: string;
+  sha256: string;
+  installLocation: string;
+}
+
 export interface InstallTerminalOutput {
   sessionId: string;
   stream: "output" | "status" | string;

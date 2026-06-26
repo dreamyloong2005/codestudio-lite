@@ -27,6 +27,7 @@ pub fn run() {
             commands::backup::restore_backup,
             commands::claude_desktop::launch_claude_desktop,
             commands::claude_desktop::open_claude_desktop_path,
+            commands::claude_desktop::plan_claude_desktop_update,
             commands::claude_desktop::restart_claude_desktop_after_accessibility_grant,
             commands::claude_desktop::take_pending_claude_desktop_launch_after_restart,
             commands::codex_client::inspect_codex_client,

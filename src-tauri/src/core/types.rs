@@ -995,6 +995,14 @@ pub struct ClaudeDesktopPendingLaunch {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ClaudeDesktopPlan {
+    pub download_url: String,
+    pub sha256: String,
+    pub install_location: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexClientInstallKinds {
     pub msix: DesktopInstallKindInfo,
     pub portable: DesktopInstallKindInfo,

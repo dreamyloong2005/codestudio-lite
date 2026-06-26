@@ -1,4 +1,4 @@
-use crate::core::types::ClaudeDesktopPendingLaunch;
+use crate::core::types::{ClaudeDesktopPendingLaunch, ClaudeDesktopPlan};
 use crate::core::{claude_desktop_patch, tool_installer};
 
 #[tauri::command]
@@ -27,4 +27,9 @@ pub fn restart_claude_desktop_after_accessibility_grant(
 #[tauri::command]
 pub fn open_claude_desktop_path(kind: String) -> Result<(), String> {
     tool_installer::open_claude_desktop_path(kind)
+}
+
+#[tauri::command]
+pub fn plan_claude_desktop_update() -> Result<ClaudeDesktopPlan, String> {
+    tool_installer::plan_claude_desktop_update()
 }

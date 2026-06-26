@@ -9,6 +9,7 @@ import type {
   ClaudeDesktopLaunchRequest,
   ClaudeDesktopPendingLaunch,
   ClaudeDesktopInstallKinds,
+  ClaudeDesktopPlan,
   ClearEnvironmentVariablesRequest,
   ClearEnvironmentVariablesResult,
   CodexClientInstallKinds,
@@ -33,6 +34,7 @@ import type {
   InstallTerminalInputRequest,
   InstallTerminalOutput,
   InstallTerminalResizeRequest,
+  NativeConfigDiffLine,
   PreviewProfileApplyRequest,
   PreviewProfileApplyResult,
   PreviewProfileWriteRequest,
@@ -180,6 +182,13 @@ export async function planToolLaunch(toolId: string): Promise<ToolLaunchPlan> {
     return invoke("plan_tool_launch", { toolId });
   }
   return mockToolLaunchPlan(toolId);
+}
+
+export async function planClaudeDesktopUpdate(): Promise<ClaudeDesktopPlan> {
+  if (isTauri()) {
+    return invoke("plan_claude_desktop_update");
+  }
+  return mockClaudeDesktopPlan();
 }
 
 export async function installTool(request: ToolInstallRequest): Promise<ToolInstallResult> {
@@ -2594,6 +2603,14 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
   };
 }
 
+function mockClaudeDesktopPlan(): ClaudeDesktopPlan {
+  return {
+    downloadUrl: "https://claude.ai/api/desktop/win32/x64/msix/latest/redirect",
+    sha256: "Pending download verification",
+    installLocation: "Windows App package registration"
+  };
+}
+
 function mockToolLaunchPlan(toolId: string): ToolLaunchPlan {
   const status = mockFindToolStatus(toolId);
   if (!status) {
@@ -3156,25 +3173,11 @@ function mockNativeConfigPreview(
             detail: profile.model ? "Sets Codex to the selected official model." : "Official provider can use Codex's own model default."
           },
           {
-            key: "model_providers.openai.wire_api",
-            action: "update",
-            before: "responses",
-            after: wireApi,
-            detail: "Uses Codex's selected provider wire API."
-          },
-          {
-            key: "model_providers.openai.requires_openai_auth",
-            action: "add",
-            before: null,
-            after: "true",
-            detail: "Keeps Codex official login as the authentication source."
-          },
-          {
-            key: "model_providers.openai.experimental_bearer_token",
+            key: "model_providers.openai",
             action: "remove",
-            before: "<redacted>",
+            before: "table[3]",
             after: null,
-            detail: "Official login does not require a Provider API key."
+            detail: "Removes an OpenAI provider override because Codex's official provider cannot be overridden."
           }
         ],
         warnings: [
@@ -3184,56 +3187,67 @@ function mockNativeConfigPreview(
       });
     }
 
-    const providerId = `codestudio-${slugify(profile.provider)}`;
+    const providerId = "custom";
+    const directChanges: NativeConfigDiffLine[] = [
+      {
+        key: "model_provider",
+        action: "update",
+        before: "custom",
+        after: providerId,
+        detail: "Selects the direct provider entry managed by CodeStudio Lite."
+      },
+      {
+        key: `model_providers.${providerId}.wire_api`,
+        action: "add",
+        before: null,
+        after: wireApi,
+        detail: "Uses Codex's selected provider wire API."
+      },
+      {
+        key: `model_providers.${providerId}.base_url`,
+        action: "add",
+        before: null,
+        after: profile.baseUrl,
+        detail: "Points Codex directly at the upstream Provider Base URL."
+      },
+      {
+        key: `model_providers.${providerId}.requires_openai_auth`,
+        action: "add",
+        before: null,
+        after: "false",
+        detail: "Disables Codex official OpenAI auth for this custom upstream entry."
+      },
+      {
+        key: `model_providers.${providerId}.experimental_bearer_token`,
+        action: "add",
+        before: null,
+        after: profile.authRef ? "keychain:****" : "(missing keychain secret)",
+        detail: "Stores the selected Provider API key from the system keychain."
+      }
+    ];
+    if (profile.model) {
+      directChanges.push({
+        key: "model",
+        action: "update",
+        before: "gpt-5-codex",
+        after: profile.model,
+        detail: "Sets Codex to the selected upstream model."
+      });
+    } else {
+      directChanges.push({
+        key: "model",
+        action: "remove",
+        before: "gpt-5-codex",
+        after: null,
+        detail: "Removes the model override when the profile has no selected model."
+      });
+    }
     return withMockNativeContent({
       tool: "codex",
       path: nativeConfigPath ?? "~/.codex/config.toml",
       status: "preview",
       writeEnabled: true,
-      changes: [
-        {
-          key: "model_provider",
-          action: "update",
-          before: "custom",
-          after: providerId,
-          detail: "Selects the direct provider entry managed by CodeStudio Lite."
-        },
-        {
-          key: "model",
-          action: "update",
-          before: "gpt-5-codex",
-          after: profile.model || "codestudio-default",
-          detail: "Sets Codex to the selected upstream model."
-        },
-        {
-          key: `model_providers.${providerId}.wire_api`,
-          action: "add",
-          before: null,
-          after: wireApi,
-          detail: "Uses Codex's selected provider wire API."
-        },
-        {
-          key: `model_providers.${providerId}.base_url`,
-          action: "add",
-          before: null,
-          after: profile.baseUrl,
-          detail: "Points Codex directly at the upstream Provider Base URL."
-        },
-        {
-          key: `model_providers.${providerId}.requires_openai_auth`,
-          action: "add",
-          before: null,
-          after: "false",
-          detail: "Disables Codex official OpenAI auth for this custom upstream entry."
-        },
-        {
-          key: `model_providers.${providerId}.experimental_bearer_token`,
-          action: "add",
-          before: null,
-          after: profile.authRef ? "keychain:****" : "(missing keychain secret)",
-          detail: "Stores the selected Provider API key from the system keychain."
-        }
-      ],
+      changes: directChanges,
       warnings: [
         "Config profiles write Codex's provider entry directly to the selected upstream Provider.",
         "The preview masks the Provider API key. The actual key is loaded from the system keychain during apply.",
@@ -3243,6 +3257,7 @@ function mockNativeConfigPreview(
   }
 
   const gatewayBaseUrl = mockGatewayBaseUrlForTool(profile.app);
+  const gatewayModel = profile.model || "default";
   return withMockNativeContent({
     tool: "codex",
     path: nativeConfigPath ?? "~/.codex/config.toml",
@@ -3253,32 +3268,32 @@ function mockNativeConfigPreview(
         key: "model_provider",
         action: "update",
         before: "custom",
-        after: "codestudio-local",
+        after: "custom",
         detail: "Selects the CodeStudio Lite localhost provider."
       },
       {
         key: "model",
         action: "update",
         before: "gpt-5-codex",
-        after: "codestudio-default",
+        after: gatewayModel,
         detail: "Sets Codex to the virtual model name resolved by the Local Gateway."
       },
       {
-        key: "model_providers.codestudio-local.base_url",
+        key: "model_providers.custom.base_url",
         action: "add",
         before: null,
         after: gatewayBaseUrl,
         detail: "Points Codex at the tool-scoped CodeStudio Lite Local Gateway."
       },
       {
-        key: "model_providers.codestudio-local.requires_openai_auth",
+        key: "model_providers.custom.requires_openai_auth",
         action: "add",
         before: null,
         after: "true",
         detail: "Keeps the official Codex login path available while routing model requests through the Local Gateway."
       },
       {
-        key: "model_providers.codestudio-local.experimental_bearer_token",
+        key: "model_providers.custom.experimental_bearer_token",
         action: "add",
         before: null,
         after: "codestudio-local-****7f3a2c",
@@ -3349,7 +3364,7 @@ function mockNonCodexNativeConfigPreview(
   if (!mockConfigProtocolSupported(profile)) {
     return null;
   }
-  const providerId = `codestudio-${slugify(profile.provider) || "provider"}`;
+    const providerId = "custom";
   const secret = profile.authRef ? "keychain:****" : "(missing keychain secret)";
   const model = profile.model.trim();
   const path =
@@ -3734,7 +3749,7 @@ function mockNonCodexOfficialNativeConfigPreview(
       ...base,
       changes: [
         {
-          key: "provider.codestudio-*",
+          key: "provider.custom",
           action: "remove",
           before: "managed provider entries",
           after: null,
@@ -3743,7 +3758,7 @@ function mockNonCodexOfficialNativeConfigPreview(
         {
           key: "model",
           action: "remove",
-          before: "codestudio-local/codestudio-default",
+          before: "custom/default",
           after: null,
           detail: "Removes the active model only when it points to a CodeStudio Lite managed provider."
         }
@@ -3757,7 +3772,7 @@ function mockNonCodexOfficialNativeConfigPreview(
       ...base,
       changes: [
         {
-          key: "models.providers.codestudio-*",
+          key: "models.providers.custom",
           action: "remove",
           before: "managed provider entries",
           after: null,
@@ -3766,7 +3781,7 @@ function mockNonCodexOfficialNativeConfigPreview(
         {
           key: "agents.defaults.model.primary",
           action: "remove",
-          before: "codestudio-local/codestudio-default",
+          before: "custom/default",
           after: null,
           detail: "Removes the primary model only when it points to a CodeStudio Lite managed provider."
         }
@@ -4040,10 +4055,10 @@ function mockNonCodexGatewayNativeConfigPreview(
     mockToolConfigPath(app) ??
     "~/.codestudio-lite/native-config";
   const gatewayBaseUrl = mockGatewayBaseUrlForTool(app);
-  const providerId = "codestudio-local";
+  const providerId = "custom";
   const providerName = "CodeStudio Lite Local Gateway";
   const localToken = "codestudio-local-****7f3a2c";
-  const localModel = "codestudio-default";
+  const localModel = profile.model || "default";
   const modelRef = `${providerId}/${localModel}`;
   const commonWarnings = [
     "Applying a Gateway profile does not start the Gateway automatically; use the sidebar Gateway controls when you want it running.",

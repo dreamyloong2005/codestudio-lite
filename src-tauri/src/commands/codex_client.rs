@@ -76,8 +76,10 @@ pub async fn uninstall_codex_client(
 }
 
 #[tauri::command]
-pub fn launch_codex_client() -> Result<(), String> {
-    codex_client::launch()
+pub async fn launch_codex_client() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| codex_client::launch())
+        .await
+        .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
