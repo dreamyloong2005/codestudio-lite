@@ -5,7 +5,6 @@
   } from "../lib/api";
   import {
     codexClientView,
-    ensureCodexClientLoaded,
     installOrUpdateCodexClient,
     launchManagedCodexClient,
     refreshCodexClient,
@@ -92,7 +91,6 @@
 
   onMount(() => {
     startCodexClientProgressListener();
-    void ensureCodexClientLoaded();
   });
 
   async function stagePackage() {

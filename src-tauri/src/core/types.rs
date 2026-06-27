@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::core::privacy_filter::{PrivacyFilterAction, PrivacyFilterMode};
 
@@ -999,6 +999,16 @@ pub struct ClaudeDesktopPlan {
     pub download_url: String,
     pub sha256: String,
     pub install_location: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeDesktopPageState {
+    pub snapshot: DetectionSnapshot,
+    pub install_plan: Option<ToolInstallPlan>,
+    pub update_plan: Option<ToolInstallPlan>,
+    pub plan: Option<ClaudeDesktopPlan>,
+    pub capabilities: Vec<crate::core::codex_client::CodexClientCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

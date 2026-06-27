@@ -178,6 +178,14 @@ export interface ClaudeDesktopPlan {
   installLocation: string;
 }
 
+export interface ClaudeDesktopPageState {
+  snapshot: DetectionSnapshot;
+  installPlan: ToolInstallPlan | null;
+  updatePlan: ToolInstallPlan | null;
+  plan: ClaudeDesktopPlan | null;
+  capabilities: CodexClientCapability[];
+}
+
 export interface InstallTerminalOutput {
   sessionId: string;
   stream: "output" | "status" | string;

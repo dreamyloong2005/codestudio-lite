@@ -25,6 +25,7 @@ pub fn run() {
             commands::activity_log::load_activity_log,
             commands::backup::list_backups,
             commands::backup::restore_backup,
+            commands::claude_desktop::inspect_claude_desktop_page,
             commands::claude_desktop::launch_claude_desktop,
             commands::claude_desktop::open_claude_desktop_path,
             commands::claude_desktop::plan_claude_desktop_update,

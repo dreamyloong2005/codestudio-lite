@@ -22,6 +22,7 @@ import type {
   CodexClientStateCache
 } from "../types";
 import type { TranslationKey } from "./i18n";
+import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./refreshCache";
 
 export type CodexClientInstallKind = "msix" | "portable";
 
@@ -93,6 +94,8 @@ const initialState: CodexClientViewState = {
 export const codexClientView = writable<CodexClientViewState>(initialState);
 
 let loadPromise: Promise<void> | null = null;
+let lastNavigationRefreshAt = Math.max(readRefreshTimestamp("codexClient"), readRefreshTimestamp("detection"));
+const NAVIGATION_REFRESH_TTL_MS = REFRESH_CACHE_TTL_MS;
 let progressListenerStarted = false;
 let settingsSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
 let settingsSaveInFlight = false;
@@ -380,16 +383,13 @@ export async function ensureCodexClientLoaded() {
   if (hasBusyAction(snapshot)) {
     return;
   }
-  // Hydrate from the on-disk cache first so the page renders instantly with
-  // a prior session plan, then kick off an async re-fetch to stay current.
   const hydrated = snapshot.loaded ? true : await hydrateCodexClientFromCache();
+  lastNavigationRefreshAt = Math.max(readRefreshTimestamp("codexClient"), readRefreshTimestamp("detection"));
+  const stale = !refreshTimestampFresh("codexClient", NAVIGATION_REFRESH_TTL_MS) && !refreshTimestampFresh("detection", NAVIGATION_REFRESH_TTL_MS);
   if (!loadPromise && !hasLoadingView() && !hasBusyAction()) {
     if (hydrated) {
-      // We already have a full cached state; only re-fetch the network plan
-      // when auto-check is enabled, and skip the plan-less local inspect so
-      // the cached plan stays visible until the network fetch supersedes it.
       const settings = get(codexClientView).settingsDraft;
-      if (settings?.autoCheck) {
+      if (settings?.autoCheck && stale) {
         loadPromise = refreshCodexClient(true).finally(() => {
           loadPromise = null;
         });
@@ -426,6 +426,8 @@ export async function refreshCodexClient(
       applyState(nextState, installKind, { preserveDraft: preserveDraft() });
     }
     const installKinds = await detectCodexInstallKinds().catch(() => null);
+    lastNavigationRefreshAt = Date.now();
+    writeRefreshTimestamp("codexClient", lastNavigationRefreshAt);
     patch({ installKinds });
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });

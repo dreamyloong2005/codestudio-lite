@@ -1,15 +1,11 @@
 import { get, writable } from "svelte/store";
 import {
-  detectClaudeCapabilities,
-  detectEnvironmentFresh,
+  inspectClaudeDesktopPage,
   installTool,
   launchClaudeDesktop,
   listenToolInstallProgress,
   loadCachedDetection,
   openClaudeDesktopPath,
-  planClaudeDesktopUpdate,
-  planToolInstall,
-  planToolUpdate,
   uninstallTool,
   updateTool
 } from "./api";
@@ -24,6 +20,7 @@ import type {
   ToolInstallResult,
   ToolStatus
 } from "../types";
+import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./refreshCache";
 
 export const CLAUDE_DESKTOP_TOOL_ID = "claude-desktop";
 
@@ -133,6 +130,8 @@ const initialState: ClaudeDesktopViewState = {
 export const claudeDesktopView = writable<ClaudeDesktopViewState>(initialState);
 
 let loadPromise: Promise<void> | null = null;
+let lastNavigationRefreshAt = Math.max(readRefreshTimestamp("claudeDesktop"), readRefreshTimestamp("detection"));
+const NAVIGATION_REFRESH_TTL_MS = REFRESH_CACHE_TTL_MS;
 let progressListenerStarted = false;
 let progressLogKeys = new Set<string>();
 
@@ -449,19 +448,14 @@ export async function ensureClaudeDesktopLoaded() {
     return;
   }
   hydrateClaudeDesktopPlanFromCache();
-  // Before the first in-memory scan lands, hydrate the view from the on-disk
-  // detection cache so the page renders immediately with a prior scan's
-  // results instead of blocking on a fresh detect. The cache is then
-  // superseded by an async re-scan (below) so the data stays current without
-  // making the user wait to see the page.
   if (!snapshot.loaded) {
     await hydrateClaudeDesktopFromCache();
   }
-  // Kick off a background re-scan but do not block navigation on it: the page
-  // already shows the cached state, and the fresh result updates the store
-  // (and the reactive UI) when it arrives.
-  if (!loadPromise && !hasLoadingView() && !hasBusyAction()) {
-    loadPromise = refreshClaudeDesktop()
+  const current = get(claudeDesktopView);
+  lastNavigationRefreshAt = Math.max(readRefreshTimestamp("claudeDesktop"), readRefreshTimestamp("detection"));
+  const stale = !refreshTimestampFresh("claudeDesktop", NAVIGATION_REFRESH_TTL_MS) && !refreshTimestampFresh("detection", NAVIGATION_REFRESH_TTL_MS);
+  if (!loadPromise && !hasLoadingView() && !hasBusyAction() && (!current.loaded || stale)) {
+    loadPromise = refreshClaudeDesktop(false, get(claudeDesktopView).selectedKind, { forceFresh: false })
       .finally(() => {
         loadPromise = null;
       });
@@ -492,7 +486,8 @@ function hydrateClaudeDesktopPlanFromCache() {
 
 export async function refreshClaudeDesktop(
   force = false,
-  installKind: ClaudeDesktopInstallKind = get(claudeDesktopView).selectedKind
+  installKind: ClaudeDesktopInstallKind = get(claudeDesktopView).selectedKind,
+  options: { forceFresh?: boolean } = {}
 ) {
   startClaudeDesktopProgressListener();
   if (get(claudeDesktopView).kindViews[installKind].busyAction && !force) {
@@ -504,22 +499,20 @@ export async function refreshClaudeDesktop(
     if (installKind === "msix") {
       patchKind("msix", { planRefreshing: true });
     }
-    // Use the fresh (cache-invalidating) detection so a manual refresh or a
-    // post-install re-detect always re-resolves from scratch instead of
-    // serving a stale in-process install cache (e.g. MSIX Get-AppxPackage
-    // result held for 30s).
-    const snapshot = await detectEnvironmentFresh();
-    const [installPlan, updatePlan] = await Promise.all([
-      planToolInstall(CLAUDE_DESKTOP_TOOL_ID).catch(() => null),
-      planToolUpdate(CLAUDE_DESKTOP_TOOL_ID).catch(() => null)
-    ]);
-    const plan = await planClaudeDesktopUpdate().catch(() => null);
-    if (plan) {
-      storeClaudeDesktopPlan(plan);
-      applyClaudeDesktopPlan(plan);
+    const state = await inspectClaudeDesktopPage(options.forceFresh ?? force);
+    if (state.plan) {
+      storeClaudeDesktopPlan(state.plan);
+      applyClaudeDesktopPlan(state.plan);
     }
-    const capabilities = await detectClaudeCapabilities().catch(() => []);
-    applyKindStatusesFromSnapshot(snapshot, installPlan, updatePlan, capabilities);
+    lastNavigationRefreshAt = Date.now();
+    writeRefreshTimestamp("claudeDesktop", lastNavigationRefreshAt);
+    writeRefreshTimestamp("detection", lastNavigationRefreshAt);
+    applyKindStatusesFromSnapshot(
+      state.snapshot,
+      state.installPlan,
+      state.updatePlan,
+      state.capabilities
+    );
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });
   } finally {

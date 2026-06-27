@@ -10,6 +10,7 @@ import type {
   ClaudeDesktopPendingLaunch,
   ClaudeDesktopInstallKinds,
   ClaudeDesktopPlan,
+  ClaudeDesktopPageState,
   ClearEnvironmentVariablesRequest,
   ClearEnvironmentVariablesResult,
   CodexClientInstallKinds,
@@ -189,6 +190,20 @@ export async function planClaudeDesktopUpdate(): Promise<ClaudeDesktopPlan> {
     return invoke("plan_claude_desktop_update");
   }
   return mockClaudeDesktopPlan();
+}
+
+export async function inspectClaudeDesktopPage(force = false): Promise<ClaudeDesktopPageState> {
+  if (isTauri()) {
+    return invoke("inspect_claude_desktop_page", { force });
+  }
+  const snapshot = mockDetection();
+  return {
+    snapshot,
+    installPlan: mockToolInstallPlan("claude-desktop"),
+    updatePlan: mockToolUpdatePlan("claude-desktop"),
+    plan: mockClaudeDesktopPlan(),
+    capabilities: []
+  };
 }
 
 export async function installTool(request: ToolInstallRequest): Promise<ToolInstallResult> {

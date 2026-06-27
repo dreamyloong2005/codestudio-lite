@@ -15,7 +15,6 @@
     consumeClaudeDesktopPendingLaunchAfterRestart,
     dismissClaudeDesktopError,
     dismissClaudeDesktopSuccess,
-    ensureClaudeDesktopLoaded,
     installOrUpdateClaudeDesktopKind,
     openClaudeDesktopStagingPath,
     refreshClaudeDesktop,
@@ -260,7 +259,6 @@
   }
 
   async function initializeClaudeDesktopPage() {
-    await ensureClaudeDesktopLoaded();
     await resumePendingLaunchAfterRestart();
   }
 
@@ -270,7 +268,7 @@
     try {
       await launchClaudeDesktop({ localize });
       await new Promise((resolve) => setTimeout(resolve, 2500));
-      await refreshClaudeDesktop();
+      await refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("ACCESSIBILITY_NOT_TRUSTED")) {
@@ -356,7 +354,7 @@
           {$t(isRunning ? "toolLaunch.restart" : "toolLaunch.action")}
         {/if}
       </button>
-      <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(false, effectiveSelectedKind)}>
+      <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true })}>
         <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? spinRecipe() : ""} />
         {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>

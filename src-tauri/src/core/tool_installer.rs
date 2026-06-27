@@ -82,22 +82,42 @@ struct InstallProgressContext<'a> {
 }
 
 pub fn plan_tool_install(tool_id: &str) -> Result<ToolInstallPlan, String> {
+    let current_status = current_status(tool_id).ok();
+    plan_tool_install_for_status(tool_id, current_status.as_ref())
+}
+
+pub fn plan_tool_install_for_status(
+    tool_id: &str,
+    current_status: Option<&ToolStatus>,
+) -> Result<ToolInstallPlan, String> {
     let definition = install_definition(tool_id)
         .ok_or_else(|| format!("Tool '{tool_id}' is not allowed for installation."))?;
-    let current_status = current_status(tool_id).ok();
-    Ok(build_plan(&definition, current_status.as_ref()))
+    Ok(build_plan(&definition, current_status))
 }
 
 pub fn plan_tool_update(tool_id: &str) -> Result<ToolInstallPlan, String> {
+    let current_status = current_status(tool_id).ok();
+    plan_tool_update_for_status(tool_id, current_status.as_ref())
+}
+
+pub fn plan_tool_update_for_status(
+    tool_id: &str,
+    current_status: Option<&ToolStatus>,
+) -> Result<ToolInstallPlan, String> {
     let definition = install_definition(tool_id)
         .ok_or_else(|| format!("Tool '{tool_id}' is not allowed for updates."))?;
-    let current_status = current_status(tool_id).ok();
-    Ok(build_update_plan(&definition, current_status.as_ref()))
+    Ok(build_update_plan(&definition, current_status))
 }
 
 pub fn plan_claude_desktop_update() -> Result<ClaudeDesktopPlan, String> {
     let status = current_status("claude-desktop").ok();
-    build_claude_desktop_plan(status.as_ref())
+    plan_claude_desktop_update_for_status(status.as_ref())
+}
+
+pub fn plan_claude_desktop_update_for_status(
+    status: Option<&ToolStatus>,
+) -> Result<ClaudeDesktopPlan, String> {
+    build_claude_desktop_plan(status)
 }
 
 pub fn install_tool(request: ToolInstallRequest) -> Result<ToolInstallResult, String> {

@@ -23,6 +23,7 @@
   } from "./lib/claudeDesktopStore";
   import { ensureCodexClientLoaded } from "./lib/codexClientStore";
   import { setLocale, t } from "./lib/i18n";
+  import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./lib/refreshCache";
   import { applyTheme } from "./lib/theme";
   import { disposeTerminalSession } from "./lib/terminalSessionStore";
   import { appBrandMarkRecipe, appBrandRecipe, appErrorBannerRecipe, appNavButtonRecipe, appNavLabelRecipe, appNavRecipe, appNavSectionTitleRecipe, appNavUpdateDotRecipe, appRouteTransitionRecipe, appShellRecipe, appSidebarRecipe, appWorkspaceRecipe } from "../styled-system/recipes";
@@ -61,13 +62,12 @@
   let dashboardRefreshIndicatorRunId: number | null = null;
   let lastRouteRefreshRoute: Route = route;
   let pendingClaudeDesktopRouteRestore = false;
+  let lastDashboardRefreshAt = readRefreshTimestamp("detection");
+  const DASHBOARD_NAVIGATION_REFRESH_TTL_MS = REFRESH_CACHE_TTL_MS;
 
-  // detect_environment now returns local detection immediately and kicks off
-  // update checks in the background (npm outdated / winget / claude.ai release).
-  // Re-scan a little earlier so the "update available" badges surface soon after
-  // the fast initial scan, with a mid-window catch-up for slower fetches.
-  const BACKGROUND_DETECTION_WARMUP_DELAYS_MS = [2500, 8000, 16000];
-  const BACKGROUND_DETECTION_INTERVAL_MS = 30000;
+  // detect_environment returns local detection immediately and can kick off update checks.
+  // Keep automatic re-detection coarse: recent successful scans are reused across app restarts.
+  const BACKGROUND_DETECTION_MIN_DELAY_MS = 60_000;
 
   const navItems: Array<{ id: Route; labelKey: Parameters<typeof $t>[0]; icon: AppIconName }> = [
     { id: "dashboard", labelKey: "app.nav.dashboard", icon: "dashboard" },
@@ -138,16 +138,23 @@
     }
   }
 
+  function dashboardRefreshDelayMs() {
+    const age = Date.now() - lastDashboardRefreshAt;
+    return Math.max(DASHBOARD_NAVIGATION_REFRESH_TTL_MS - age, BACKGROUND_DETECTION_MIN_DELAY_MS);
+  }
+
   function startBackgroundDetection() {
     clearBackgroundDetection();
-    backgroundDetectionTimers = BACKGROUND_DETECTION_WARMUP_DELAYS_MS.map((delay) =>
+    if (route !== "dashboard") {
+      return;
+    }
+    backgroundDetectionTimers = [
       window.setTimeout(() => {
-        void refreshDashboard({ quiet: true, scheduleFollowup: false });
-      }, delay)
-    );
-    backgroundDetectionInterval = window.setInterval(() => {
-      void refreshDashboard({ quiet: true, scheduleFollowup: false });
-    }, BACKGROUND_DETECTION_INTERVAL_MS);
+        if (route === "dashboard") {
+          void refreshDashboard({ quiet: true, scheduleFollowup: true });
+        }
+      }, dashboardRefreshDelayMs())
+    ];
   }
 
   type RefreshDashboardOptions = { quiet?: boolean; scheduleFollowup?: boolean; showRefreshIndicator?: boolean };
@@ -200,6 +207,9 @@
     const quiet = options.quiet ?? false;
     const scheduleFollowup = options.scheduleFollowup ?? true;
     const showRefreshIndicator = options.showRefreshIndicator ?? route === "dashboard";
+    if (scheduleFollowup) {
+      clearBackgroundDetection();
+    }
     const runId = ++dashboardRefreshRunId;
     if (showRefreshIndicator) {
       dashboardRefreshIndicatorRunId = runId;
@@ -222,6 +232,8 @@
       applyProfileSummary(nextProfileSummary);
       applyDetectionSnapshot(nextSnapshot);
       applyGatewayStatus(nextGatewayStatus);
+      lastDashboardRefreshAt = Date.now();
+      writeRefreshTimestamp("detection", lastDashboardRefreshAt);
     } catch (err) {
       if (!quiet && visibleRefreshRunId === runId) {
         error = err instanceof Error ? err.message : String(err);
@@ -246,25 +258,35 @@
 
   async function loadDashboardWithCache(options: { showRefreshIndicator?: boolean } = {}) {
     const showRefreshIndicator = options.showRefreshIndicator ?? route === "dashboard";
+    let cachedSnapshot: DetectionSnapshot | null = null;
     if (showRefreshIndicator) {
       dashboardRefreshing = true;
     }
     dashboardLoading = true;
     error = null;
     try {
-      const [nextProfileSummary, cachedSnapshot, nextGatewayStatus] = await Promise.all([
+      const [nextProfileSummary, nextCachedSnapshot, nextGatewayStatus] = await Promise.all([
         ensureAppDirs(),
         loadCachedDetection(),
         loadGatewayStatus()
       ]);
       applyProfileSummary(nextProfileSummary);
       applyGatewayStatus(nextGatewayStatus);
+      cachedSnapshot = nextCachedSnapshot;
       if (cachedSnapshot) {
         applyDetectionSnapshot(cachedSnapshot);
         dashboardLoading = false;
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
+    }
+
+    if (cachedSnapshot && refreshTimestampFresh("detection", DASHBOARD_NAVIGATION_REFRESH_TTL_MS)) {
+      startBackgroundDetection();
+      if (showRefreshIndicator) {
+        dashboardRefreshing = false;
+      }
+      return;
     }
 
     await refreshDashboard({
@@ -298,12 +320,7 @@
     }
   }
 
-  async function refreshAfterProfileChange() {
-    // A profile duplicate/delete/reorder/switch changes profile data and the
-    // gateway, but not the installed-tool environment. Avoid blocking the
-    // action on a full live detectEnvironment() (slow): refresh only the
-    // lightweight profile summary + gateway status so the UI updates instantly,
-    // and let the heavier environment re-scan run in the background.
+  async function refreshProfileAndGatewayOnly() {
     const runId = ++dashboardRefreshRunId;
     try {
       const [nextProfileSummary, nextGatewayStatus] = await Promise.all([
@@ -320,14 +337,28 @@
         error = err instanceof Error ? err.message : String(err);
       }
     }
-    // Supersede with a full scan in the background (quiet, no loading bar) so
-    // the dashboard's tool/env state stays current without stalling the action.
+  }
+
+  async function refreshAfterProfileChange() {
+    // Profile changes only need the lightweight summary/gateway refresh in the
+    // foreground. The heavier environment scan stays in the background.
+    await refreshProfileAndGatewayOnly();
     void refreshDashboard({ quiet: true, scheduleFollowup: false });
   }
 
   async function refreshCurrentRouteAfterSwitch(currentRoute: Route) {
+    if (currentRoute !== "dashboard") {
+      clearBackgroundDetection();
+    }
     if (currentRoute === "dashboard") {
-      await refreshDashboard({ quiet: true, scheduleFollowup: false, showRefreshIndicator: true });
+      lastDashboardRefreshAt = readRefreshTimestamp("detection");
+      const stale = Date.now() - lastDashboardRefreshAt > DASHBOARD_NAVIGATION_REFRESH_TTL_MS;
+      if (snapshot && !stale) {
+        await refreshProfileAndGatewayOnly();
+        startBackgroundDetection();
+      } else {
+        await refreshDashboard({ quiet: true, scheduleFollowup: true, showRefreshIndicator: true });
+      }
     } else if (currentRoute === "codexClient") {
       await ensureCodexClientLoaded();
     } else if (currentRoute === "claudeDesktop") {
