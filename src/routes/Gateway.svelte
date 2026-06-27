@@ -4,6 +4,27 @@
   import Profiles from "./Profiles.svelte";
   import { loadGatewayRequestLog } from "../lib/api";
   import { t } from "../lib/i18n";
+  import { css, cx } from "../../styled-system/css";
+  import {
+    actionButtonRecipe,
+    emptyRowRecipe,
+    eyebrowRecipe,
+    gatewayHeroRecipe,
+    gatewayInlineErrorRecipe,
+    gatewayMetricsRecipe,
+    gatewayPanelRecipe,
+    gatewayRequestListRecipe,
+    gatewayRequestPanelRecipe,
+    gatewayRequestRowRecipe,
+    gatewaySegmentedRecipe,
+    gatewaySettingRowRecipe,
+    panelRecipe,
+    routeStackRecipe,
+    sectionHeadingRecipe,
+    spinRecipe,
+    topActionsRecipe,
+    topStripRecipe
+  } from "../../styled-system/recipes";
   import type {
     DetectionSnapshot,
     GatewayRequestLogEntry,
@@ -12,6 +33,8 @@
     ProfileSummary,
     WizardPrefill
   } from "../types";
+
+  type GatewayTone = "online" | "offline";
 
   export let summary: ProfileSummary | null = null;
   export let snapshot: DetectionSnapshot | null = null;
@@ -35,8 +58,21 @@
   let requestLogLoading = false;
   let requestLogError: string | null = null;
 
+  const gatewayHeadingClass = css({
+    boxShadow: "none",
+    padding: 0,
+    "& h2": {
+      marginTop: "2px",
+      lineHeight: "1.25"
+    },
+    "@media (max-width: 860px)": {
+      alignItems: "stretch",
+      flexDirection: "column"
+    }
+  });
+
   $: gatewayState = gatewayStatus?.running ? $t("common.running") : $t("common.stopped");
-  $: gatewayTone = gatewayStatus?.running ? "online" : "offline";
+  $: gatewayTone = (gatewayStatus?.running ? "online" : "offline") as GatewayTone;
   $: activeProfileName = gatewayStatus?.activeProfileName ?? $t("dashboard.notConfigured");
   $: activeModel = gatewayStatus?.activeModel ?? $t("common.none");
   $: baseUrl = gatewayStatus?.baseUrl ?? "http://127.0.0.1:43112/v1";
@@ -94,35 +130,35 @@
   });
 </script>
 
-<div class="route-stack gateway-route">
-  <section class={`top-strip gateway-hero ${gatewayTone}`}>
+<div class={routeStackRecipe({ width: "full" })}>
+  <section class={cx(topStripRecipe(), gatewayHeroRecipe({ tone: gatewayTone }))}>
     <div>
-      <span class="eyebrow">{$t("gateway.eyebrow")}</span>
+      <span class={eyebrowRecipe()}>{$t("gateway.eyebrow")}</span>
       <h1>{$t("gateway.title")}</h1>
       <p>{$t("gateway.subtitle")}</p>
     </div>
-    <div class="gateway-actions">
-      <button class="primary-button" on:click={() => runGatewayAction("start")} disabled={gatewayBusy || gatewayStatus?.running}>
-        <AppIcon name={gatewayBusy ? "loading" : "power"} class={gatewayBusy ? "spin" : ""} size={16} />
+    <div class={topActionsRecipe()}>
+      <button class={actionButtonRecipe({ tone: "primary" })} on:click={() => runGatewayAction("start")} disabled={gatewayBusy || gatewayStatus?.running}>
+        <AppIcon name={gatewayBusy ? "loading" : "power"} class={gatewayBusy ? spinRecipe() : ""} size={16} />
         {$t("common.start")}
       </button>
-      <button class="secondary-button" on:click={() => runGatewayAction("restart")} disabled={gatewayBusy}>
-        <AppIcon name={gatewayBusy ? "loading" : "restart"} class={gatewayBusy ? "spin" : ""} size={16} />
+      <button class={actionButtonRecipe()} on:click={() => runGatewayAction("restart")} disabled={gatewayBusy}>
+        <AppIcon name={gatewayBusy ? "loading" : "restart"} class={gatewayBusy ? spinRecipe() : ""} size={16} />
         {$t("common.restart")}
       </button>
-      <button class="secondary-button" on:click={() => runGatewayAction("stop")} disabled={gatewayBusy || !gatewayStatus?.running}>
+      <button class={actionButtonRecipe()} on:click={() => runGatewayAction("stop")} disabled={gatewayBusy || !gatewayStatus?.running}>
         <AppIcon name="stop" size={16} />
         {$t("common.stop")}
       </button>
-      <button class="secondary-button" on:click={onCopyGatewayUrl} disabled={!gatewayStatus?.baseUrl}>
+      <button class={actionButtonRecipe()} on:click={onCopyGatewayUrl} disabled={!gatewayStatus?.baseUrl}>
         <AppIcon name="copy" size={16} />
         {$t("dashboard.copyGatewayUrl")}
       </button>
     </div>
   </section>
 
-  <section class="panel-band gateway-panel">
-    <div class="gateway-metrics">
+  <section class={cx(panelRecipe(), gatewayPanelRecipe())}>
+    <div class={gatewayMetricsRecipe()}>
       <div>
         <span>{$t("common.status")}</span>
         <strong>{gatewayState}</strong>
@@ -140,13 +176,13 @@
         <strong>{activeModel}</strong>
       </div>
     </div>
-    <div class="gateway-setting-row">
+    <div class={gatewaySettingRowRecipe()}>
       <span>{$t("gateway.privacyFilter")}</span>
-      <div class="gateway-segmented" role="group" aria-label={$t("gateway.privacyFilter")}>
+      <div class={gatewaySegmentedRecipe()} role="group" aria-label={$t("gateway.privacyFilter")}>
         {#each privacyModes as mode}
           <button
             type="button"
-            class:selected={privacyFilterMode === mode.value}
+            data-selected={privacyFilterMode === mode.value}
             disabled={privacyBusy}
             on:click={() => setPrivacyMode(mode.value)}
           >
@@ -156,36 +192,36 @@
       </div>
     </div>
     {#if gatewayStatus?.lastError}
-      <div class="sidebar-gateway-error">{gatewayStatus.lastError}</div>
+      <div class={gatewayInlineErrorRecipe()}>{gatewayStatus.lastError}</div>
     {/if}
   </section>
 
-  <section class="panel-band gateway-request-panel">
-    <div class="section-heading compact-heading">
+  <section class={cx(panelRecipe(), gatewayRequestPanelRecipe())}>
+    <div class={cx(sectionHeadingRecipe({ compact: true }), gatewayHeadingClass)}>
       <div>
-        <span class="eyebrow">{$t("gateway.recentRequests")}</span>
+        <span class={eyebrowRecipe()}>{$t("gateway.recentRequests")}</span>
         <h2>{$t("gateway.requestLogTitle")}</h2>
       </div>
-      <button class="secondary-button" on:click={refreshRequestLog} disabled={requestLogLoading}>
-        <AppIcon name={requestLogLoading ? "loading" : "refresh"} class={requestLogLoading ? "spin" : ""} size={16} />
+      <button class={actionButtonRecipe()} on:click={refreshRequestLog} disabled={requestLogLoading}>
+        <AppIcon name={requestLogLoading ? "loading" : "refresh"} class={requestLogLoading ? spinRecipe() : ""} size={16} />
         {$t("common.refresh")}
       </button>
     </div>
     {#if requestLogError}
-      <div class="sidebar-gateway-error">{requestLogError}</div>
+      <div class={gatewayInlineErrorRecipe()}>{requestLogError}</div>
     {:else if requestLog.length === 0}
-      <div class="empty-state">{$t("gateway.noRequests")}</div>
+      <div class={emptyRowRecipe()}>{$t("gateway.noRequests")}</div>
     {:else}
-      <div class="gateway-request-list">
+      <div class={gatewayRequestListRecipe()}>
         {#each requestLog.slice(0, 12) as entry}
-          <div class={`gateway-request-row privacy-${entry.privacyFilterAction}`}>
+          <div class={gatewayRequestRowRecipe()} data-privacy-action={entry.privacyFilterAction}>
             <div>
               <strong>{entry.client}</strong>
               <small>{entry.method} {entry.path}</small>
             </div>
-            <span class="gateway-request-cell">{entry.status}</span>
-            <span class="gateway-request-cell">{entry.latencyMs}ms</span>
-            <span class="gateway-request-time gateway-request-cell">{formatTime(entry.timestamp)}</span>
+            <span>{entry.status}</span>
+            <span>{entry.latencyMs}ms</span>
+            <span data-gateway-request-time>{formatTime(entry.timestamp)}</span>
             <em>{privacyActionLabel(entry)}</em>
           </div>
         {/each}

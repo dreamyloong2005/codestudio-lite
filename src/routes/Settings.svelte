@@ -13,6 +13,29 @@
   import { setLocale, supportedLocales, t } from "../lib/i18n";
   import { applyTheme } from "../lib/theme";
   import type { AppSettings, Locale } from "../types";
+  import { cx } from "../../styled-system/css";
+  import {
+    actionButtonRecipe,
+    eyebrowRecipe,
+    panelRecipe,
+    profileInlineNoticeRecipe,
+    routeStackRecipe,
+    sectionHeadingRecipe,
+    settingsAboutContentRecipe,
+    settingsAboutMarkRecipe,
+    settingsAboutPanelRecipe,
+    settingsAboutSummaryRecipe,
+    settingsAboutTitleRecipe,
+    settingsAboutUpdateRecipe,
+    settingsListRecipe,
+    settingsRowRecipe,
+    settingsRowValueRecipe,
+    settingsUpdatePillRecipe,
+    spinRecipe,
+    topStripRecipe
+  } from "../../styled-system/recipes";
+
+  type UpdateStatusTone = "warn" | "bad" | "info" | "good";
 
   let settings: AppSettings | null = null;
   let language: Locale = "en-US";
@@ -21,6 +44,7 @@
   let saving = false;
   let error: string | null = null;
   let settingsEditRevision = 0;
+  let updateStatusTone: UpdateStatusTone = "info";
 
   onMount(() => {
     void loadSettings();
@@ -111,21 +135,21 @@
 
 </script>
 
-<div class="route-stack">
-  <section class="top-strip compact-top-strip">
+<div class={routeStackRecipe({ width: "full" })}>
+  <section class={topStripRecipe({ compact: true })}>
     <div>
-      <span class="eyebrow">{$t("settings.eyebrow")}</span>
+      <span class={eyebrowRecipe()}>{$t("settings.eyebrow")}</span>
       <h1>{$t("settings.title")}</h1>
       <p>{$t("settings.subtitle")}</p>
     </div>
   </section>
 
   {#if error}
-    <div class="inline-error">{error}</div>
+    <div class={profileInlineNoticeRecipe({ tone: "error" })}>{error}</div>
   {/if}
 
-  <section class="panel-band settings-list">
-    <label class="settings-row">
+  <section class={cx(panelRecipe(), settingsListRecipe())}>
+    <label class={settingsRowRecipe()}>
       <span><AppIcon name="language" size={18} /> {$t("settings.language")}</span>
       <select bind:value={language} disabled={saving} on:change={(event) => changeLanguage(event.currentTarget.value as Locale)}>
         {#each supportedLocales as locale}
@@ -133,7 +157,7 @@
         {/each}
       </select>
     </label>
-    <label class="settings-row">
+    <label class={settingsRowRecipe()}>
       <span><AppIcon name="theme" size={18} /> {$t("settings.theme")}</span>
       <select bind:value={theme} disabled={saving} on:change={(event) => changeTheme(event.currentTarget.value as AppSettings["theme"])}>
         <option value="system">{$t("settings.theme.system")}</option>
@@ -141,9 +165,9 @@
         <option value="dark">{$t("settings.theme.dark")}</option>
       </select>
     </label>
-    <label class="settings-row settings-toggle-row">
+    <label class={settingsRowRecipe()}>
       <span><AppIcon name="key" size={18} /> {$t("settings.codexAuthPreservation")}</span>
-      <span class="settings-row-value">
+      <span class={settingsRowValueRecipe()}>
         <input
           type="checkbox"
           bind:checked={preserveCodexOfficialAuth}
@@ -154,35 +178,35 @@
     </label>
   </section>
 
-  <section class="panel-band about-panel">
-    <div class="section-heading compact">
+  <section class={cx(panelRecipe(), settingsAboutPanelRecipe())}>
+    <div class={sectionHeadingRecipe({ compact: true })}>
       <div>
         <h2>{$t("settings.about")}</h2>
         <p>{$t("settings.aboutDescription")}</p>
       </div>
     </div>
 
-    <div class="about-content">
-      <div class="about-summary">
-        <div class="brand-mark about-mark">
+    <div class={settingsAboutContentRecipe()}>
+      <div class={settingsAboutSummaryRecipe()}>
+        <div class={settingsAboutMarkRecipe()}>
           <BrandLogo />
         </div>
-        <div class="about-title">
+        <div class={settingsAboutTitleRecipe()}>
           <strong>{APP_NAME}</strong>
           <span>{APP_VERSION_LABEL}</span>
         </div>
-        <div class="about-update">
-          <span class={`pill ${updateStatusTone}`}>{updateStatusLabel}</span>
-          <button class="secondary-button" type="button" disabled={$appUpdateState.status === "checking"} on:click={() => checkForAppUpdate(true)}>
-            <AppIcon name="restart" size={15} class={$appUpdateState.status === "checking" ? "spin" : ""} />
+        <div class={settingsAboutUpdateRecipe()}>
+          <span class={settingsUpdatePillRecipe({ tone: updateStatusTone })}>{updateStatusLabel}</span>
+          <button class={actionButtonRecipe()} type="button" disabled={$appUpdateState.status === "checking"} on:click={() => checkForAppUpdate(true)}>
+            <AppIcon name="restart" size={15} class={$appUpdateState.status === "checking" ? spinRecipe() : ""} />
             {$t("settings.checkUpdates")}
           </button>
         </div>
       </div>
 
-      <div class="settings-row about-row">
+      <div class={settingsRowRecipe()}>
         <span><AppIcon name="user" size={18} /> {$t("settings.author")}</span>
-        <a class="secondary-button" href={AUTHOR_GITHUB_URL} target="_blank" rel="noreferrer" on:click|preventDefault={() => openExternalUrl(AUTHOR_GITHUB_URL)}>
+        <a class={actionButtonRecipe()} href={AUTHOR_GITHUB_URL} target="_blank" rel="noreferrer" on:click|preventDefault={() => openExternalUrl(AUTHOR_GITHUB_URL)}>
           {AUTHOR_NAME}
           <AppIcon name="externalLink" size={15} />
         </a>

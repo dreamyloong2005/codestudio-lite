@@ -29,6 +29,54 @@
   import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
+  import { css, cx } from "../../styled-system/css";
+  import {
+    actionButtonRecipe,
+    desktopClientModalActionsRecipe,
+    desktopClientModalBackdropRecipe,
+    desktopClientModalBodyRecipe,
+    desktopClientModalPanelRecipe,
+    desktopClientPreviewListRecipe,
+    emptyRowRecipe,
+    eyebrowRecipe,
+    iconButtonRecipe,
+    nativeToggleRecipe,
+    profileAvatarRecipe,
+    profileCardActionsRecipe,
+    profileCardMainRecipe,
+    profileCardRecipe,
+    profileCardStatusRecipe,
+    profileDiffHeadingRecipe,
+    profileDiffListRecipe,
+    profileDiffPanelRecipe,
+    profileDiffRowRecipe,
+    profileDragHandleRecipe,
+    profileEmbeddedStackRecipe,
+    profileFieldErrorRecipe,
+    profileFormGridRecipe,
+    profileGridRecipe,
+    profileIdentityRecipe,
+    profileIconActionsRecipe,
+    profileIconEditorRecipe,
+    profileInlineNoticeRecipe,
+    profileModeLayoutRecipe,
+    profileSortableRowRecipe,
+    profileToolSectionRecipe,
+    profileToolSwitcherRecipe,
+    profileToolTabsRecipe,
+    profileUsageCodeFieldRecipe,
+    profileUsageResultCardRecipe,
+    profileUsageResultGridRecipe,
+    profileUsageTemplateRowRecipe,
+    profileUsageOfficialPanelRecipe,
+    profileWriteContentPreviewRecipe,
+    routeStackRecipe,
+    sectionActionsRecipe,
+    spinRecipe,
+    topActionsRecipe,
+    topStripRecipe,
+    panelRecipe
+  } from "../../styled-system/recipes";
   import {
     nextSortableProfileIds,
     profileDragDisabled as resolveProfileDragDisabled,
@@ -140,6 +188,45 @@
   let sortableSaving = false;
   const profileFlipDurationMs = 220;
   const profileDropTargetStyle = { outline: "none" };
+  const modalPanelWideClass = css({
+    width: "min(760px, calc(100vw - 40px))",
+    "@supports (width: 100dvw)": {
+      width: "min(760px, calc(100dvw - 40px))"
+    }
+  });
+  const usageModalPanelClass = css({
+    width: "min(900px, calc(100vw - 40px))",
+    "@supports (width: 100dvw)": {
+      width: "min(900px, calc(100dvw - 40px))"
+    }
+  });
+  const dangerButtonClass = css({
+    borderColor: "color-mix(in srgb, var(--danger) 40%, transparent)",
+    background: "color-mix(in srgb, var(--danger) 14%, transparent)",
+    color: "var(--danger-text)",
+    _hover: {
+      borderColor: "color-mix(in srgb, var(--danger) 55%, transparent)",
+      background: "color-mix(in srgb, var(--danger) 18%, transparent)"
+    }
+  });
+  const usageToggleClass = css({
+    borderColor: "color-mix(in srgb, var(--accent) 30%, transparent)",
+    background: "color-mix(in srgb, var(--accent) 8%, transparent)"
+  });
+  const inlineEmptyClass = css({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "8px"
+  });
+  const embeddedProfileActionsClass = css({
+    justifyContent: "flex-end"
+  });
+  const conflictPreviewListClass = css({
+    "& code": {
+      width: "100%"
+    }
+  });
 
   const toolOrder = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes"];
   const toolLabels: Record<string, string> = {
@@ -1103,10 +1190,10 @@
     if (!element) {
       return;
     }
-    element.classList.add("sortable-active-row");
+    element.setAttribute("data-sortable-active", "true");
     element
-      .querySelector(".compact-profile-card")
-      ?.classList.add("sortable-active-card");
+      .querySelector("[data-profile-card]")
+      ?.setAttribute("data-drag-active", "true");
   }
 
   function profileSupportsUsageQuery(profile: ProfileDraft) {
@@ -1685,16 +1772,16 @@
   }
 </script>
 
-<div class={embedded ? "embedded-profile-stack" : "route-stack"}>
+<div class={embedded ? profileEmbeddedStackRecipe() : routeStackRecipe({ width: "full" })}>
   {#if !embedded}
-    <section class="top-strip compact-top-strip">
+    <section class={topStripRecipe({ compact: true })}>
       <div>
-        <span class="eyebrow">{$t("profiles.eyebrow")}</span>
+        <span class={eyebrowRecipe()}>{$t("profiles.eyebrow")}</span>
         <h1>{$t(routeTitleKey)}</h1>
       </div>
-      <div class="top-actions">
+      <div class={topActionsRecipe()}>
         <button
-          class="secondary-button"
+          class={actionButtonRecipe()}
           title={$t("common.createConfig")}
           on:click={createProfileForCurrentTool}
         >
@@ -1714,22 +1801,22 @@
 
   {#if summary}
     {#if embedded}
-      <div class="section-actions embedded-profile-actions">
-        <button class="secondary-button" title={$t("common.createConfig")} on:click={createProfileForCurrentTool}>
+      <div class={cx(sectionActionsRecipe(), embeddedProfileActionsClass)}>
+        <button class={actionButtonRecipe()} title={$t("common.createConfig")} on:click={createProfileForCurrentTool}>
           <AppIcon name="add" size={16} />
           {$t("common.createConfig")}
         </button>
       </div>
     {/if}
-    <div class="profile-mode-layout">
+    <div class={profileModeLayoutRecipe()}>
       {#if profileToolGroups.length > 0}
-        <section class="panel-band profile-tool-switcher" aria-label={$t("profiles.toolSwitcherLabel")}>
-          <div class="profile-tool-tabs" role="tablist">
+        <section class={profileToolSwitcherRecipe()} aria-label={$t("profiles.toolSwitcherLabel")}>
+          <div class={profileToolTabsRecipe()} role="tablist">
             {#each profileToolGroups as group}
               {@const activeGroupProfile = group.profiles.find((profile) => profile.id === group.activeProfileId) ?? null}
               <button
                 type="button"
-                class:selected={selectedToolId === group.id}
+                data-selected={selectedToolId === group.id}
                 role="tab"
                 aria-selected={selectedToolId === group.id}
                 title={group.label}
@@ -1746,9 +1833,9 @@
         </section>
 
         {#if selectedProfileGroup}
-          <section class="panel-band profile-tool-section">
+          <section class={profileToolSectionRecipe()}>
             <div
-              class="profile-grid"
+              class={profileGridRecipe()}
               role="list"
               use:dragHandleZone={{
                 items: displayedProfiles,
@@ -1768,22 +1855,23 @@
                 {@const cardActionKey = actionKey(profile.id, profile.mode)}
                 {@const profileIcon = profileIconValue(profile)}
                 <div
-                  class:sortable-active-row={sortableActiveId === profile.id}
-                  class="profile-sortable-row"
+                  class={profileSortableRowRecipe()}
                   role="listitem"
                   data-profile-sortable-id={profile.id}
+                  data-sortable-active={sortableActiveId === profile.id}
                   data-is-dnd-shadow-item-hint={profileIsDndShadow(profile)}
                   animate:flip={{ duration: profileFlipDurationMs }}
                 >
                 <article
-                  class:active-profile={isActive}
-                  class:builtin-profile={profile.isBuiltin}
-                  class:sortable-active-card={sortableActiveId === profile.id}
-                  class="profile-card compact-profile-card"
+                  class={profileCardRecipe()}
+                  data-profile-card
+                  data-active={isActive}
+                  data-builtin={profile.isBuiltin}
+                  data-drag-active={sortableActiveId === profile.id}
                 >
-                  <div class="profile-card-main">
+                  <div class={profileCardMainRecipe()}>
                     <span
-                      class="profile-drag-handle"
+                      class={profileDragHandleRecipe()}
                       aria-label={$t("profiles.dragHandle")}
                       aria-disabled={!profileCanSort()}
                       data-profile-drag-handle={profile.id}
@@ -1791,7 +1879,7 @@
                     >
                       <AppIcon name="drag" size={16} />
                     </span>
-                    <div class="profile-avatar" aria-hidden="true">
+                    <div class={profileAvatarRecipe()} data-profile-avatar aria-hidden="true">
                       {#if profileUsesToolIcon(profile)}
                         <ToolIcon toolId={profile.app} label={profileDisplayName(profile)} variant="choice" />
                       {:else if profileIconIsImage(profileIcon)}
@@ -1800,25 +1888,25 @@
                         <span>{profileIcon}</span>
                       {/if}
                     </div>
-                    <div class="profile-identity">
+                    <div class={profileIdentityRecipe()}>
                       <h2>{profileDisplayName(profile)}</h2>
                       <p>{profileUrlLabel(profile)}</p>
                       {#if profileRemarkLabel(profile)}
-                        <p class="profile-remark">{profileRemarkLabel(profile)}</p>
+                        <p data-profile-remark>{profileRemarkLabel(profile)}</p>
                       {/if}
                     </div>
                   </div>
                   {#if profile.isBuiltin}
-                    <div class="profile-card-status">
+                    <div class={profileCardStatusRecipe()}>
                       <StatusPill
                         status="info"
                         label={$t("profiles.builtinOfficial")}
                       />
                     </div>
                   {/if}
-                  <div class="card-actions">
+                  <div class={profileCardActionsRecipe()}>
                     <button
-                      class="primary-button"
+                      class={actionButtonRecipe({ tone: "primary" })}
                       disabled={isActive || applyingId !== null}
                       title={isActive ? $t("profiles.alreadyActiveProfile") : $t("profiles.previewModeApply", { name: profile.name, mode: applyModeLabel(profile.mode) })}
                       on:click={() => openApply(profile)}
@@ -1832,7 +1920,7 @@
                     </button>
                     {#if profileCanOpenUsage(profile)}
                       <button
-                        class="icon-button"
+                        class={iconButtonRecipe()}
                         title={$t("profiles.usage.open")}
                         disabled={usageBusy !== null || applyingId !== null || editingId !== null}
                         on:click={() => openUsage(profile)}
@@ -1841,27 +1929,27 @@
                       </button>
                     {/if}
                     {#if !profile.isBuiltin}
-                      <button class="icon-button" title={$t("profiles.editProfile")} disabled={duplicatingId !== null || deletingId !== null} on:click={() => openEdit(profile)}><AppIcon name="edit" size={16} /></button>
+                      <button class={iconButtonRecipe()} title={$t("profiles.editProfile")} disabled={duplicatingId !== null || deletingId !== null} on:click={() => openEdit(profile)}><AppIcon name="edit" size={16} /></button>
                       <button
-                        class="icon-button"
+                        class={iconButtonRecipe()}
                         title={$t("profiles.duplicateProfile")}
                         disabled={duplicatingId !== null || deletingId !== null || applyingId !== null || editingId !== null}
                         on:click={() => handleDuplicate(profile)}
                       >
                         {#if duplicatingId === profile.id}
-                          <AppIcon name="loading" class="spin" size={16} />
+                          <AppIcon name="loading" class={spinRecipe()} size={16} />
                         {:else}
                           <AppIcon name="copy" size={16} />
                         {/if}
                       </button>
                       <button
-                        class="icon-button danger"
+                        class={iconButtonRecipe({ danger: true })}
                         title={$t("profiles.deleteProfile")}
                         disabled={duplicatingId !== null || deletingId !== null || applyingId !== null || editingId !== null}
                         on:click={() => openDelete(profile)}
                       >
                         {#if deletingId === profile.id}
-                          <AppIcon name="loading" class="spin" size={16} />
+                          <AppIcon name="loading" class={spinRecipe()} size={16} />
                         {:else}
                           <AppIcon name="delete" size={16} />
                         {/if}
@@ -1875,40 +1963,40 @@
           </section>
         {/if}
       {:else}
-        <section class="panel-band">
-          <div class="empty-row">{$t(emptyProfilesMessageKey(summary, visibleProfileCount, installedProfileToolIds))}</div>
+        <section class={panelRecipe()}>
+          <div class={emptyRowRecipe()}>{$t(emptyProfilesMessageKey(summary, visibleProfileCount, installedProfileToolIds))}</div>
         </section>
       {/if}
     </div>
   {:else}
-    <section class="panel-band">
-      <div class="empty-row">{$t("profiles.noProfiles")}</div>
+    <section class={panelRecipe()}>
+      <div class={emptyRowRecipe()}>{$t("profiles.noProfiles")}</div>
     </section>
   {/if}
 
   {#if pendingUsageProfile}
-    <div class="modal-backdrop" role="presentation">
-      <div class="modal-panel usage-modal" role="dialog" aria-modal="true" aria-labelledby="usage-title">
-        <div class="modal-body">
+    <div class={desktopClientModalBackdropRecipe()} role="presentation">
+      <div class={cx(desktopClientModalPanelRecipe(), usageModalPanelClass)} role="dialog" aria-modal="true" aria-labelledby="usage-title">
+        <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class="eyebrow">{$t("profiles.usage.eyebrow")}</span>
+          <span class={eyebrowRecipe()}>{$t("profiles.usage.eyebrow")}</span>
           <h2 id="usage-title">{$t("profiles.usage.title", { name: pendingUsageProfile.name })}</h2>
         </div>
 
         {#if usageError}
-          <div class="inline-error">{usageError}</div>
+          <div class={profileInlineNoticeRecipe({ tone: "error" })}>{usageError}</div>
         {/if}
         {#if usageMessage}
-          <div class="inline-success">{usageMessage}</div>
+          <div class={profileInlineNoticeRecipe({ tone: "success" })}>{usageMessage}</div>
         {/if}
 
         {#if usageBusy === "load"}
-          <div class="empty-row">
-            <AppIcon name="loading" class="spin" size={18} />
+          <div class={cx(emptyRowRecipe(), inlineEmptyClass)}>
+            <AppIcon name="loading" class={spinRecipe()} size={18} />
             {$t("common.loading")}
           </div>
         {:else}
-          <label class="native-write-toggle usage-toggle">
+          <label class={cx(nativeToggleRecipe(), usageToggleClass)} data-native-toggle>
             <input type="checkbox" bind:checked={usageForm.enabled} disabled={usageBusy !== null} />
             <span>
               <strong>{$t("profiles.usage.enabled")}</strong>
@@ -1917,7 +2005,7 @@
           </label>
 
           {#if pendingUsageIsCodexOfficialOAuth}
-            <div class="usage-official-panel">
+            <div class={profileUsageOfficialPanelRecipe()}>
               <AppIcon name="stats" size={18} />
               <div>
                 <strong>{$t("profiles.usage.officialOAuth")}</strong>
@@ -1925,11 +2013,11 @@
               </div>
             </div>
           {:else}
-            <div class="usage-template-row">
+            <div class={profileUsageTemplateRowRecipe()}>
               {#each usageTemplateOptions as option}
                 <button
                   type="button"
-                  class:selected={usageForm.templateType === option.id}
+                  data-selected={usageForm.templateType === option.id}
                   disabled={usageBusy !== null}
                   on:click={() => selectUsageTemplate(option.id)}
                 >
@@ -1938,7 +2026,7 @@
               {/each}
             </div>
 
-            <div class="form-grid edit-profile-form usage-form">
+            <div class={profileFormGridRecipe({ columns: "double" })}>
               <label>
                 {$t("wizard.providerBaseUrl")}
                 <input
@@ -1977,14 +2065,14 @@
               </label>
             </div>
 
-            <label class="usage-code-field">
+            <label class={profileUsageCodeFieldRecipe()}>
               <span>{$t("profiles.usage.script")}</span>
               <textarea bind:value={usageForm.code} disabled={usageBusy !== null} spellcheck="false"></textarea>
             </label>
           {/if}
 
-          <section class="native-diff usage-result-panel">
-            <div class="native-diff-heading">
+          <section class={profileDiffPanelRecipe()}>
+            <div class={profileDiffHeadingRecipe()}>
               <div>
                 <strong>{$t("profiles.usage.resultTitle")}</strong>
                 <span>{$t("profiles.usage.queriedAt", { time: usageQueriedAt(usageResult) })}</span>
@@ -1992,9 +2080,9 @@
               <StatusPill status={usageResult?.success ? "ok" : "info"} label={usageResult?.success ? $t("common.ok") : $t("profiles.usage.noResult")} />
             </div>
             {#if usageResult?.data.length}
-              <div class="usage-result-grid">
+              <div class={profileUsageResultGridRecipe()}>
                 {#each usageResult.data as item, index}
-                  <div class="usage-result-card" class:invalid-usage={item.isValid === false}>
+                  <div class={profileUsageResultCardRecipe()} data-invalid={item.isValid === false}>
                     <strong>{usageItemTitle(item, index)}</strong>
                     {#if item.isValid === false}
                       <span>{item.invalidMessage ?? $t("profiles.usage.invalid")}</span>
@@ -2002,7 +2090,7 @@
                     <dl>
                       <div>
                         <dt>{$t("profiles.usage.remaining")}</dt>
-                        <dd class="usage-balance-value">{formatUsageValue(item.remaining, item.unit)}</dd>
+                        <dd data-usage-balance>{formatUsageValue(item.remaining, item.unit)}</dd>
                       </div>
                       <div>
                         <dt>{$t("profiles.usage.used")}</dt>
@@ -2020,21 +2108,21 @@
                 {/each}
               </div>
             {:else}
-              <div class="empty-row">{$t("profiles.usage.emptyResult")}</div>
+              <div class={emptyRowRecipe()}>{$t("profiles.usage.emptyResult")}</div>
             {/if}
           </section>
         {/if}
 
         </div>
 
-        <div class="modal-actions">
-          <button class="secondary-button" disabled={usageBusy !== null} on:click={closeUsage}>
+        <div class={desktopClientModalActionsRecipe()}>
+          <button class={actionButtonRecipe()} disabled={usageBusy !== null} on:click={closeUsage}>
             {$t("common.close")}
           </button>
           {#if usageState?.config && !pendingUsageIsCodexOfficialOAuth}
-            <button class="secondary-button danger-action" disabled={usageBusy !== null} on:click={handleUsageDelete}>
+            <button class={cx(actionButtonRecipe(), dangerButtonClass)} disabled={usageBusy !== null} on:click={handleUsageDelete}>
               {#if usageBusy === "delete"}
-                <AppIcon name="loading" class="spin" size={16} />
+                <AppIcon name="loading" class={spinRecipe()} size={16} />
               {:else}
                 <AppIcon name="delete" size={16} />
               {/if}
@@ -2042,9 +2130,9 @@
             </button>
           {/if}
           {#if !pendingUsageIsCodexOfficialOAuth}
-            <button class="secondary-button" disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageTest}>
+            <button class={actionButtonRecipe()} disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageTest}>
               {#if usageBusy === "test"}
-                <AppIcon name="loading" class="spin" size={16} />
+                <AppIcon name="loading" class={spinRecipe()} size={16} />
               {:else}
                 <AppIcon name="play" size={16} />
               {/if}
@@ -2052,20 +2140,20 @@
             </button>
           {/if}
           <button
-            class={pendingUsageIsCodexOfficialOAuth ? "primary-button" : "secondary-button"}
+            class={actionButtonRecipe({ tone: pendingUsageIsCodexOfficialOAuth ? "primary" : "secondary" })}
             disabled={!usageState?.config?.enabled || usageBusy !== null}
             on:click={handleUsageQuery}
           >
             {#if usageBusy === "query"}
-              <AppIcon name="loading" class="spin" size={16} />
+              <AppIcon name="loading" class={spinRecipe()} size={16} />
             {:else}
               <AppIcon name="stats" size={16} />
             {/if}
             {$t("profiles.usage.query")}
           </button>
-          <button class="primary-button" disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageSave}>
+          <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageSave}>
             {#if usageBusy === "save"}
-              <AppIcon name="loading" class="spin" size={16} />
+              <AppIcon name="loading" class={spinRecipe()} size={16} />
               {$t("common.saving")}
             {:else}
               <AppIcon name="apply" size={16} />
@@ -2078,21 +2166,21 @@
   {/if}
 
   {#if pendingEdit}
-    <div class="modal-backdrop" role="presentation">
-      <div class="modal-panel wide-modal" role="dialog" aria-modal="true" aria-labelledby="edit-title">
-        <div class="modal-body">
+    <div class={desktopClientModalBackdropRecipe()} role="presentation">
+      <div class={cx(desktopClientModalPanelRecipe(), modalPanelWideClass)} role="dialog" aria-modal="true" aria-labelledby="edit-title">
+        <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class="eyebrow">{$t("profiles.editEyebrow")}</span>
+          <span class={eyebrowRecipe()}>{$t("profiles.editEyebrow")}</span>
           <h2 id="edit-title">{$t("profiles.editTitle", { name: pendingEdit.name })}</h2>
           <p>{$t("profiles.editDescription")}</p>
         </div>
 
         {#if editError}
-          <div class="inline-error">{editError}</div>
+          <div class={profileInlineNoticeRecipe({ tone: "error" })}>{editError}</div>
         {/if}
 
-        <div class="profile-icon-editor">
-          <div class="profile-avatar large" aria-hidden="true">
+        <div class={profileIconEditorRecipe()}>
+          <div class={profileAvatarRecipe({ size: "large" })} aria-hidden="true">
             {#if profileIconIsImage(editForm.icon.trim())}
               <img src={editForm.icon.trim()} alt="" />
             {:else}
@@ -2107,22 +2195,22 @@
               placeholder={$t("profiles.iconPlaceholder")}
             />
             {#if editIconTooLong}
-              <small class="field-error">{$t("profiles.iconTooLong")}</small>
+              <small class={profileFieldErrorRecipe()}>{$t("profiles.iconTooLong")}</small>
             {/if}
           </label>
-          <div class="profile-icon-actions">
-            <button class="secondary-button" type="button" disabled={editingId !== null} on:click={triggerProfileIconImport}>
+          <div class={profileIconActionsRecipe()}>
+            <button class={actionButtonRecipe()} type="button" disabled={editingId !== null} on:click={triggerProfileIconImport}>
               <AppIcon name="upload" size={16} />
               {$t("profiles.iconImport")}
             </button>
-            <button class="secondary-button" type="button" disabled={editingId !== null || editForm.icon.trim().length === 0} on:click={() => (editForm = { ...editForm, icon: "" })}>
+            <button class={actionButtonRecipe()} type="button" disabled={editingId !== null || editForm.icon.trim().length === 0} on:click={() => (editForm = { ...editForm, icon: "" })}>
               {$t("profiles.iconUseDefault")}
             </button>
             <input bind:this={profileIconInput} type="file" accept="image/*" on:change={handleProfileIconImport} />
           </div>
         </div>
 
-        <div class="form-grid edit-profile-form">
+        <div class={profileFormGridRecipe({ columns: "double" })}>
           <label>
             {$t("wizard.profileName")}
             <input bind:value={editForm.name} disabled={editingId !== null} />
@@ -2165,7 +2253,7 @@
                 on:blur={normalizeEditBaseUrlInput}
               />
               {#if editBaseUrlErrorKey}
-                <small class="field-error">{$t(editBaseUrlErrorKey)}</small>
+                <small class={profileFieldErrorRecipe()}>{$t(editBaseUrlErrorKey)}</small>
               {/if}
             </label>
           {/if}
@@ -2184,13 +2272,13 @@
 
         </div>
 
-        <div class="modal-actions">
-          <button class="secondary-button" disabled={editingId !== null} on:click={closeEdit}>
+        <div class={desktopClientModalActionsRecipe()}>
+          <button class={actionButtonRecipe()} disabled={editingId !== null} on:click={closeEdit}>
             {$t("common.cancel")}
           </button>
-          <button class="primary-button" disabled={!canSaveEdit} on:click={handleEditSave}>
+          <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canSaveEdit} on:click={handleEditSave}>
             {#if editingId === pendingEdit.id}
-              <AppIcon name="loading" class="spin" size={16} />
+              <AppIcon name="loading" class={spinRecipe()} size={16} />
               {$t("common.saving")}
             {:else}
               <AppIcon name="edit" size={16} />
@@ -2203,24 +2291,24 @@
   {/if}
 
   {#if pendingDelete}
-    <div class="modal-backdrop" role="presentation">
-      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="delete-title">
-        <div class="modal-body">
+    <div class={desktopClientModalBackdropRecipe()} role="presentation">
+      <div class={desktopClientModalPanelRecipe()} role="dialog" aria-modal="true" aria-labelledby="delete-title">
+        <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class="eyebrow">{$t("profiles.deleteEyebrow")}</span>
+          <span class={eyebrowRecipe()}>{$t("profiles.deleteEyebrow")}</span>
           <h2 id="delete-title">{$t("profiles.deleteTitle", { name: pendingDelete.name })}</h2>
           <p>{$t("profiles.deleteDescription")}</p>
         </div>
 
         </div>
 
-        <div class="modal-actions">
-          <button class="secondary-button" disabled={deletingId !== null} on:click={closeDelete}>
+        <div class={desktopClientModalActionsRecipe()}>
+          <button class={actionButtonRecipe()} disabled={deletingId !== null} on:click={closeDelete}>
             {$t("common.cancel")}
           </button>
-          <button class="primary-button danger-action" disabled={deletingId !== null} on:click={handleDeleteConfirm}>
+          <button class={cx(actionButtonRecipe({ tone: "primary" }), dangerButtonClass)} disabled={deletingId !== null} on:click={handleDeleteConfirm}>
             {#if deletingId === pendingDelete.id}
-              <AppIcon name="loading" class="spin" size={16} />
+              <AppIcon name="loading" class={spinRecipe()} size={16} />
               {$t("profiles.deleting")}
             {:else}
               <AppIcon name="delete" size={16} />
@@ -2233,20 +2321,20 @@
   {/if}
 
   {#if pendingApply}
-    <div class="modal-backdrop" role="presentation">
-      <div class="modal-panel wide-modal" role="dialog" aria-modal="true" aria-labelledby="apply-title">
-        <div class="modal-body">
+    <div class={desktopClientModalBackdropRecipe()} role="presentation">
+      <div class={cx(desktopClientModalPanelRecipe(), modalPanelWideClass)} role="dialog" aria-modal="true" aria-labelledby="apply-title">
+        <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class="eyebrow">{$t("profiles.applyEyebrow")}</span>
+          <span class={eyebrowRecipe()}>{$t("profiles.applyEyebrow")}</span>
           <h2 id="apply-title">{$t("profiles.applyTitle", { name: pendingApply.name })}</h2>
         </div>
 
         {#if applyError}
-          <div class="inline-error">{applyError}</div>
+          <div class={profileInlineNoticeRecipe({ tone: "error" })}>{applyError}</div>
         {/if}
 
         {#if applyResult}
-          <div class="inline-success">
+          <div class={profileInlineNoticeRecipe({ tone: "success" })}>
             {$t("profiles.applySuccess", { id: applyResult.backup.id })}
             {#if applyResult.nativeVerified && applyResult.nativePath}
               {$t("profiles.codexConfigVerified", { path: applyResult.nativePath })}
@@ -2262,22 +2350,22 @@
 
         {#if applyPreview}
           {#if applyEnvConflicts.length > 0}
-            <section class="native-diff env-conflict-panel">
-              <div class="native-diff-heading">
+            <section class={profileDiffPanelRecipe({ tone: "warning" })}>
+              <div class={profileDiffHeadingRecipe()}>
                 <div>
                   <strong>{$t("envConflict.title")}</strong>
                   <span>{$t("envConflict.applyDescription", { count: applyEnvConflicts.length })}</span>
                 </div>
-                <button class="secondary-button" disabled={clearingEnvConflict || applyingId !== null} on:click={clearApplyEnvConflicts}>
+                <button class={actionButtonRecipe()} disabled={clearingEnvConflict || applyingId !== null} on:click={clearApplyEnvConflicts}>
                   {#if clearingEnvConflict}
-                    <AppIcon name="loading" class="spin" size={16} />
+                    <AppIcon name="loading" class={spinRecipe()} size={16} />
                   {:else}
                     <AppIcon name="repair" size={16} />
                   {/if}
                   {$t("envConflict.clearAction")}
                 </button>
               </div>
-              <div class="preview-list compact-conflict-list">
+              <div class={cx(desktopClientPreviewListRecipe(), conflictPreviewListClass)}>
                 {#each applyEnvConflicts as conflict}
                   <div>
                     <strong>{conflict.variable} / {conflict.scope}</strong>
@@ -2290,8 +2378,8 @@
           {/if}
 
           {#if pendingApplyDisplacesCodexOAuth}
-            <section class="native-diff auth-conflict-panel">
-              <div class="native-diff-heading">
+            <section class={profileDiffPanelRecipe({ tone: "warning" })}>
+              <div class={profileDiffHeadingRecipe()}>
                 <div>
                   <strong>{$t("profiles.codexOAuthConflictTitle")}</strong>
                   <span>{$t("profiles.codexOAuthApiDisplacesOAuth")}</span>
@@ -2302,13 +2390,13 @@
           {/if}
 
           {#if selectedModePreview?.blockedReason || canSyncClaudeVsCodePlugin}
-          <section class="native-diff">
+          <section class={profileDiffPanelRecipe()}>
             {#if selectedModePreview?.blockedReason}
-              <div class="inline-error">{previewTextLabel(selectedModePreview.blockedReason)}</div>
+              <div class={profileInlineNoticeRecipe({ tone: "error" })}>{previewTextLabel(selectedModePreview.blockedReason)}</div>
             {/if}
 
             {#if canSyncClaudeVsCodePlugin}
-              <label class="native-write-toggle">
+              <label class={nativeToggleRecipe()} data-native-toggle>
                 <input type="checkbox" bind:checked={syncClaudeVsCodePlugin} disabled={applyingId !== null} />
                 <span>
                   <strong>{$t("profiles.syncClaudeVsCode")}</strong>
@@ -2320,8 +2408,8 @@
           {/if}
 
           {#if selectedNativeDiffVisible && selectedNativeDiff}
-            <section class="native-diff">
-              <div class="native-diff-heading">
+            <section class={profileDiffPanelRecipe()}>
+              <div class={profileDiffHeadingRecipe()}>
                 <div>
                   <strong>{$t("profiles.modificationPreview")}</strong>
                   <span>{selectedNativeDiff.path}</span>
@@ -2329,9 +2417,9 @@
                 <StatusPill status="info" label={selectedNativeDiff.writeEnabled ? $t("common.writeEnabled") : $t("common.readOnly")} />
               </div>
 
-              <div class="native-diff-list">
+              <div class={profileDiffListRecipe()}>
                 {#each selectedNativeDiff.changes as change}
-                  <div class="native-diff-row">
+                  <div class={profileDiffRowRecipe()}>
                     <span>{nativeDiffActionLabel(change.action)}</span>
                     <code>{change.key}</code>
                     <div>
@@ -2348,7 +2436,7 @@
               </div>
 
               {#if selectedNativeDiff.content}
-                <div class="write-content-preview">
+                <div class={profileWriteContentPreviewRecipe()}>
                   <strong>{$t("profiles.writeContentPreview")}</strong>
                   <pre>{selectedNativeDiff.content}</pre>
                 </div>
@@ -2356,27 +2444,27 @@
             </section>
           {/if}
         {:else if applyingId === actionKey(pendingApply.id, pendingApplyMode)}
-          <div class="empty-row">
-            <AppIcon name="loading" class="spin" size={18} />
+          <div class={cx(emptyRowRecipe(), inlineEmptyClass)}>
+            <AppIcon name="loading" class={spinRecipe()} size={18} />
             {$t("common.loading")}
           </div>
         {/if}
 
         </div>
 
-        <div class="modal-actions">
-          <button class="secondary-button" disabled={applyingId !== null} on:click={closeApply}>
+        <div class={desktopClientModalActionsRecipe()}>
+          <button class={actionButtonRecipe()} disabled={applyingId !== null} on:click={closeApply}>
             {applyResult ? $t("common.close") : $t("common.cancel")}
           </button>
           {#if !applyResult}
             {#if selectedApplyMode === "config" && selectedModePreview?.writesNativeConfig}
               <button
-                class="secondary-button"
+                class={actionButtonRecipe()}
                 disabled={applyingId !== null || !applyPreview?.canApply || !selectedModeSupported}
                 on:click={() => handleApplyWithOptions(pendingApply!.id, true)}
               >
                 {#if applyingId === actionKey(pendingApply.id, selectedApplyMode, true, canSyncClaudeVsCodePlugin && syncClaudeVsCodePlugin)}
-                  <AppIcon name="loading" class="spin" size={16} />
+                  <AppIcon name="loading" class={spinRecipe()} size={16} />
                   {$t("common.loading")}
                 {:else}
                   <AppIcon name="apply" size={16} />
@@ -2385,12 +2473,12 @@
               </button>
             {/if}
             <button
-              class="primary-button"
+              class={actionButtonRecipe({ tone: "primary" })}
               disabled={applyingId !== null || !applyPreview?.canApply || !selectedModeSupported}
               on:click={() => handleApplyWithOptions(pendingApply!.id)}
             >
               {#if applyingId === actionKey(pendingApply.id, selectedApplyMode, false, canSyncClaudeVsCodePlugin && syncClaudeVsCodePlugin)}
-                <AppIcon name="loading" class="spin" size={16} />
+                <AppIcon name="loading" class={spinRecipe()} size={16} />
                 {$t("common.loading")}
               {:else}
                 <AppIcon name="apply" size={16} />

@@ -1,10 +1,15 @@
 <script lang="ts">
+  import { statusPillRecipe } from "../../styled-system/recipes";
   import { t } from "../lib/i18n";
   import type { Severity } from "../types";
   import AppIcon from "./AppIcon.svelte";
 
+  type PillTone = "good" | "bad" | "warn" | "info";
+
   export let status: Severity | "installed" | "missing" | "configured" | "unconfigured" | "not_applicable" | "unknown";
   export let label: string;
+
+  let tone: PillTone = "info";
 
   $: tone =
     status === "ok" || status === "installed" || status === "configured"
@@ -16,7 +21,7 @@
           : "info";
 </script>
 
-<span class={`pill ${tone}`}>
+<span class={statusPillRecipe({ tone })}>
   {#if tone === "good"}
     <AppIcon name="check" size={14} />
   {:else if tone === "bad"}

@@ -541,10 +541,7 @@ fn launch_macos_claude_desktop_localized() -> Result<(), String> {
                 Err("Failed to launch Claude Desktop.".to_string())
             }
         })?;
-    enable_macos_claude_main_process_debugger()?;
-    retry_inject_localization().map(|_| ()).map_err(|err| {
-        format!("Claude macOS localization inspector opened, but injection failed: {err}")
-    })?;
+    spawn_silent_localization_injector();
     Ok(())
 }
 
@@ -2734,15 +2731,9 @@ fn launch_macos_claude_desktop_plain_restart() -> Result<(), String> {
     hidden_command("sh")
         .arg("-c")
         .arg(macos_plain_launch_script())
-        .status()
+        .spawn()
         .map_err(|err| format!("Failed to restart Claude Desktop: {err}"))
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err("Failed to restart Claude Desktop.".to_string())
-            }
-        })
+        .map(|_| ())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -3362,6 +3353,15 @@ fn build_main_process_injection_source_for_paths(
       const roleKey = (item) => {{
         try {{ return String(item?.role || "").replace(/[^a-z0-9]/gi, "").toLowerCase(); }} catch (_) {{ return ""; }}
       }};
+      const menuLabelKey = (label) => {{
+        try {{ return String(label || "").replace(/&/g, "").replace(/\t.*$/, "").trim(); }} catch (_) {{ return ""; }}
+      }};
+      const translateDynamicMenuLabel = (label) => {{
+        const key = menuLabelKey(label);
+        const restartPrefix = "Restart to update to ";
+        if (key.startsWith(restartPrefix)) return "\u91cd\u65b0\u542f\u52a8\u4ee5\u66f4\u65b0\u5230 " + key.slice(restartPrefix.length);
+        return "";
+      }};
       const loadLocaleCatalog = (target) => {{
         const idToVal = {{}};
         try {{
@@ -3376,6 +3376,8 @@ fn build_main_process_injection_source_for_paths(
       const translateLabel = (label, id, role) => {{
         if (typeof label !== "string" || !label) return label;
         if (role && menuRoleZh[role]) return menuRoleZh[role];
+        const dynamic = translateDynamicMenuLabel(label);
+        if (dynamic) return dynamic;
         if (id && enToZh[label]) return enToZh[label];
         if (id && zhLocaleObj[id]) return zhLocaleObj[id];
         if (menuHardcodedZh[label]) return menuHardcodedZh[label];
@@ -3476,21 +3478,77 @@ fn build_main_process_injection_source_for_paths(
           quit: "\u9000\u51fa Claude",
           settings: "\u8bbe\u7f6e"
         }};
+        let enToZh = {{}};
+        let labelToId = {{}};
+        let zhValToId = {{}};
+        let zhLocaleObj = {{}};
+        const rememberCatalog = (catalog) => {{
+          try {{
+            for (const key in catalog) {{
+              const value = catalog[key];
+              if (typeof value === "string" && value && !(value in labelToId)) labelToId[value] = key;
+            }}
+          }} catch (_) {{}}
+        }};
+        try {{
+          const path = requireFromMain("path");
+          const enObj = JSON.parse(fs.readFileSync(path.join(process.resourcesPath, "en-US.json"), "utf8"));
+          const zhObj = JSON.parse(shellLocale);
+          zhLocaleObj = zhObj;
+          for (const key in enObj) if (zhObj[key]) enToZh[enObj[key]] = zhObj[key];
+          for (const key in zhObj) if (typeof zhObj[key] === "string" && !(zhObj[key] in zhValToId)) zhValToId[zhObj[key]] = key;
+          rememberCatalog(enObj);
+          rememberCatalog(zhObj);
+          try {{
+            for (const name of fs.readdirSync(process.resourcesPath)) {{
+              if (!/^[a-z]{{2}}(?:-[A-Z0-9]{{2,4}})?\\.json$/.test(name)) continue;
+              if (name === "en-US.json" || name === "zh-CN.json") continue;
+              try {{ rememberCatalog(JSON.parse(fs.readFileSync(path.join(process.resourcesPath, name), "utf8"))); }} catch (_) {{}}
+            }}
+          }} catch (_) {{}}
+        }} catch (_) {{}}
         const roleKey = (item) => {{
           try {{ return String(item?.role || "").replace(/[^a-z0-9]/gi, "").toLowerCase(); }} catch (_) {{ return ""; }}
         }};
         const labelKey = (label) => {{
           try {{ return String(label || "").replace(/&/g, "").replace(/\t.*$/, "").trim(); }} catch (_) {{ return ""; }}
         }};
-        const translateLabel = (label, role) => {{
+        const labelMessageId = (label) => {{
+          if (typeof label !== "string" || !label) return "";
+          return labelToId[label] || zhValToId[label] || labelToId[labelKey(label)] || "";
+        }};
+        const loadLocaleCatalog = (target) => {{
+          const idToVal = {{}};
+          try {{
+            if (!target || target === "zh-CN") return idToVal;
+            const path = requireFromMain("path");
+            const tobj = JSON.parse(fs.readFileSync(path.join(process.resourcesPath, target + ".json"), "utf8"));
+            rememberCatalog(tobj);
+            for (const key in tobj) if (tobj[key]) idToVal[key] = tobj[key];
+          }} catch (_) {{}}
+          return idToVal;
+        }};
+        const translateDynamicMenuLabel = (label) => {{
+          const key = labelKey(label);
+          const restartPrefix = "Restart to update to ";
+          if (key.startsWith(restartPrefix)) return "\u91cd\u65b0\u542f\u52a8\u4ee5\u66f4\u65b0\u5230 " + key.slice(restartPrefix.length);
+          return "";
+        }};
+        const translateLabel = (label, id, role) => {{
           if (typeof label !== "string" || !label) return label;
           if (role && menuRoleZh[role]) return menuRoleZh[role];
+          const dynamic = translateDynamicMenuLabel(label);
+          if (dynamic) return dynamic;
+          if (id && enToZh[label]) return enToZh[label];
+          if (id && zhLocaleObj[id]) return zhLocaleObj[id];
           if (menuHardcodedZh[label]) return menuHardcodedZh[label];
           const key = labelKey(label);
+          if (enToZh[label]) return enToZh[label];
           if (menuHardcodedZh[key]) return menuHardcodedZh[key];
+          if (enToZh[key]) return enToZh[key];
           return label;
         }};
-        const relabelMenuItems = (menu, target) => {{
+        const relabelMenuItems = (menu, target, idToVal = {{}}) => {{
           if (!menu || !menu.items) return;
           for (const item of menu.items) {{
             try {{
@@ -3498,21 +3556,26 @@ fn build_main_process_injection_source_for_paths(
                 const base = item.__cslOrig === undefined ? item.label : item.__cslOrig;
                 if (item.__cslOrig === undefined) item.__cslOrig = zhHardcodedToEn[base] || base;
                 const orig = item.__cslOrig;
-                item.label = target === "zh-CN" ? translateLabel(orig, roleKey(item)) : (zhHardcodedToEn[orig] || orig);
+                if (item.__cslMessageId === undefined) item.__cslMessageId = labelMessageId(orig) || labelMessageId(item.label);
+                if (target === "zh-CN") item.label = translateLabel(orig, item.__cslMessageId, roleKey(item));
+                else {{
+                  const id = item.__cslMessageId || labelMessageId(orig);
+                  item.label = id && idToVal[id] ? idToVal[id] : (zhHardcodedToEn[orig] || orig);
+                }}
               }}
-              if (item.submenu) relabelMenuItems(item.submenu, target);
+              if (item.submenu) relabelMenuItems(item.submenu, target, idToVal);
             }} catch (_) {{}}
           }}
         }};
         const translateMenuItems = (menu) => {{
           if (!menu || !menu.items || !zhActive()) return menu;
-          relabelMenuItems(menu, "zh-CN");
+          relabelMenuItems(menu, "zh-CN", {{}});
           return menu;
         }};
         const localizeMenuForCurrentLocale = (menu) => {{
           try {{
             if (menu && menu.items) {{
-              relabelMenuItems(menu, currentLocale);
+              relabelMenuItems(menu, currentLocale, loadLocaleCatalog(currentLocale));
               translateMenuItems(menu);
             }}
           }} catch (_) {{}}

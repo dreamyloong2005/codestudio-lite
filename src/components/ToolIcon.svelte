@@ -1,25 +1,28 @@
 <script lang="ts">
   import AppIcon from "./AppIcon.svelte";
+  import { toolIconRecipe } from "../../styled-system/recipes";
 
   export let toolId: string | null | undefined = null;
   export let label = "";
   export let category: "ai_tool" | "system" | string | null | undefined = null;
   export let variant: "card" | "choice" | "heading" = "card";
 
+  type ToolIconTone = "default" | "light" | "codex" | "claude" | "gemini" | "openclaw" | "vscode" | "codex-app" | "hermes";
+
   type IconDef = {
     src: string;
-    tone: string;
+    tone: ToolIconTone;
   };
 
   const iconMap: Record<string, IconDef> = {
     codex: { src: "/tool-icons/codex.svg", tone: "codex" },
     "codex-app": { src: "/tool-icons/codex-app.png", tone: "codex-app" },
-    "codex-vscode": { src: "/tool-icons/codex-vscode.svg", tone: "codex" },
+    "codex-vscode": { src: "/tool-icons/codex-vscode.svg", tone: "vscode" },
     claude: { src: "/tool-icons/claude-code.svg", tone: "claude" },
     "claude-desktop": { src: "/tool-icons/claude-desktop.svg", tone: "claude" },
-    "claude-vscode": { src: "/tool-icons/claude-vscode.svg", tone: "light" },
+    "claude-vscode": { src: "/tool-icons/claude-vscode.svg", tone: "vscode" },
     gemini: { src: "/tool-icons/gemini-cli.svg", tone: "gemini" },
-    "gemini-code-assist": { src: "/tool-icons/gemini-code-assist.svg", tone: "gemini" },
+    "gemini-code-assist": { src: "/tool-icons/gemini-code-assist.svg", tone: "vscode" },
     opencode: { src: "/tool-icons/opencode.svg", tone: "light" },
     openclaw: { src: "/tool-icons/openclaw.svg", tone: "openclaw" },
     hermes: { src: "/tool-icons/hermes.png", tone: "hermes" },
@@ -75,16 +78,14 @@
 
   $: iconKey = canonicalIconId(toolId);
   $: icon = iconMap[iconKey];
+  $: iconTone = icon?.tone ?? "default";
   $: accessibleLabel = label || iconKey || "Tool";
 </script>
 
 <span
-  class:tool-icon-card={variant === "card"}
-  class:tool-icon-choice={variant === "choice"}
-  class:tool-icon-heading={variant === "heading"}
-  class:tool-icon-brand={Boolean(icon)}
-  class:tool-icon-fallback={!icon}
-  class={`tool-icon ${icon ? `tool-icon-${icon.tone}` : ""}`}
+  class={toolIconRecipe({ variant, tone: iconTone })}
+  data-tool-icon-variant={variant}
+  data-tool-icon-tone={iconTone}
   aria-label={accessibleLabel}
   title={accessibleLabel}
 >
@@ -93,6 +94,6 @@
   {:else if category === "system"}
     <AppIcon name="system" size={18} />
   {:else}
-    <span aria-hidden="true">{accessibleLabel.slice(0, 2).toUpperCase()}</span>
+    <span data-tool-icon-fallback-text aria-hidden="true">{accessibleLabel.slice(0, 2).toUpperCase()}</span>
   {/if}
 </span>

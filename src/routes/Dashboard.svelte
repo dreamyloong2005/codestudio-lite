@@ -5,6 +5,48 @@
   import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
+  import { css, cx } from "../../styled-system/css";
+  import {
+    actionButtonRecipe,
+    dashboardCardActionsRecipe,
+    dashboardCardMainRecipe,
+    dashboardCardRecipe,
+    dashboardCardStateRecipe,
+    dashboardCommandBoxRecipe,
+    dashboardCommandListRecipe,
+    dashboardDirectoryFieldRecipe,
+    dashboardEnvConflictRecipe,
+    dashboardGridRecipe,
+    dashboardInfoGridRecipe,
+    dashboardLaunchEmptyRecipe,
+    dashboardLaunchGridRecipe,
+    dashboardLaunchHeadingRecipe,
+    dashboardLaunchOptionRecipe,
+    dashboardLaunchSectionRecipe,
+    dashboardLogRecipe,
+    dashboardLogStageRecipe,
+    dashboardLogViewportRecipe,
+    dashboardModalActionsRecipe,
+    dashboardModalBackdropRecipe,
+    dashboardModalBodyRecipe,
+    dashboardModalPanelRecipe,
+    dashboardOverflowRecipe,
+    dashboardPreviewListRecipe,
+    dashboardProgressRecipe,
+    dashboardTerminalCardRecipe,
+    dashboardTerminalFrameRecipe,
+    dashboardTerminalHeaderRecipe,
+    emptyRowRecipe,
+    eyebrowRecipe,
+    iconButtonRecipe,
+    noticeRecipe,
+    panelRecipe,
+    routeStackRecipe,
+    sectionHeadingRecipe,
+    spinRecipe,
+    topActionsRecipe,
+    topStripRecipe
+  } from "../../styled-system/recipes";
   import {
     getClaudeDesktopLocalizeLaunch,
     installOrUpdateClaudeDesktop,
@@ -47,6 +89,8 @@
   import { afterUpdate, onDestroy, onMount, tick } from "svelte";
 
   type DashboardRefreshOptions = { quiet?: boolean; scheduleFollowup?: boolean; showRefreshIndicator?: boolean };
+  type DashboardCardAction = "update" | "repair" | "launch" | "configure";
+  const dashboardCardActions: DashboardCardAction[] = ["update", "repair", "launch", "configure"];
 
   export let snapshot: DetectionSnapshot | null = null;
   export let refreshingExternally = false;
@@ -143,6 +187,45 @@
 
   function isToolActionBusy(tool: ToolStatus) {
     return isInstallingTool(tool) || isUpdatingTool(tool) || isRepairingTool(tool) || isLaunchingTool(tool);
+  }
+
+  function dashboardActionAvailable(tool: ToolStatus, action: DashboardCardAction) {
+    if (action === "update") {
+      return tool.installState !== "missing" && Boolean(tool.updateAvailable);
+    }
+    if (action === "repair") {
+      return Boolean(tool.pathRepair);
+    }
+    if (action === "launch") {
+      return tool.installState !== "missing" && canShowToolLaunch(tool);
+    }
+    return tool.installState !== "missing";
+  }
+
+  function dashboardActionIndex(tool: ToolStatus, action: DashboardCardAction) {
+    return dashboardCardActions.filter((candidate) => dashboardActionAvailable(tool, candidate)).indexOf(action);
+  }
+
+  function availableDashboardActionCount(tool: ToolStatus) {
+    return dashboardCardActions.filter((action) => dashboardActionAvailable(tool, action)).length;
+  }
+
+  function visibleDashboardActionLimit(_tool: ToolStatus) {
+    return 2;
+  }
+
+  function shouldShowDashboardOverflow(tool: ToolStatus) {
+    return availableDashboardActionCount(tool) > visibleDashboardActionLimit(tool);
+  }
+
+  function isDashboardActionVisible(tool: ToolStatus, action: DashboardCardAction) {
+    const index = dashboardActionIndex(tool, action);
+    return index >= 0 && index < visibleDashboardActionLimit(tool);
+  }
+
+  function isDashboardActionOverflowed(tool: ToolStatus, action: DashboardCardAction) {
+    const index = dashboardActionIndex(tool, action);
+    return index >= 0 && index >= visibleDashboardActionLimit(tool);
   }
 
   function isManagedDesktopClient(tool: ToolStatus) {
@@ -484,6 +567,62 @@
   document.addEventListener("click", closeOverflowOnOutsideClick);
   document.addEventListener("keydown", closeOverflowOnEscape);
 
+  const headingCopyClass = css({
+    minWidth: 0
+  });
+  const dashboardCardCopyClass = css({
+    minWidth: 0
+  });
+  const dashboardPathClass = css({
+    display: "block",
+    marginTop: "4px",
+    color: "var(--text-muted)",
+    fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
+    fontSize: "11px",
+    lineHeight: "1.35",
+    overflowWrap: "anywhere"
+  });
+  const dashboardCardHitAreaClass = css({
+    position: "absolute",
+    inset: 0,
+    zIndex: 1,
+    border: 0,
+    borderRadius: "var(--radius)",
+    padding: 0,
+    background: "transparent",
+    cursor: "pointer"
+  });
+  const dashboardOverflowToggleClass = css({
+    fontSize: "18px",
+    lineHeight: "1"
+  });
+  const dashboardOverflowMenuClass = css({
+    position: "absolute",
+    right: 0,
+    top: "calc(100% + 6px)",
+    zIndex: 5,
+    minWidth: "200px",
+    gap: "6px",
+    padding: "6px",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius)",
+    background: "var(--surface)",
+    boxShadow: "0 18px 40px var(--modal-shadow)"
+  });
+  const dashboardOverflowMenuButtonClass = css({
+    justifyContent: "flex-start",
+    width: "100%",
+    minHeight: "32px",
+    whiteSpace: "nowrap"
+  });
+  const dashboardSingleCommandClass = css({
+    gridColumn: "1 / -1"
+  });
+  const dashboardProgressFillClass = css({
+    width: "100%"
+  });
+  const dashboardLaunchOptionClass = (selected: boolean) => dashboardLaunchOptionRecipe({ selected });
+
   onDestroy(() => {
     unlistenInstallProgress?.();
     unlistenInstallTerminalOutput?.();
@@ -497,6 +636,12 @@
     if (toolId === "codex-app") return "codexClient";
     if (toolId === "claude-desktop") return "claudeDesktop";
     return null;
+  }
+
+  function navigateToDesktopClient(toolId: string) {
+    if (desktopClientRouteForTool(toolId)) {
+      onNavigateToClient(toolId);
+    }
   }
 
   $: connectedClients = [
@@ -905,22 +1050,22 @@
   }
 </script>
 
-<div class="route-stack">
-  <section class="top-strip">
+<div class={routeStackRecipe({ width: "full" })}>
+  <section class={topStripRecipe()}>
     <div>
-      <span class="eyebrow">{$t("dashboard.eyebrow")}</span>
+      <span class={eyebrowRecipe()}>{$t("dashboard.eyebrow")}</span>
       <h1>{$t("dashboard.title")}</h1>
       <p>{$t("dashboard.subtitle")}</p>
     </div>
-    <div class="top-actions">
-      <button class="secondary-button" type="button" disabled={refreshBusy} on:click={refreshDashboard}>
-        <AppIcon name={refreshBusy ? "loading" : "refresh"} size={16} class={refreshBusy ? "spin" : ""} />
+    <div class={topActionsRecipe()}>
+      <button class={actionButtonRecipe()} type="button" disabled={refreshBusy} on:click={refreshDashboard}>
+        <AppIcon name={refreshBusy ? "loading" : "refresh"} size={16} class={refreshBusy ? spinRecipe() : ""} />
         {$t(refreshBusy ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
   </section>
 
-  <section class="panel-band">
+  <section class={panelRecipe()}>
     {#if toolActionMessage}
       <DismissibleNotice tone="success" message={toolActionMessage} on:dismiss={() => (toolActionMessage = null)} />
     {/if}
@@ -928,19 +1073,19 @@
       <DismissibleNotice tone="error" message={toolActionError} on:dismiss={() => (toolActionError = null)} />
     {/if}
     {#if envConflicts.length > 0}
-      <div class="inline-error env-conflict-banner">
+      <div class={dashboardEnvConflictRecipe()}>
         <div>
           <strong>{$t("envConflict.title")}</strong>
           <span>{$t("envConflict.dashboardDescription", { count: envConflicts.length })}</span>
-          <div class="conflict-chip-list">
+          <div data-dashboard-env-conflict-chips>
             {#each envConflicts as conflict}
               <code>{conflict.scope}:{conflict.variable}={conflict.currentValuePreview}</code>
             {/each}
           </div>
         </div>
-        <button class="secondary-button" disabled={clearingClaudeEnv} on:click={clearClaudeEnvConflicts}>
+        <button class={actionButtonRecipe()} disabled={clearingClaudeEnv} on:click={clearClaudeEnvConflicts}>
           {#if clearingClaudeEnv}
-            <AppIcon name="loading" size={16} class="spin" />
+            <AppIcon name="loading" size={16} class={spinRecipe()} />
           {:else}
             <AppIcon name="repair" size={16} />
           {/if}
@@ -949,55 +1094,63 @@
       </div>
     {/if}
 
-    <div class="section-heading">
-      <div>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("dashboard.connectedClients")}</h2>
         <p>{snapshot ? $t("dashboard.toolsTracked", { count: connectedClients.length }) : $t("app.state.scanning")}</p>
       </div>
     </div>
-    <div class="system-grid client-grid">
+    <div class={dashboardGridRecipe({ kind: "client" })}>
       {#each connectedClients as tool}
         <article
-          class="system-card client-card"
-          class:clickable-card={desktopClientRouteForTool(tool.id)}
-          role={desktopClientRouteForTool(tool.id) ? "button" : undefined}
-          on:click={(event) => { if (event.target !== event.currentTarget) return; const r = desktopClientRouteForTool(tool.id); if (r) onNavigateToClient(tool.id); }}
-          on:keydown={(event) => { if (event.key === "Enter" || event.key === " ") { const r = desktopClientRouteForTool(tool.id); if (r) { event.preventDefault(); onNavigateToClient(tool.id); } } }}
+          class={dashboardCardRecipe({ clickable: Boolean(desktopClientRouteForTool(tool.id)) })}
         >
-          <div class="system-main">
+          {#if desktopClientRouteForTool(tool.id)}
+            <button
+              class={dashboardCardHitAreaClass}
+              type="button"
+              aria-label={tool.name}
+              data-dashboard-card-hit-area
+              on:click={() => navigateToDesktopClient(tool.id)}
+            ></button>
+          {/if}
+          <div class={dashboardCardMainRecipe()}>
             <ToolIcon toolId={tool.id} label={tool.name} category={tool.category} />
-            <div class="system-copy">
+            <div class={dashboardCardCopyClass}>
               <h3>{tool.name}</h3>
               <p>{tool.version ?? tool.details ?? tool.command}</p>
               {#if resolvedToolDetail(tool)}
-                <span class="tool-path">{resolvedToolDetail(tool)}</span>
+                <span class={dashboardPathClass}>{resolvedToolDetail(tool)}</span>
               {/if}
               {#if tool.updateAvailable && tool.latestVersion}
-                <span class="tool-path">{$t("tool.latestVersion", { version: tool.latestVersion })}</span>
+                <span class={dashboardPathClass}>{$t("tool.latestVersion", { version: tool.latestVersion })}</span>
               {/if}
               {#if tool.pathRepair}
-                <span class="tool-path">{tool.pathRepair.message}</span>
+                <span class={dashboardPathClass}>{tool.pathRepair.message}</span>
               {/if}
             </div>
           </div>
 
-          <div class="system-card-state client-card-state">
+          <div class={dashboardCardStateRecipe()}>
             <StatusPill
               status={tool.installState}
               label={$t(`status.${tool.installState}` as Parameters<typeof $t>[0])}
             />
           </div>
-          <div class="client-card-actions">
+          <div
+            class={dashboardCardActionsRecipe()}
+            data-dashboard-card-actions
+          >
             {#if tool.installState === "missing"}
               {#if tool.pathRepair}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if isRepairingTool(tool)}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="repair" size={16} />
                   {/if}
@@ -1005,130 +1158,190 @@
                 </button>
               {/if}
               <button
-                class="secondary-button"
+                class={actionButtonRecipe({ compact: true })}
                 title={$t("tool.installCommand", { name: tool.name })}
                 disabled={isToolActionBusy(tool)}
                 on:click={() => openInstallPlan(tool)}
               >
                 {#if isInstallingTool(tool)}
-                  <AppIcon name="loading" size={16} class="spin" />
+                  <AppIcon name="loading" size={16} class={spinRecipe()} />
                 {:else}
                   <AppIcon name="install" size={16} />
                 {/if}
                 {isInstallingTool(tool) ? $t("tool.installing") : $t("common.install")}
               </button>
             {:else}
-              {#if tool.updateAvailable}
+              {#if isDashboardActionVisible(tool, "update")}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.updateCommand", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => openToolActionPlan(tool, "update")}
                 >
                   {#if isUpdatingTool(tool)}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="update" size={16} />
                   {/if}
                   {isUpdatingTool(tool) ? $t("tool.updating") : $t("common.update")}
                 </button>
               {/if}
-              {#if tool.pathRepair}
+              {#if isDashboardActionVisible(tool, "repair")}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if isRepairingTool(tool)}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="repair" size={16} />
                   {/if}
                   {isRepairingTool(tool) ? $t("tool.repairingPath") : $t("tool.repairPath")}
                 </button>
               {/if}
-              {#if canShowToolLaunch(tool)}
+              {#if isDashboardActionVisible(tool, "launch")}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => openToolLaunch(tool)}
                 >
                   {#if isLaunchingTool(tool)}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="play" size={16} />
                   {/if}
                   {isLaunchingTool(tool) ? $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restarting" : "toolLaunch.starting") : $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restart" : "toolLaunch.action")}
                 </button>
               {/if}
-              <details class="card-action-overflow">
+              {#if isDashboardActionVisible(tool, "configure")}
+                <button
+                  class={actionButtonRecipe({ compact: true })}
+                  title={$t("tool.createConfig", { name: tool.name })}
+                  disabled={isToolActionBusy(tool)}
+                  on:click={() => onConfigureTool(tool)}
+                >
+                  <AppIcon name="settings" size={16} />
+                  {$t("common.createConfig")}
+                </button>
+              {/if}
+              {#if shouldShowDashboardOverflow(tool)}
+                <details class={dashboardOverflowRecipe()} data-dashboard-overflow>
                 <summary
-                  class="icon-button card-overflow-toggle"
+                  class={cx(iconButtonRecipe({ compact: true }), dashboardOverflowToggleClass)}
                   title={$t("tool.moreActionsTitle", { name: tool.name })}
                   aria-label={$t("common.moreActions")}
                   on:click={(event) => toggleOverflowDetails(event, (event.currentTarget as Element).closest("details") as HTMLDetailsElement)}
                 >⋯</summary>
-                <div class="card-action-menu">
-                  <button
-                    class="secondary-button"
-                    title={$t("tool.createConfig", { name: tool.name })}
-                    disabled={isToolActionBusy(tool)}
-                    on:click|stopPropagation={() => onConfigureTool(tool)}
-                  >
-                    <AppIcon name="settings" size={16} />
-                    {$t("common.createConfig")}
-                  </button>
+                <div class={dashboardOverflowMenuClass} data-dashboard-overflow-menu>
+                  {#if isDashboardActionOverflowed(tool, "update")}
+                    <button
+                      class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
+                      title={$t("tool.updateCommand", { name: tool.name })}
+                      disabled={isToolActionBusy(tool)}
+                      on:click|stopPropagation={() => openToolActionPlan(tool, "update")}
+                    >
+                      {#if isUpdatingTool(tool)}
+                        <AppIcon name="loading" size={16} class={spinRecipe()} />
+                      {:else}
+                        <AppIcon name="update" size={16} />
+                      {/if}
+                      {isUpdatingTool(tool) ? $t("tool.updating") : $t("common.update")}
+                    </button>
+                  {/if}
+                  {#if isDashboardActionOverflowed(tool, "repair")}
+                    <button
+                      class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
+                      title={$t("tool.repairPathTitle", { name: tool.name })}
+                      disabled={isToolActionBusy(tool)}
+                      on:click|stopPropagation={() => confirmRepairPath(tool)}
+                    >
+                      {#if isRepairingTool(tool)}
+                        <AppIcon name="loading" size={16} class={spinRecipe()} />
+                      {:else}
+                        <AppIcon name="repair" size={16} />
+                      {/if}
+                      {isRepairingTool(tool) ? $t("tool.repairingPath") : $t("tool.repairPath")}
+                    </button>
+                  {/if}
+                  {#if isDashboardActionOverflowed(tool, "launch")}
+                    <button
+                      class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
+                      title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
+                      disabled={isToolActionBusy(tool)}
+                      on:click|stopPropagation={() => openToolLaunch(tool)}
+                    >
+                      {#if isLaunchingTool(tool)}
+                        <AppIcon name="loading" size={16} class={spinRecipe()} />
+                      {:else}
+                        <AppIcon name="play" size={16} />
+                      {/if}
+                      {isLaunchingTool(tool) ? $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restarting" : "toolLaunch.starting") : $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restart" : "toolLaunch.action")}
+                    </button>
+                  {/if}
+                  {#if isDashboardActionOverflowed(tool, "configure")}
+                    <button
+                      class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
+                      title={$t("tool.createConfig", { name: tool.name })}
+                      disabled={isToolActionBusy(tool)}
+                      on:click|stopPropagation={() => onConfigureTool(tool)}
+                    >
+                      <AppIcon name="settings" size={16} />
+                      {$t("common.createConfig")}
+                    </button>
+                  {/if}
                 </div>
-              </details>
+                </details>
+              {/if}
             {/if}
           </div>
         </article>
       {:else}
-        <div class="empty-row">{$t("dashboard.noClientSnapshot")}</div>
+        <div class={emptyRowRecipe()} data-dashboard-empty>{$t("dashboard.noClientSnapshot")}</div>
       {/each}
     </div>
   </section>
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("dashboard.system")}</h2>
         <p>{$t("dashboard.systemDeps")}</p>
       </div>
     </div>
-    <div class="system-grid">
+    <div class={dashboardGridRecipe({ kind: "system" })}>
       {#each snapshot?.system ?? [] as tool}
-        <article class="system-card">
-          <div class="system-main">
+        <article class={dashboardCardRecipe()}>
+          <div class={dashboardCardMainRecipe()}>
             <ToolIcon toolId={tool.id} label={tool.name} category={tool.category} />
-            <div class="system-copy">
+            <div class={dashboardCardCopyClass}>
               <h3>{tool.name}</h3>
               <p>{tool.version ?? tool.details ?? tool.command}</p>
               {#if tool.updateAvailable && tool.latestVersion}
-                <span class="tool-path">{$t("tool.latestVersion", { version: tool.latestVersion })}</span>
+                <span class={dashboardPathClass}>{$t("tool.latestVersion", { version: tool.latestVersion })}</span>
               {/if}
             </div>
           </div>
 
-          <div class="system-card-state">
+          <div class={dashboardCardStateRecipe()}>
             <StatusPill
               status={tool.installState}
               label={$t(`status.${tool.installState}` as Parameters<typeof $t>[0])}
             />
           </div>
-          <div class="client-card-actions">
+          <div class={dashboardCardActionsRecipe()}>
             {#if tool.installState === "missing"}
               {#if tool.pathRepair}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="repair" size={16} />
                   {/if}
@@ -1136,13 +1349,13 @@
                 </button>
               {/if}
               <button
-                class="secondary-button"
+                class={actionButtonRecipe({ compact: true })}
                 title={$t("tool.installCommand", { name: tool.name })}
                 disabled={isToolActionBusy(tool)}
                 on:click={() => openInstallPlan(tool)}
               >
                 {#if isInstallingTool(tool)}
-                  <AppIcon name="loading" size={16} class="spin" />
+                  <AppIcon name="loading" size={16} class={spinRecipe()} />
                 {:else}
                   <AppIcon name="install" size={16} />
                 {/if}
@@ -1150,13 +1363,13 @@
               </button>
             {:else if tool.updateAvailable}
               <button
-                class="secondary-button"
+                class={actionButtonRecipe({ compact: true })}
                 title={$t("tool.updateCommand", { name: tool.name })}
                 disabled={isToolActionBusy(tool)}
                 on:click={() => openToolActionPlan(tool, "update")}
               >
                 {#if updatingToolId === tool.id}
-                  <AppIcon name="loading" size={16} class="spin" />
+                  <AppIcon name="loading" size={16} class={spinRecipe()} />
                 {:else}
                   <AppIcon name="update" size={16} />
                 {/if}
@@ -1164,13 +1377,13 @@
               </button>
               {#if tool.pathRepair}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="repair" size={16} />
                   {/if}
@@ -1179,13 +1392,13 @@
               {/if}
               {#if canShowToolLaunch(tool)}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => openToolLaunch(tool)}
                 >
                   {#if isLaunchingTool(tool)}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="play" size={16} />
                   {/if}
@@ -1195,13 +1408,13 @@
             {:else}
               {#if tool.pathRepair}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="repair" size={16} />
                   {/if}
@@ -1210,13 +1423,13 @@
               {/if}
               {#if canShowToolLaunch(tool)}
                 <button
-                  class="secondary-button"
+                  class={actionButtonRecipe({ compact: true })}
                   title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
                   disabled={isToolActionBusy(tool)}
                   on:click={() => openToolLaunch(tool)}
                 >
                   {#if isLaunchingTool(tool)}
-                    <AppIcon name="loading" size={16} class="spin" />
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="play" size={16} />
                   {/if}
@@ -1227,7 +1440,7 @@
           </div>
         </article>
       {:else}
-        <div class="empty-row">{$t("dashboard.noSystemSnapshot")}</div>
+        <div class={emptyRowRecipe()} data-dashboard-empty>{$t("dashboard.noSystemSnapshot")}</div>
       {/each}
     </div>
   </section>
@@ -1235,11 +1448,11 @@
 </div>
 
 {#if pendingInstallTool}
-  <div class="modal-backdrop" role="presentation">
-    <div class="modal-panel wide-modal" role="dialog" aria-modal="true" aria-labelledby="tool-install-title">
-      <div class="modal-body">
+  <div class={dashboardModalBackdropRecipe()} role="presentation">
+    <div class={dashboardModalPanelRecipe()} role="dialog" aria-modal="true" aria-labelledby="tool-install-title">
+      <div class={dashboardModalBodyRecipe()}>
         <div>
-        <span class="eyebrow">{$t("toolInstall.eyebrow")}</span>
+        <span class={eyebrowRecipe()}>{$t("toolInstall.eyebrow")}</span>
         <h2 id="tool-install-title">
           {$t(installMode === "update" ? "toolInstall.updateTitle" : "toolInstall.title", { name: pendingInstallTool.name })}
         </h2>
@@ -1247,24 +1460,24 @@
       </div>
 
       {#if planningToolId}
-        <div class="install-progress" aria-live="polite">
-          <div class="progress-copy">
+        <div class={dashboardProgressRecipe()} aria-live="polite">
+          <div data-dashboard-progress-copy>
             <strong>{$t("toolInstall.planning")}</strong>
             <span>{pendingInstallTool.name}</span>
           </div>
-          <div class="progress-track indeterminate">
-            <span class="progress-fill"></span>
+          <div data-dashboard-progress-track data-indeterminate="true">
+            <span class={dashboardProgressFillClass} data-dashboard-progress-fill></span>
           </div>
         </div>
       {/if}
 
       {#if installPlan}
-        <div class="install-command-box">
+        <div class={dashboardCommandBoxRecipe()}>
           <div>
             <strong>{$t("toolInstall.command")}</strong>
             <span>{$t("toolInstall.manager", { manager: installPlan.manager })}</span>
           </div>
-          <div class="install-command-list">
+          <div class={dashboardCommandListRecipe()}>
             {#each installPlan.commands as command}
               <div>
                 <span>{command.stage === "prerequisite" ? $t("toolInstall.stage.prerequisite") : installMode === "update" ? $t("common.update") : $t("toolInstall.stage.target")}</span>
@@ -1272,17 +1485,17 @@
               </div>
             {/each}
           </div>
-          <button class="icon-button" title={$t("toolInstall.copyCommand")} on:click={copyInstallCommand}>
+          <button class={iconButtonRecipe()} title={$t("toolInstall.copyCommand")} on:click={copyInstallCommand}>
             <AppIcon name="copy" size={18} />
           </button>
         </div>
 
-        <div class="install-meta">
+        <div class={dashboardInfoGridRecipe()}>
           <span>{installPlan.requiresAdmin ? $t("toolInstall.adminMayPrompt") : $t("toolInstall.userScope")}</span>
         </div>
 
         {#if installPlan.prerequisites.length > 0}
-          <div class="preview-list">
+          <div class={dashboardPreviewListRecipe()}>
             {#each installPlan.prerequisites as prerequisite}
               <div>
                 <strong>{prerequisite.toolName}</strong>
@@ -1294,11 +1507,11 @@
         {/if}
 
         {#if installPlan.blocker}
-          <div class="inline-error">{installPlan.blocker}</div>
+          <div class={noticeRecipe({ tone: "error" })}>{installPlan.blocker}</div>
         {/if}
 
         {#if installMode !== "update" && installPlan.steps.length > 0}
-          <div class="preview-list">
+          <div class={dashboardPreviewListRecipe()}>
             {#each installPlan.steps as step}
               <div>
                 <strong>{step.label}</strong>
@@ -1311,20 +1524,20 @@
       {/if}
 
       {#if installingToolId}
-        <div class="install-progress" aria-live="polite">
-          <div class="progress-copy">
+        <div class={dashboardProgressRecipe()} aria-live="polite">
+          <div data-dashboard-progress-copy>
             <strong>{$t(installMode === "update" ? "tool.updating" : "tool.installing")}</strong>
             <span>{installPlan?.command}</span>
           </div>
-          <div class="progress-track indeterminate">
-            <span class="progress-fill"></span>
+          <div data-dashboard-progress-track data-indeterminate="true">
+            <span class={dashboardProgressFillClass} data-dashboard-progress-fill></span>
           </div>
         </div>
       {/if}
 
       {#if installPlan?.interactive}
-        <div class="install-terminal-card">
-          <div class="install-terminal-header">
+        <div class={dashboardTerminalCardRecipe()}>
+          <div class={dashboardTerminalHeaderRecipe()}>
             <strong>{$t("toolInstall.terminalTitle")}</strong>
             {#if installTerminalRunning}
               <span>{$t("common.running")}</span>
@@ -1334,16 +1547,16 @@
               <span>{$t("toolInstall.terminalReady")}</span>
             {/if}
           </div>
-          <div class="install-terminal-frame" bind:this={installTerminalElement}></div>
+          <div class={dashboardTerminalFrameRecipe()} bind:this={installTerminalElement}></div>
         </div>
       {/if}
 
       {#if !installPlan?.interactive && (installingToolId || updatingToolId || hasLiveInstallLogs)}
-        <div class="install-log live-install-log">
+        <div class={dashboardLogRecipe({ live: true })}>
           <strong>{$t("toolInstall.consoleOutput")}</strong>
-          <div class="install-log-viewport" bind:this={installLogViewport}>
+          <div class={dashboardLogViewportRecipe()} bind:this={installLogViewport}>
             {#each liveInstallLogGroups as group (group.key)}
-              <div class="install-log-stage">
+              <div class={dashboardLogStageRecipe()}>
                 <span>
                   {group.label}
                   {#if group.done}
@@ -1360,7 +1573,7 @@
                 {/if}
               </div>
             {:else}
-              <div class="install-log-stage">
+              <div class={dashboardLogStageRecipe()}>
                 <span>{$t("common.loading")}</span>
               </div>
             {/each}
@@ -1369,10 +1582,10 @@
       {/if}
 
       {#if installResult}
-        <div class={installResult.success ? "inline-success" : "inline-error"}>
+        <div class={noticeRecipe({ tone: installResult.success ? "success" : "error" })}>
           {localizedInstallResultMessage(installResult)}
         </div>
-        <div class="install-result-grid">
+        <div class={dashboardInfoGridRecipe()}>
           <div>
             <strong>{$t("toolInstall.exitCode")}</strong>
             <span>{installResult.exitCode ?? $t("common.none")}</span>
@@ -1383,7 +1596,7 @@
           </div>
         </div>
         {#if installResult.stageResults.length > 0}
-          <div class="preview-list">
+          <div class={dashboardPreviewListRecipe()}>
             {#each installResult.stageResults as stage}
               <div>
                 <strong>{stageLabel(stage.stage)} / {stage.toolName}</strong>
@@ -1395,11 +1608,11 @@
           </div>
         {/if}
         {#if !hasLiveInstallLogs && hasInstallConsoleOutput(installResult)}
-          <div class="install-log">
+          <div class={dashboardLogRecipe()}>
             <strong>{$t("toolInstall.consoleOutput")}</strong>
             {#each installResult.stageResults as stage}
               {#if stage.stdoutTail || stage.stderrTail}
-                <div class="install-log-stage">
+                <div class={dashboardLogStageRecipe()}>
                   <span>{stageLabel(stage.stage)} / {stage.toolName}</span>
                   {#if stage.stdoutTail}
                     <b>{$t("toolInstall.stdout")}</b>
@@ -1417,29 +1630,29 @@
       {/if}
 
       {#if installError}
-        <div class="inline-error">{installError}</div>
+        <div class={noticeRecipe({ tone: "error" })}>{installError}</div>
       {/if}
 
       </div>
 
-      <div class="modal-actions">
-        <button class="secondary-button" on:click={closeInstallPlan} disabled={Boolean(installingToolId)}>
+      <div class={dashboardModalActionsRecipe()}>
+        <button class={actionButtonRecipe()} on:click={closeInstallPlan} disabled={Boolean(installingToolId)}>
           {$t(installResult ? "common.close" : "common.cancel")}
         </button>
         {#if installTerminalRunning}
-          <button class="secondary-button" type="button" on:click={stopInteractiveInstall}>
+          <button class={actionButtonRecipe()} type="button" on:click={stopInteractiveInstall}>
             <AppIcon name="stop" size={16} />
             {$t("common.stop")}
           </button>
         {/if}
         {#if installPlan && !installResult}
           <button
-            class="primary-button"
+            class={actionButtonRecipe({ tone: "primary" })}
             on:click={confirmInstallAction}
             disabled={!installPlan.canInstall || Boolean(installingToolId)}
           >
             {#if installingToolId}
-              <AppIcon name="loading" size={16} class="spin" />
+              <AppIcon name="loading" size={16} class={spinRecipe()} />
               {$t(installMode === "update" ? "tool.updating" : "tool.installing")}
             {:else}
               <AppIcon name={installMode === "update" ? "update" : "install"} size={16} />
@@ -1461,38 +1674,38 @@
 {/if}
 
 {#if pendingLaunchTool}
-  <div class="modal-backdrop" role="presentation">
-    <div class="modal-panel wide-modal" role="dialog" aria-modal="true" aria-labelledby="tool-launch-title">
-      <div class="modal-body">
+  <div class={dashboardModalBackdropRecipe()} role="presentation">
+    <div class={dashboardModalPanelRecipe()} role="dialog" aria-modal="true" aria-labelledby="tool-launch-title">
+      <div class={dashboardModalBodyRecipe()}>
         <div>
-          <span class="eyebrow">{$t("toolLaunch.eyebrow")}</span>
+          <span class={eyebrowRecipe()}>{$t("toolLaunch.eyebrow")}</span>
           <h2 id="tool-launch-title">{$t("toolLaunch.title", { name: pendingLaunchTool.name })}</h2>
           <p>{$t("toolLaunch.description")}</p>
         </div>
 
         {#if planningLaunchToolId}
-          <div class="install-progress" aria-live="polite">
-            <div class="progress-copy">
+          <div class={dashboardProgressRecipe()} aria-live="polite">
+            <div data-dashboard-progress-copy>
               <strong>{$t("toolLaunch.planning")}</strong>
               <span>{pendingLaunchTool.name}</span>
             </div>
-            <div class="progress-track indeterminate">
-              <span class="progress-fill"></span>
+            <div data-dashboard-progress-track data-indeterminate="true">
+              <span class={dashboardProgressFillClass} data-dashboard-progress-fill></span>
             </div>
           </div>
         {/if}
 
         {#if launchPlan}
-          <div class="install-command-box">
+          <div class={dashboardCommandBoxRecipe()}>
             <div>
               <strong>{$t("toolLaunch.command")}</strong>
               <span>{launchPlan.toolName}</span>
             </div>
-            <code>{launchPlan.command}</code>
+            <code class={dashboardSingleCommandClass}>{launchPlan.command}</code>
           </div>
 
-          <section class="launch-section">
-            <div class="launch-section-heading">
+          <section class={dashboardLaunchSectionRecipe()}>
+            <div class={dashboardLaunchHeadingRecipe()}>
               <strong>{$t("toolLaunch.configSource")}</strong>
               {#if selectedLaunchProfile()}
                 <span>{$t("toolLaunch.temporaryProfile")}</span>
@@ -1500,11 +1713,11 @@
                 <span>{$t("toolLaunch.globalConfigDescription")}</span>
               {/if}
             </div>
-            <div class="launch-option-grid">
+            <div class={dashboardLaunchGridRecipe()}>
               <button
                 type="button"
-                class:selected={!selectedLaunchProfileId}
-                class="launch-option"
+                class={dashboardLaunchOptionClass(!selectedLaunchProfileId)}
+                data-selected={!selectedLaunchProfileId}
                 aria-pressed={!selectedLaunchProfileId}
                 disabled={launchTerminalRunning}
                 on:click={() => (selectedLaunchProfileId = null)}
@@ -1515,8 +1728,8 @@
               {#each launchPlan.profiles as profile}
                 <button
                   type="button"
-                  class:selected={selectedLaunchProfileId === profile.id}
-                  class="launch-option"
+                  class={dashboardLaunchOptionClass(selectedLaunchProfileId === profile.id)}
+                  data-selected={selectedLaunchProfileId === profile.id}
                   aria-pressed={selectedLaunchProfileId === profile.id}
                   disabled={launchTerminalRunning}
                   on:click={() => (selectedLaunchProfileId = profile.id)}
@@ -1525,22 +1738,22 @@
                   <span>{profile.provider === "official" ? $t("toolLaunch.officialProfile") : profile.baseUrl || profile.provider}</span>
                 </button>
               {:else}
-                <div class="launch-empty-option">{$t("toolLaunch.noProfiles")}</div>
+                <div class={dashboardLaunchEmptyRecipe()}>{$t("toolLaunch.noProfiles")}</div>
               {/each}
             </div>
           </section>
 
-          <section class="launch-section">
-            <div class="launch-section-heading">
+          <section class={dashboardLaunchSectionRecipe()}>
+            <div class={dashboardLaunchHeadingRecipe()}>
               <strong>{$t("toolLaunch.console")}</strong>
               <span>{launchPlan.shells.find((shell) => shell.id === selectedLaunchShellId)?.command ?? $t("common.none")}</span>
             </div>
-            <div class="launch-option-grid compact">
+            <div class={dashboardLaunchGridRecipe({ compact: true })}>
               {#each launchPlan.shells as shell}
                 <button
                   type="button"
-                  class:selected={selectedLaunchShellId === shell.id}
-                  class="launch-option"
+                  class={dashboardLaunchOptionClass(selectedLaunchShellId === shell.id)}
+                  data-selected={selectedLaunchShellId === shell.id}
                   aria-pressed={selectedLaunchShellId === shell.id}
                   disabled={!shell.available || launchTerminalRunning}
                   on:click={() => (selectedLaunchShellId = shell.id)}
@@ -1552,16 +1765,16 @@
             </div>
           </section>
 
-          <section class="launch-section">
-            <div class="launch-section-heading">
+          <section class={dashboardLaunchSectionRecipe()}>
+            <div class={dashboardLaunchHeadingRecipe()}>
               <strong>{$t("toolLaunch.launchMode")}</strong>
               <span>{$t(launchMode === "embedded" ? "toolLaunch.embeddedDescription" : "toolLaunch.externalDescription")}</span>
             </div>
-            <div class="launch-option-grid compact">
+            <div class={dashboardLaunchGridRecipe({ compact: true })}>
               <button
                 type="button"
-                class:selected={launchMode === "embedded"}
-                class="launch-option"
+                class={dashboardLaunchOptionClass(launchMode === "embedded")}
+                data-selected={launchMode === "embedded"}
                 aria-pressed={launchMode === "embedded"}
                 disabled={launchTerminalRunning || Boolean(launchingToolId)}
                 on:click={() => (launchMode = "embedded")}
@@ -1571,8 +1784,8 @@
               </button>
               <button
                 type="button"
-                class:selected={launchMode === "external"}
-                class="launch-option"
+                class={dashboardLaunchOptionClass(launchMode === "external")}
+                data-selected={launchMode === "external"}
                 aria-pressed={launchMode === "external"}
                 disabled={launchTerminalRunning || Boolean(launchingToolId)}
                 on:click={() => (launchMode = "external")}
@@ -1583,8 +1796,8 @@
             </div>
           </section>
 
-          <section class="launch-section">
-            <label class="launch-directory-field">
+          <section class={dashboardLaunchSectionRecipe()}>
+            <label class={dashboardDirectoryFieldRecipe()}>
               <span>{$t("toolLaunch.workingDirectory")}</span>
               <input
                 bind:value={launchWorkingDirectory}
@@ -1595,13 +1808,13 @@
           </section>
 
           {#if launchPlan.blocker}
-            <div class="inline-error">{launchPlan.blocker}</div>
+            <div class={noticeRecipe({ tone: "error" })}>{launchPlan.blocker}</div>
           {/if}
         {/if}
 
         {#if launchingToolId || launchTerminalSessionId || launchTerminalExitCode !== null}
-          <div class="install-terminal-card">
-            <div class="install-terminal-header">
+          <div class={dashboardTerminalCardRecipe()}>
+            <div class={dashboardTerminalHeaderRecipe()}>
               <strong>{$t("toolLaunch.terminalTitle")}</strong>
               {#if launchTerminalRunning}
                 <span>{$t("common.running")}</span>
@@ -1611,33 +1824,33 @@
                 <span>{$t("toolLaunch.terminalReady")}</span>
               {/if}
             </div>
-            <div class="install-terminal-frame" bind:this={launchTerminalElement}></div>
+            <div class={dashboardTerminalFrameRecipe()} bind:this={launchTerminalElement}></div>
           </div>
         {/if}
 
         {#if launchError}
-          <div class="inline-error">{launchError}</div>
+          <div class={noticeRecipe({ tone: "error" })}>{launchError}</div>
         {/if}
       </div>
 
-      <div class="modal-actions">
-        <button class="secondary-button" on:click={closeToolLaunch} disabled={launchTerminalRunning}>
+      <div class={dashboardModalActionsRecipe()}>
+        <button class={actionButtonRecipe()} on:click={closeToolLaunch} disabled={launchTerminalRunning}>
           {$t(launchTerminalExitCode !== null ? "common.close" : "common.cancel")}
         </button>
         {#if launchTerminalRunning}
-          <button class="secondary-button" type="button" on:click={stopToolLaunch}>
+          <button class={actionButtonRecipe()} type="button" on:click={stopToolLaunch}>
             <AppIcon name="stop" size={16} />
             {$t("common.stop")}
           </button>
         {/if}
         {#if launchPlan}
           <button
-            class="primary-button"
+            class={actionButtonRecipe({ tone: "primary" })}
             on:click={startToolLaunch}
             disabled={!launchPlan.canLaunch || !selectedLaunchShellId || launchTerminalRunning || Boolean(launchingToolId)}
           >
             {#if launchingToolId}
-              <AppIcon name="loading" size={16} class="spin" />
+              <AppIcon name="loading" size={16} class={spinRecipe()} />
               {$t("toolLaunch.starting")}
             {:else}
               <AppIcon name="play" size={16} />

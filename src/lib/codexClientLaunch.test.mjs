@@ -102,8 +102,10 @@ test("Codex client keeps cached update plan visible while background refresh run
   assert.doesNotMatch(route, /planUnavailable\s*=\s*planRefreshing\s*\|\|\s*view\.planStale/);
   assert.match(route, /effectivePlan\s*=\s*planUnavailable\s*\?\s*null\s*:\s*plan/);
   assert.match(route, /effectiveRelease\s*=\s*planUnavailable\s*\?\s*null\s*:\s*release/);
-  assert.match(route, /planRefreshText\s*=\s*\$t\("codexClient\.planRefreshing"\)/);
-  assert.match(route, /planRefreshing && effectivePlan/);
+  assert.match(route, /\{effectivePlan\.packageUrl\}/);
+  assert.match(route, /\{effectivePlan\.sha256\}/);
+  assert.doesNotMatch(route, /planRefreshText\s*=\s*\$t\("codexClient\.planRefreshing"\)/);
+  assert.doesNotMatch(route, /planRefreshing && effectivePlan/);
   assert.match(route, /\{#if planUnavailable\}/);
   assert.match(route, /codexClient\.planStale/);
   assert.match(store, /loadCachedCodexClientStates/);

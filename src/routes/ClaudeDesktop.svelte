@@ -26,6 +26,35 @@
     setClaudeDesktopSelectedKind,
     startClaudeDesktopProgressListener
   } from "../lib/claudeDesktopStore";
+  import { css } from "../../styled-system/css";
+  import {
+    actionButtonRecipe,
+    desktopClientActionsRecipe,
+    desktopClientLogRecipe,
+    desktopClientLogStageRecipe,
+    desktopClientLogViewportRecipe,
+    desktopClientMetricsRecipe,
+    desktopClientModalActionsRecipe,
+    desktopClientModalBackdropRecipe,
+    desktopClientModalBodyRecipe,
+    desktopClientModalPanelRecipe,
+    desktopClientPreviewListRecipe,
+    desktopClientProgressRecipe,
+    desktopClientSettingsListRecipe,
+    desktopClientTabsRecipe,
+    doctorListRecipe,
+    doctorRowRecipe,
+    emptyRowRecipe,
+    eyebrowRecipe,
+    nativeToggleRecipe,
+    panelRecipe,
+    routeStackRecipe,
+    sectionHeadingRecipe,
+    spinRecipe,
+    statusStripRecipe,
+    topActionsRecipe,
+    topStripRecipe
+  } from "../../styled-system/recipes";
   import type { Severity, ToolInstallProgress } from "../types";
 
   $: view = $claudeDesktopView;
@@ -39,7 +68,6 @@
   $: installPlan = kindView.installPlan;
   $: updatePlan = kindView.updatePlan;
   $: activePlanDetails = kindView.plan;
-  $: planRefreshing = kindView.planRefreshing;
   $: busyAction = kindView.busyAction;
   $: progress = kindView.progress;
   $: progressPercent = progress?.percent ?? null;
@@ -290,31 +318,46 @@
   function dismissLaunchError() {
     launchError = null;
   }
+
+  const headingCopyClass = css({
+    minWidth: 0
+  });
+  const sectionActionsClass = css({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: "9px",
+    flexWrap: "wrap",
+    minWidth: 0
+  });
+  const stderrClass = css({
+    borderColor: "color-mix(in srgb, var(--danger) 28%, var(--border))"
+  });
 </script>
 
-<div class="route-stack codex-client-route">
-  <section class="top-strip">
+<div class={routeStackRecipe({ width: "desktopClient" })}>
+  <section class={topStripRecipe()}>
     <div>
-      <span class="eyebrow">{$t("claudeDesktop.eyebrow")}</span>
+      <span class={eyebrowRecipe()}>{$t("claudeDesktop.eyebrow")}</span>
       <h1>{$t("claudeDesktop.title")}</h1>
       <p>{$t("claudeDesktop.subtitle")}</p>
-      <div class="status-strip">
+      <div class={statusStripRecipe()}>
         <StatusPill status={statusTone} label={statusLabel} />
         <span>{view.snapshot ? $t("dashboard.lastScan", { time: formatDate(view.snapshot.generatedAt) }) : $t("dashboard.waitingForScan")}</span>
       </div>
     </div>
-    <div class="top-actions">
-      <button class="primary-button" disabled={!canLaunch} title={$t(isRunning ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: "Claude Desktop" })} on:click={launchClaude}>
+    <div class={topActionsRecipe()}>
+      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch} title={$t(isRunning ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: "Claude Desktop" })} on:click={launchClaude}>
         {#if launching}
-          <AppIcon name="loading" size={16} class="spin" />
+          <AppIcon name="loading" size={16} class={spinRecipe()} />
           {$t(isRunning ? "toolLaunch.restarting" : "toolLaunch.starting")}
         {:else}
           <AppIcon name="play" size={16} />
           {$t(isRunning ? "toolLaunch.restart" : "toolLaunch.action")}
         {/if}
       </button>
-      <button class="secondary-button" disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(false, effectiveSelectedKind)}>
-        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? "spin" : ""} />
+      <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(false, effectiveSelectedKind)}>
+        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? spinRecipe() : ""} />
         {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
@@ -330,14 +373,14 @@
     <DismissibleNotice tone="error" message={launchError} on:dismiss={dismissLaunchError} />
   {/if}
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("claudeDesktop.launchOptionsTitle")}</h2>
       </div>
     </div>
-    <div class="settings-list codex-client-settings launch-options-grid">
-      <label class="native-write-toggle">
+    <div class={desktopClientSettingsListRecipe({ layout: "grid" })}>
+      <label class={nativeToggleRecipe()} data-native-toggle>
         <input
           type="checkbox"
           checked={localizeClaudeLaunch}
@@ -352,9 +395,14 @@
   </section>
 
   {#if isWindowsKind && installKinds && visibleInstallKinds.length > 1}
-    <div class="install-kind-tabs">
+    <div class={desktopClientTabsRecipe()} role="tablist">
       {#each visibleInstallKinds as kind}
-        <button class:active={effectiveSelectedKind === kind} on:click={() => setClaudeDesktopSelectedKind(kind)}>
+        <button
+          role="tab"
+          data-selected={effectiveSelectedKind === kind}
+          aria-selected={effectiveSelectedKind === kind}
+          on:click={() => setClaudeDesktopSelectedKind(kind)}
+        >
           {kind === "msix" ? $t("desktopClient.kind.windowsApp") : $t("desktopClient.kind.exe")}
         </button>
       {/each}
@@ -365,16 +413,16 @@
     <DismissibleNotice tone="error" message={$t("claudeDesktop.exeInstallWarning")} on:dismiss={() => { exeWarningDismissed = true; }} />
   {/if}
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("claudeDesktop.statusTitle")}</h2>
         <p>{status?.details ?? $t("claudeDesktop.notInstalled")}</p>
       </div>
       <StatusPill status={statusTone} label={statusLabel} />
     </div>
 
-    <div class="gateway-metrics codex-client-metrics">
+    <div class={desktopClientMetricsRecipe()}>
       <div>
         <span>{$t("codexClient.currentVersion")}</span>
         <strong>{status?.version ?? $t("common.none")}</strong>
@@ -397,37 +445,37 @@
       </div>
     </div>
 
-    <div class="gateway-actions codex-client-actions">
-      <button class="primary-button" disabled={!canInstall} on:click={installClaude}>
-        <AppIcon name={busyAction === "install" ? "loading" : "install"} size={16} class={busyAction === "install" ? "spin" : ""} />
+    <div class={desktopClientActionsRecipe()}>
+      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canInstall} on:click={installClaude}>
+        <AppIcon name={busyAction === "install" ? "loading" : "install"} size={16} class={busyAction === "install" ? spinRecipe() : ""} />
         {busyAction === "install" ? $t("tool.installing") : $t("common.install")}
       </button>
-      <button class="secondary-button" on:click={openClaudeDesktopStagingPath}>
+      <button class={actionButtonRecipe()} on:click={openClaudeDesktopStagingPath}>
         <AppIcon name="folder" size={16} />
         {$t("claudeDesktop.openStagingPath")}
       </button>
-      <button class="secondary-button" disabled={!canUpdate} on:click={updateClaude}>
-        <AppIcon name={busyAction === "update" ? "loading" : "update"} size={16} class={busyAction === "update" ? "spin" : ""} />
+      <button class={actionButtonRecipe()} disabled={!canUpdate} on:click={updateClaude}>
+        <AppIcon name={busyAction === "update" ? "loading" : "update"} size={16} class={busyAction === "update" ? spinRecipe() : ""} />
         {busyAction === "update" ? $t("tool.updating") : $t("common.update")}
       </button>
-      <button class="secondary-button" disabled={!canUninstall} on:click={() => setClaudeDesktopConfirmUninstall(true)}>
+      <button class={actionButtonRecipe()} disabled={!canUninstall} on:click={() => setClaudeDesktopConfirmUninstall(true)}>
         <AppIcon name="delete" size={16} />
         {$t("common.uninstall")}
       </button>
     </div>
     {#if showProgress && progress}
-      <div class="install-progress" aria-live="polite">
-        <div class="progress-copy">
+      <div class={desktopClientProgressRecipe()} aria-live="polite">
+        <div data-desktop-client-progress-copy>
           <strong>{progressStepLabel ? `${progressStepLabel} / ${progressPhaseLabel(progress.phase)}` : progressPhaseLabel(progress.phase)}</strong>
           <span>{formatProgressMessage(progress.message)}</span>
         </div>
-        <div class="progress-track" class:indeterminate={progressPercent === null}>
+        <div data-desktop-client-progress-track data-indeterminate={progressPercent === null}>
           <span
-            class="progress-fill"
+            data-desktop-client-progress-fill
             style={`width: ${progressPercent === null ? 38 : Math.max(2, Math.min(100, progressPercent)).toFixed(1)}%`}
           ></span>
         </div>
-        <div class="progress-meta">
+        <div data-desktop-client-progress-meta>
           <span>{progressPercent === null ? $t("claudeDesktop.progressUnknown") : `${progressPercent.toFixed(0)}%`}</span>
           <span>{progressByteLabel(progress)}</span>
         </div>
@@ -435,32 +483,23 @@
     {/if}
   </section>
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("codexClient.planTitle")}</h2>
-        <p>{planRefreshing && activePlanDetails ? $t("codexClient.planRefreshing") : activePlanStatus}</p>
+        <p>{activePlanStatus}</p>
       </div>
-      <div class="section-actions">
+      <div class={sectionActionsClass}>
         {#if activePlanDetails}
           <StatusPill
             status={activePlanAvailable ? "warning" : activePlanBlocker ? "warning" : "ok"}
             label={activePlanAvailable ? $t("codexClient.updateAvailable") : activePlanBlocker ? $t("status.warning") : $t("codexClient.upToDate")}
           />
-          {#if planRefreshing}
-            <StatusPill status="info" label={$t("codexClient.planRefreshing")} />
-          {/if}
         {/if}
       </div>
     </div>
-    <div class="preview-list codex-client-list">
+    <div class={desktopClientPreviewListRecipe()}>
       {#if activePlanDetails}
-        {#if planRefreshing}
-          <div class="empty-row">
-            <AppIcon name="loading" class="spin" size={18} />
-            {$t("codexClient.planRefreshing")}
-          </div>
-        {/if}
         <div>
           <strong>{$t("codexClient.downloadUrl")}</strong>
           <span>{activePlanDetails.downloadUrl}</span>
@@ -474,22 +513,22 @@
           <span>{activePlanDetails.installLocation}</span>
         </div>
       {:else}
-        <div class="empty-row">{$t("codexClient.planNotLoaded")}</div>
+        <div class={emptyRowRecipe()}>{$t("codexClient.planNotLoaded")}</div>
       {/if}
     </div>
   </section>
 
   {#if isWindowsAppTab}
-    <section class="panel-band">
-      <div class="section-heading">
-        <div>
+    <section class={panelRecipe()}>
+      <div class={sectionHeadingRecipe()}>
+        <div class={headingCopyClass}>
           <h2>{$t("claudeDesktop.capabilities")}</h2>
           <p>{$t("claudeDesktop.capabilityHint")}</p>
         </div>
       </div>
-      <div class="doctor-list">
+      <div class={doctorListRecipe()}>
         {#each capabilities as capability}
-          <div class="doctor-row">
+          <div class={doctorRowRecipe()}>
             <StatusPill status={capability.status} label={$t(`status.${capability.status}` as Parameters<typeof $t>[0])} />
             <div>
               <h3>{capability.label}</h3>
@@ -497,23 +536,23 @@
             </div>
           </div>
         {:else}
-          <div class="empty-row">{$t("claudeDesktop.capabilityEmpty")}</div>
+          <div class={emptyRowRecipe()}>{$t("claudeDesktop.capabilityEmpty")}</div>
         {/each}
       </div>
     </section>
   {/if}
 
   {#if busyAction || hasLogs}
-    <section class="panel-band">
-      <div class="section-heading">
-        <div>
+    <section class={panelRecipe()}>
+      <div class={sectionHeadingRecipe()}>
+        <div class={headingCopyClass}>
           <h2>{$t("toolInstall.consoleOutput")}</h2>
         </div>
       </div>
-      <div class="install-log live-install-log">
-        <div class="install-log-viewport" bind:this={installLogViewport}>
+      <div class={desktopClientLogRecipe({ live: true })}>
+        <div class={desktopClientLogViewportRecipe()} bind:this={installLogViewport}>
           {#each liveLogGroups as group (group.key)}
-            <div class="install-log-stage">
+            <div class={desktopClientLogStageRecipe()}>
               <span>
                 {group.label}
                 {#if group.done}
@@ -524,7 +563,7 @@
                 <pre>{group.stdout}</pre>
               {/if}
               {#if group.stderr}
-                <pre class="stderr">{group.stderr}</pre>
+                <pre class={stderrClass}>{group.stderr}</pre>
               {/if}
             </div>
           {/each}
@@ -536,22 +575,22 @@
 </div>
 
 {#if accessibilityPromptOpen}
-  <div class="modal-backdrop">
-    <div class="modal-panel">
-      <div class="modal-body">
+  <div class={desktopClientModalBackdropRecipe()}>
+    <div class={desktopClientModalPanelRecipe()}>
+      <div class={desktopClientModalBodyRecipe()}>
         <div>
-          <span class="eyebrow">{$t("claudeDesktop.accessibilityEyebrow")}</span>
+          <span class={eyebrowRecipe()}>{$t("claudeDesktop.accessibilityEyebrow")}</span>
           <h2>{$t("claudeDesktop.accessibilityTitle")}</h2>
           <p>{$t("claudeDesktop.accessibilityDescription")}</p>
         </div>
       </div>
 
-      <div class="modal-actions">
-        <button class="secondary-button" disabled={accessibilityRestarting} on:click={cancelAccessibilityLaunch}>
+      <div class={desktopClientModalActionsRecipe()}>
+        <button class={actionButtonRecipe()} disabled={accessibilityRestarting} on:click={cancelAccessibilityLaunch}>
           {$t("common.cancel")}
         </button>
-        <button class="primary-button" disabled={accessibilityRestarting} on:click={restartAfterAccessibilityGrant}>
-          <AppIcon name={accessibilityRestarting ? "loading" : "restart"} size={16} class={accessibilityRestarting ? "spin" : ""} />
+        <button class={actionButtonRecipe({ tone: "primary" })} disabled={accessibilityRestarting} on:click={restartAfterAccessibilityGrant}>
+          <AppIcon name={accessibilityRestarting ? "loading" : "restart"} size={16} class={accessibilityRestarting ? spinRecipe() : ""} />
           {$t(accessibilityRestarting ? "claudeDesktop.accessibilityRestarting" : "claudeDesktop.accessibilityRestart")}
         </button>
       </div>
@@ -560,15 +599,15 @@
 {/if}
 
 {#if view.confirmUninstall}
-  <div class="modal-backdrop">
-    <div class="modal-panel">
-      <div class="modal-body">
+  <div class={desktopClientModalBackdropRecipe()}>
+    <div class={desktopClientModalPanelRecipe()}>
+      <div class={desktopClientModalBodyRecipe()}>
         <div>
-          <span class="eyebrow">{$t("claudeDesktop.uninstallEyebrow")}</span>
+          <span class={eyebrowRecipe()}>{$t("claudeDesktop.uninstallEyebrow")}</span>
           <h2>{$t("claudeDesktop.uninstallTitle")}</h2>
           <p>{$t("claudeDesktop.uninstallDescription")}</p>
         </div>
-        <div class="preview-list">
+        <div class={desktopClientPreviewListRecipe()}>
           <div>
             <strong>{$t("codexClient.currentVersion")}</strong>
             <span>{status?.version ?? $t("common.none")}</span>
@@ -580,10 +619,10 @@
         </div>
       </div>
 
-      <div class="modal-actions">
-        <button class="secondary-button" on:click={() => setClaudeDesktopConfirmUninstall(false)}>{$t("common.cancel")}</button>
-        <button class="primary-button" disabled={busyAction !== null} on:click={uninstallClaude}>
-          <AppIcon name={busyAction === "uninstall" ? "loading" : "delete"} size={16} class={busyAction === "uninstall" ? "spin" : ""} />
+      <div class={desktopClientModalActionsRecipe()}>
+        <button class={actionButtonRecipe()} on:click={() => setClaudeDesktopConfirmUninstall(false)}>{$t("common.cancel")}</button>
+        <button class={actionButtonRecipe({ tone: "primary" })} disabled={busyAction !== null} on:click={uninstallClaude}>
+          <AppIcon name={busyAction === "uninstall" ? "loading" : "delete"} size={16} class={busyAction === "uninstall" ? spinRecipe() : ""} />
           {busyAction === "uninstall" ? $t("claudeDesktop.uninstalling") : $t("claudeDesktop.confirmUninstall")}
         </button>
       </div>

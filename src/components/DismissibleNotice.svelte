@@ -1,5 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy } from "svelte";
+  import { css, cx } from "../../styled-system/css";
+  import { noticeRecipe } from "../../styled-system/recipes";
   import { t } from "../lib/i18n";
   import AppIcon from "./AppIcon.svelte";
 
@@ -10,6 +12,32 @@
   export let timeoutMs = 0;
 
   const dispatch = createEventDispatcher<{ dismiss: void }>();
+  const noticeTextClass = css({
+    minWidth: 0,
+    overflowWrap: "anywhere"
+  });
+  const noticeDismissClass = css({
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flex: "0 0 auto",
+    width: "28px",
+    minHeight: "28px",
+    border: "1px solid currentColor",
+    borderRadius: "7px",
+    background: "transparent",
+    color: "inherit",
+    padding: 0,
+    fontSize: "12px",
+    fontWeight: "800",
+    opacity: 0.78,
+    transition: "background var(--motion-quick), opacity var(--motion-quick), transform var(--motion-smooth)",
+    _hover: {
+      background: "color-mix(in srgb, currentColor 10%, transparent)",
+      opacity: 1,
+      transform: "translateY(-1px)"
+    }
+  });
   let timer: ReturnType<typeof setTimeout> | null = null;
   let scheduledKey = "";
 
@@ -49,11 +77,11 @@
 </script>
 
 {#if message}
-  <div class={`notice inline-${tone}`} role={tone === "error" ? "alert" : "status"} aria-live={tone === "error" ? "assertive" : "polite"}>
-    <span>{message}</span>
+  <div class={noticeRecipe({ tone })} role={tone === "error" ? "alert" : "status"} aria-live={tone === "error" ? "assertive" : "polite"}>
+    <span class={noticeTextClass}>{message}</span>
     <button
       type="button"
-      class="notice-dismiss"
+      class={cx(noticeDismissClass)}
       aria-label={$t("common.close")}
       title={$t("common.close")}
       on:click={dismiss}

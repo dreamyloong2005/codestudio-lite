@@ -24,14 +24,15 @@
   import { ensureCodexClientLoaded } from "./lib/codexClientStore";
   import { setLocale, t } from "./lib/i18n";
   import { applyTheme } from "./lib/theme";
-import { disposeTerminalSession } from "./lib/terminalSessionStore";
+  import { disposeTerminalSession } from "./lib/terminalSessionStore";
+  import { appBrandMarkRecipe, appBrandRecipe, appErrorBannerRecipe, appNavButtonRecipe, appNavLabelRecipe, appNavRecipe, appNavSectionTitleRecipe, appNavUpdateDotRecipe, appRouteTransitionRecipe, appShellRecipe, appSidebarRecipe, appWorkspaceRecipe } from "../styled-system/recipes";
   import ClaudeDesktop from "./routes/ClaudeDesktop.svelte";
   import CodexClient from "./routes/CodexClient.svelte";
   import Dashboard from "./routes/Dashboard.svelte";
   import Gateway from "./routes/Gateway.svelte";
   import Profiles from "./routes/Profiles.svelte";
   import SettingsRoute from "./routes/Settings.svelte";
-import TerminalPanel from "./routes/TerminalPanel.svelte";
+  import TerminalPanel from "./routes/TerminalPanel.svelte";
   import SetupWizard from "./routes/SetupWizard.svelte";
   import type {
     DetectionSnapshot,
@@ -151,6 +152,50 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
 
   type RefreshDashboardOptions = { quiet?: boolean; scheduleFollowup?: boolean; showRefreshIndicator?: boolean };
 
+  function detectionSnapshotUiPayload(value: DetectionSnapshot) {
+    const { generatedAt, source, ...stableSnapshot } = value;
+    return stableSnapshot;
+  }
+
+  function detectionSnapshotUiChanged(current: DetectionSnapshot | null, next: DetectionSnapshot) {
+    if (!current) {
+      return true;
+    }
+    return JSON.stringify(detectionSnapshotUiPayload(current)) !== JSON.stringify(detectionSnapshotUiPayload(next));
+  }
+
+  function applyDetectionSnapshot(nextSnapshot: DetectionSnapshot) {
+    if (detectionSnapshotUiChanged(snapshot, nextSnapshot)) {
+      snapshot = nextSnapshot;
+    }
+  }
+
+  function profileSummaryUiChanged(current: ProfileSummary | null, next: ProfileSummary) {
+    if (!current) {
+      return true;
+    }
+    return JSON.stringify(current) !== JSON.stringify(next);
+  }
+
+  function applyProfileSummary(nextSummary: ProfileSummary) {
+    if (profileSummaryUiChanged(profileSummary, nextSummary)) {
+      profileSummary = nextSummary;
+    }
+  }
+
+  function gatewayStatusUiChanged(current: GatewayStatus | null, next: GatewayStatus | null) {
+    if (!current || !next) {
+      return current !== next;
+    }
+    return JSON.stringify(current) !== JSON.stringify(next);
+  }
+
+  function applyGatewayStatus(nextStatus: GatewayStatus | null) {
+    if (gatewayStatusUiChanged(gatewayStatus, nextStatus)) {
+      gatewayStatus = nextStatus;
+    }
+  }
+
   async function refreshDashboard(options: RefreshDashboardOptions = {}) {
     const quiet = options.quiet ?? false;
     const scheduleFollowup = options.scheduleFollowup ?? true;
@@ -174,9 +219,9 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
       if (runId !== dashboardRefreshRunId) {
         return;
       }
-      profileSummary = nextProfileSummary;
-      snapshot = nextSnapshot;
-      gatewayStatus = nextGatewayStatus;
+      applyProfileSummary(nextProfileSummary);
+      applyDetectionSnapshot(nextSnapshot);
+      applyGatewayStatus(nextGatewayStatus);
     } catch (err) {
       if (!quiet && visibleRefreshRunId === runId) {
         error = err instanceof Error ? err.message : String(err);
@@ -212,10 +257,10 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
         loadCachedDetection(),
         loadGatewayStatus()
       ]);
-      profileSummary = nextProfileSummary;
-      gatewayStatus = nextGatewayStatus;
+      applyProfileSummary(nextProfileSummary);
+      applyGatewayStatus(nextGatewayStatus);
       if (cachedSnapshot) {
-        snapshot = cachedSnapshot;
+        applyDetectionSnapshot(cachedSnapshot);
         dashboardLoading = false;
       }
     } catch (err) {
@@ -268,8 +313,8 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
       if (runId !== dashboardRefreshRunId) {
         return;
       }
-      profileSummary = nextProfileSummary;
-      gatewayStatus = nextGatewayStatus;
+      applyProfileSummary(nextProfileSummary);
+      applyGatewayStatus(nextGatewayStatus);
     } catch (err) {
       if (visibleRefreshRunId === runId) {
         error = err instanceof Error ? err.message : String(err);
@@ -351,10 +396,10 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
         : action === "stop"
           ? await stopGateway()
           : await restartGateway();
-      gatewayStatus = result.status;
+      applyGatewayStatus(result.status);
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
-      gatewayStatus = await loadGatewayStatus().catch(() => gatewayStatus);
+      applyGatewayStatus(await loadGatewayStatus().catch(() => gatewayStatus));
     } finally {
       gatewayBusy = false;
     }
@@ -362,7 +407,7 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
 
   async function updateGatewayPrivacyFilter(mode: PrivacyFilterMode) {
     const result = await updateGatewaySettings({ privacyFilterMode: mode });
-    gatewayStatus = result.status;
+    applyGatewayStatus(result.status);
   }
 
   async function initializeDashboardOnMount() {
@@ -396,10 +441,10 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
   }
 </script>
 
-<main class="app-shell">
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-mark">
+<main class={appShellRecipe()}>
+  <aside class={appSidebarRecipe()}>
+    <div class={appBrandRecipe()}>
+      <div class={appBrandMarkRecipe()}>
         <BrandLogo />
       </div>
       <div>
@@ -407,27 +452,27 @@ import TerminalPanel from "./routes/TerminalPanel.svelte";
       </div>
     </div>
 
-    <nav class="sidebar-nav" aria-label="Primary">
-      <div class="nav-section-title">Workspace</div>
+    <nav class={appNavRecipe()} aria-label="Primary">
+      <div class={appNavSectionTitleRecipe()}>Workspace</div>
       {#each visibleNavItems as item}
-        <button class:active={route === item.id} title={$t(item.labelKey)} on:click={() => selectRoute(item.id)}>
+        <button class={appNavButtonRecipe()} data-active={route === item.id} title={$t(item.labelKey)} on:click={() => selectRoute(item.id)}>
           <AppIcon name={item.icon} size={18} />
-          <span class="nav-item-label">{$t(item.labelKey)}</span>
+          <span class={appNavLabelRecipe()}>{$t(item.labelKey)}</span>
           {#if item.id === "settings" && $appUpdateState.updateAvailable}
-            <span class="nav-update-dot" aria-label={$t("settings.updateAvailableDot")}></span>
+            <span class={appNavUpdateDotRecipe()} aria-label={$t("settings.updateAvailableDot")}></span>
           {/if}
         </button>
       {/each}
     </nav>
   </aside>
 
-  <section class="workspace">
+  <section class={appWorkspaceRecipe()}>
     {#if error}
-      <div class="error-banner">{error}</div>
+      <div class={appErrorBannerRecipe()}>{error}</div>
     {/if}
 
     {#key route}
-      <div class="route-transition" in:fly={routeEnterTransition} out:fade={routeExitTransition}>
+      <div class={appRouteTransitionRecipe()} in:fly={routeEnterTransition} out:fade={routeExitTransition}>
         {#if route === "dashboard"}
           <Dashboard
             {snapshot}

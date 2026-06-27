@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { css, cx } from "../../styled-system/css";
+  import { actionButtonRecipe, spinRecipe, toolCardRecipe, toolMainRecipe, toolStateRecipe, toolActionRecipe } from "../../styled-system/recipes";
   import { t } from "../lib/i18n";
   import type { ToolStatus } from "../types";
   import AppIcon from "./AppIcon.svelte";
@@ -15,43 +17,56 @@
   export let repairing = false;
 
   $: resolvedDetail = tool.details?.startsWith("Resolved: ") ? tool.details.replace("Resolved: ", "") : null;
+
+  const toolCopyClass = css({
+    minWidth: 0
+  });
+  const toolPathClass = css({
+    display: "block",
+    marginTop: "4px",
+    color: "var(--text-muted)",
+    fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
+    fontSize: "11px",
+    lineHeight: "1.35",
+    overflowWrap: "anywhere"
+  });
 </script>
 
-<article class="tool-card">
-  <div class="tool-main">
+<article class={toolCardRecipe()}>
+  <div class={toolMainRecipe()}>
     <ToolIcon toolId={tool.id} label={tool.name} category={tool.category} />
-    <div class="tool-copy">
+    <div class={toolCopyClass}>
       <h3>{tool.name}</h3>
       <p>{tool.version ?? tool.details ?? tool.command}</p>
       {#if resolvedDetail}
-        <span class="tool-path">{resolvedDetail}</span>
+        <span class={toolPathClass}>{resolvedDetail}</span>
       {/if}
       {#if tool.updateAvailable && tool.latestVersion}
-        <span class="tool-path">{$t("tool.latestVersion", { version: tool.latestVersion })}</span>
+        <span class={toolPathClass}>{$t("tool.latestVersion", { version: tool.latestVersion })}</span>
       {/if}
       {#if tool.pathRepair}
-        <span class="tool-path">{tool.pathRepair.message}</span>
+        <span class={toolPathClass}>{tool.pathRepair.message}</span>
       {/if}
     </div>
   </div>
 
-  <div class="tool-state">
+  <div class={toolStateRecipe()}>
     <StatusPill
       status={tool.installState}
       label={$t(`status.${tool.installState}` as Parameters<typeof $t>[0])}
     />
   </div>
 
-  <div class="tool-action">
+  <div class={toolActionRecipe()}>
     {#if tool.pathRepair}
       <button
-        class="secondary-button"
+        class={cx(actionButtonRecipe({ compact: true }))}
         title={$t("tool.repairPathTitle", { name: tool.name })}
         disabled={installing || updating || repairing}
         on:click={() => onRepairPath(tool)}
       >
         {#if repairing}
-          <AppIcon name="loading" size={16} class="spin" />
+          <AppIcon name="loading" size={16} class={spinRecipe()} />
         {:else}
           <AppIcon name="repair" size={16} />
         {/if}
@@ -60,13 +75,13 @@
     {/if}
     {#if tool.installState === "missing"}
       <button
-        class="secondary-button"
+        class={cx(actionButtonRecipe({ compact: true }))}
         title={$t("tool.installCommand", { name: tool.name })}
         disabled={installing || updating}
         on:click={() => onInstall(tool)}
       >
         {#if installing}
-          <AppIcon name="loading" size={16} class="spin" />
+          <AppIcon name="loading" size={16} class={spinRecipe()} />
         {:else}
           <AppIcon name="install" size={16} />
         {/if}
@@ -75,32 +90,32 @@
     {:else if tool.category === "ai_tool"}
       {#if tool.updateAvailable}
         <button
-          class="secondary-button"
+          class={cx(actionButtonRecipe({ compact: true }))}
           title={$t("tool.updateCommand", { name: tool.name })}
           disabled={installing || updating}
           on:click={() => onUpdate(tool)}
         >
           {#if updating}
-            <AppIcon name="loading" size={16} class="spin" />
+            <AppIcon name="loading" size={16} class={spinRecipe()} />
           {:else}
             <AppIcon name="update" size={16} />
           {/if}
           {updating ? $t("tool.updating") : $t("common.update")}
         </button>
       {/if}
-      <button class="secondary-button" title={$t("tool.createConfig", { name: tool.name })} disabled={updating} on:click={() => onConfigure(tool)}>
+      <button class={cx(actionButtonRecipe({ compact: true }))} title={$t("tool.createConfig", { name: tool.name })} disabled={updating} on:click={() => onConfigure(tool)}>
         <AppIcon name="settings" size={16} />
         {$t("common.createConfig")}
       </button>
     {:else if tool.updateAvailable}
       <button
-        class="secondary-button"
+        class={cx(actionButtonRecipe({ compact: true }))}
         title={$t("tool.updateCommand", { name: tool.name })}
         disabled={installing || updating}
         on:click={() => onUpdate(tool)}
       >
         {#if updating}
-          <AppIcon name="loading" size={16} class="spin" />
+          <AppIcon name="loading" size={16} class={spinRecipe()} />
         {:else}
           <AppIcon name="update" size={16} />
         {/if}

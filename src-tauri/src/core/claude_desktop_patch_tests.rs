@@ -312,6 +312,57 @@ fn direct_claude_desktop_launch_spawns_background_injector_on_windows() {
 }
 
 #[test]
+fn direct_claude_desktop_launch_uses_async_helpers_on_both_platforms() {
+    let source = production_source();
+    let windows_launch_body = source_between(
+        source,
+        "fn launch_windows_claude_desktop",
+        "fn launch_windows_claude_msix",
+        "Windows launch",
+    );
+    let macos_localized_body = source_between(
+        source,
+        "fn launch_macos_claude_desktop_localized()",
+        "#[cfg(any(target_os = \"windows\", target_os = \"macos\"))]",
+        "macOS localized launch",
+    );
+    let macos_plain_body = source_between(
+        source,
+        "fn launch_macos_claude_desktop_plain_restart()",
+        "#[cfg(any(target_os = \"macos\", test))]",
+        "macOS plain launch",
+    );
+
+    assert_contains_all(
+        windows_launch_body,
+        &["spawn_silent_localization_injector()", "return Ok(None);"],
+    );
+    assert_contains_none(
+        windows_launch_body,
+        &[
+            "retry_inject_localization()",
+            "retry_inject_localization_until(",
+        ],
+    );
+
+    assert_contains_all(
+        macos_localized_body,
+        &["spawn_silent_localization_injector()", "Ok(())"],
+    );
+    assert_contains_none(
+        macos_localized_body,
+        &[
+            "enable_macos_claude_main_process_debugger()?",
+            "retry_inject_localization()",
+            "map(|_| ())",
+        ],
+    );
+
+    assert_contains_all(macos_plain_body, &[".spawn()"]);
+    assert_contains_none(macos_plain_body, &[".status()", "status.success()"]);
+}
+
+#[test]
 fn silent_windows_injector_waits_for_manual_debugger_activation() {
     let silent_body = patch_between(
         "pub fn spawn_silent_localization_injector",
@@ -460,9 +511,7 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
             "write_localized_launch_marker()?",
             "close_existing_claude_for_localized_launch()?",
             "hidden_command(\"open\")",
-            "enable_macos_claude_main_process_debugger()",
-            "retry_inject_localization()",
-            "localization inspector opened, but injection failed",
+            "spawn_silent_localization_injector()",
         ],
     );
     assert_contains_none(
@@ -472,6 +521,8 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
             "ensure_macos_accessibility_trusted_or_restart_needed()?",
             "schedule_macos_accessibility_restart",
             "localization injection also failed",
+            "enable_macos_claude_main_process_debugger()?",
+            "retry_inject_localization()",
             concat!("apply_", "macos_localization_patch()?"),
         ],
     );
@@ -492,6 +543,19 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
             "Accessibility preflight should run before touching Claude",
         );
     }
+
+    let silent_body = patch_between(
+        "pub fn spawn_silent_localization_injector",
+        "fn ensure_patch_files",
+        "spawn_silent_localization_injector",
+    );
+    assert_contains_all(
+        silent_body,
+        &[
+            "enable_claude_main_process_debugger()",
+            "retry_inject_localization()",
+        ],
+    );
 
     let script = macos_localized_launch_script();
     assert_contains_all(
@@ -1086,6 +1150,32 @@ fn node_inspector_injection_localizes_macos_menu_bar() {
 }
 
 #[test]
+fn macos_menu_localization_translates_dynamic_update_prefix() {
+    let source = main_process_injection_source();
+    let macos_menu_block = source_between(
+        &source,
+        "const installMacosMenuLocalization = () => {",
+        "installMacosMenuLocalization();",
+        "macOS menu localization block",
+    );
+
+    assert_contains_all(
+        macos_menu_block,
+        &[
+            "translateDynamicMenuLabel",
+            "Restart to update to ",
+            "\\u91cd\\u65b0\\u542f\\u52a8\\u4ee5\\u66f4\\u65b0\\u5230 ",
+        ],
+    );
+    assert_order(
+        macos_menu_block,
+        "const dynamic = translateDynamicMenuLabel(label);",
+        "if (id && enToZh[label]) return enToZh[label];",
+        "macOS update menu labels should handle versioned update text before exact catalog lookup",
+    );
+}
+
+#[test]
 fn node_inspector_injection_localizes_windows_in_window_menu() {
     let source = main_process_injection_source();
 
@@ -1111,6 +1201,38 @@ fn node_inspector_injection_localizes_windows_in_window_menu() {
             "\"Show Dev Tools\"",
             "\"Open App Config File...\"",
         ],
+    );
+}
+
+#[test]
+fn windows_menu_localization_uses_catalog_and_dynamic_update_prefixes() {
+    let source = main_process_injection_source();
+    let windows_menu_block = source_between(
+        &source,
+        "const installWindowsMenuPopupLocalization = () => {",
+        "installWindowsMenuPopupLocalization();",
+        "Windows menu localization block",
+    );
+
+    assert_contains_all(
+        windows_menu_block,
+        &[
+            "JSON.parse(shellLocale)",
+            "en-US.json",
+            "rememberCatalog",
+            "labelToId",
+            "zhLocaleObj",
+            "labelMessageId",
+            "item.__cslMessageId",
+            "Restart to update to ",
+            "\\u91cd\\u65b0\\u542f\\u52a8\\u4ee5\\u66f4\\u65b0\\u5230 ",
+        ],
+    );
+    assert_order(
+        windows_menu_block,
+        "if (id && zhLocaleObj[id]) return zhLocaleObj[id];",
+        "if (menuHardcodedZh[key]) return menuHardcodedZh[key];",
+        "Windows menu should prefer Claude locale catalog translations before hardcoded fallbacks",
     );
 }
 

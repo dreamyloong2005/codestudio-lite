@@ -21,6 +21,32 @@
   import AppIcon from "../components/AppIcon.svelte";
   import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import StatusPill from "../components/StatusPill.svelte";
+  import { css, cx } from "../../styled-system/css";
+  import {
+    actionButtonRecipe,
+    desktopClientActionsRecipe,
+    desktopClientModalActionsRecipe,
+    desktopClientModalBackdropRecipe,
+    desktopClientModalBodyRecipe,
+    desktopClientModalPanelRecipe,
+    desktopClientMetricsRecipe,
+    desktopClientPreviewListRecipe,
+    desktopClientProgressRecipe,
+    desktopClientSettingsListRecipe,
+    desktopClientTabsRecipe,
+    doctorListRecipe,
+    doctorRowRecipe,
+    emptyRowRecipe,
+    eyebrowRecipe,
+    nativeToggleRecipe,
+    panelRecipe,
+    routeStackRecipe,
+    sectionHeadingRecipe,
+    spinRecipe,
+    statusStripRecipe,
+    topActionsRecipe,
+    topStripRecipe
+  } from "../../styled-system/recipes";
   import type {
     CodexClientProgress,
     Severity
@@ -46,7 +72,6 @@
   $: planRefreshing = kindView.planRefreshing;
   $: planUnavailable = kindView.planStale;
   $: planUnavailableText = $t("codexClient.planStale");
-  $: planRefreshText = $t("codexClient.planRefreshing");
   $: effectivePlan = planUnavailable ? null : plan;
   $: effectiveRelease = planUnavailable ? null : release;
   $: platform = state?.platform ?? view.kindViews.msix.state?.platform ?? view.kindViews.portable.state?.platform;
@@ -149,38 +174,69 @@
   function dismissSuccess() {
     codexClientView.update((current) => ({ ...current, success: null }));
   }
+
+  const headingCopyClass = css({
+    minWidth: 0
+  });
+  const sectionActionsClass = css({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: "9px",
+    flexWrap: "wrap",
+    minWidth: 0
+  });
+  const inlineEmptyRowClass = css({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "8px"
+  });
+  const warningRowClass = css({
+    borderColor: "color-mix(in srgb, var(--amber) 35%, transparent) !important",
+    background: "color-mix(in srgb, var(--amber) 8%, var(--surface-strong)) !important"
+  });
 </script>
 
-<div class="route-stack codex-client-route">
-  <section class="top-strip">
+<div class={routeStackRecipe({ width: "desktopClient" })}>
+  <section class={topStripRecipe()}>
     <div>
-      <span class="eyebrow">{$t("codexClient.eyebrow")}</span>
+      <span class={eyebrowRecipe()}>{$t("codexClient.eyebrow")}</span>
       <h1>{$t("codexClient.title")}</h1>
       <p>{$t("codexClient.subtitle")}</p>
-      <div class="status-strip">
+      <div class={statusStripRecipe()}>
         <StatusPill status={statusTone} label={statusLabel} />
         <span>{state ? $t("dashboard.lastScan", { time: new Date(state.generatedAt).toLocaleString() }) : $t("dashboard.waitingForScan")}</span>
       </div>
     </div>
-    <div class="top-actions">
-      <button class="primary-button" disabled={!canLaunch || busyAction !== null} on:click={launchCodex}>
+    <div class={topActionsRecipe()}>
+      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch || busyAction !== null} on:click={launchCodex}>
         <AppIcon name="play" size={16} />
         {$t(isRunning ? "codexClient.restart" : "codexClient.launch")}
       </button>
-      <button class="secondary-button" disabled={kindView.loading || busyAction !== null} on:click={refreshCodex}>
-        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? "spin" : ""} />
+      <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={refreshCodex}>
+        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? spinRecipe() : ""} />
         {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
   </section>
 
   {#if isWindows && installKinds}
-    <div class="install-kind-tabs">
-      <button class:active={effectiveSelectedKind === "msix"} on:click={() => setCodexClientSelectedKind("msix")}>
+    <div class={desktopClientTabsRecipe()} role="tablist">
+      <button
+        role="tab"
+        data-selected={effectiveSelectedKind === "msix"}
+        aria-selected={effectiveSelectedKind === "msix"}
+        on:click={() => setCodexClientSelectedKind("msix")}
+      >
         {$t("desktopClient.kind.windowsApp")}
-        
       </button>
-      <button class:active={effectiveSelectedKind === "portable"} on:click={() => setCodexClientSelectedKind("portable")}>
+      <button
+        role="tab"
+        data-selected={effectiveSelectedKind === "portable"}
+        aria-selected={effectiveSelectedKind === "portable"}
+        on:click={() => setCodexClientSelectedKind("portable")}
+      >
         {$t("desktopClient.kind.exe")}
       </button>
     </div>
@@ -193,15 +249,15 @@
     <DismissibleNotice tone="success" message={formatNoticeMessage(success)} on:dismiss={dismissSuccess} />
   {/if}
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("codexClient.launchOptionsTitle")}</h2>
       </div>
     </div>
     {#if settingsDraft}
-      <div class="settings-list codex-client-settings launch-options-grid">
-        <label class="native-write-toggle">
+      <div class={desktopClientSettingsListRecipe({ layout: "grid" })}>
+        <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.syncHistoryOnLaunch}
@@ -211,7 +267,7 @@
             <strong>{$t("codexClient.syncHistoryOnLaunch")}</strong>
           </span>
         </label>
-        <label class="native-write-toggle">
+        <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.patchForcePluginUnlock}
@@ -225,15 +281,15 @@
     {/if}
   </section>
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("codexClient.statusTitle")}</h2>
         <p>{installed?.path ?? $t("codexClient.notInstalled")}</p>
       </div>
       <StatusPill status={statusTone} label={statusLabel} />
     </div>
-    <div class="gateway-metrics codex-client-metrics">
+    <div class={desktopClientMetricsRecipe()}>
       <div>
         <span>{$t("codexClient.currentVersion")}</span>
         <strong>{installed?.version ?? $t("common.none")}</strong>
@@ -242,7 +298,7 @@
       <div>
         <span>{$t("codexClient.latestVersion")}</span>
         <strong>{effectiveRelease?.version ?? $t("common.unknown")}</strong>
-        <small>{planUnavailable ? planUnavailableText : planRefreshing && effectiveRelease ? planRefreshText : effectiveRelease?.packageMoniker ?? $t("codexClient.planNotLoaded")}</small>
+        <small>{planUnavailable ? planUnavailableText : effectiveRelease?.packageMoniker ?? $t("codexClient.planNotLoaded")}</small>
       </div>
       <div>
         <span>{$t("codexClient.packageSize")}</span>
@@ -250,37 +306,37 @@
         <small>{effectiveRelease?.sha256 ? `${effectiveRelease.sha256.slice(0, 12)}...` : $t("common.unknown")}</small>
       </div>
     </div>
-    <div class="gateway-actions codex-client-actions">
-      <button class="secondary-button" disabled={!canStage || busyAction !== null} on:click={stagePackage}>
+    <div class={desktopClientActionsRecipe()}>
+      <button class={actionButtonRecipe()} disabled={!canStage || busyAction !== null} on:click={stagePackage}>
         <AppIcon name="download" size={16} />
         {busyAction === "stage" ? $t("codexClient.staging") : $t("codexClient.stage")}
       </button>
-      <button class="secondary-button" on:click={() => openCodexClientPath("staging")}>
+      <button class={actionButtonRecipe()} on:click={() => openCodexClientPath("staging")}>
         <AppIcon name="folder" size={16} />
         {$t("codexClient.openStagingPath")}
       </button>
-      <button class="primary-button" disabled={!canInstall || busyAction !== null} on:click={installOrUpdate}>
+      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canInstall || busyAction !== null} on:click={installOrUpdate}>
         <AppIcon name="rocket" size={16} />
         {busyAction === "install" ? $t("codexClient.installing") : installed ? $t("codexClient.update") : $t("codexClient.install")}
       </button>
-      <button class="secondary-button" disabled={!canUninstall || busyAction !== null} on:click={() => setCodexClientConfirmUninstall(true)}>
+      <button class={actionButtonRecipe()} disabled={!canUninstall || busyAction !== null} on:click={() => setCodexClientConfirmUninstall(true)}>
         <AppIcon name="delete" size={16} />
         {$t("common.uninstall")}
       </button>
     </div>
     {#if showProgress && progress}
-      <div class="install-progress" aria-live="polite">
-        <div class="progress-copy">
+      <div class={desktopClientProgressRecipe()} aria-live="polite">
+        <div data-desktop-client-progress-copy>
           <strong>{progressStepLabel ? `${progressStepLabel} / ${progressPhaseLabel(progress.phase)}` : progressPhaseLabel(progress.phase)}</strong>
           <span>{formatProgressMessage(progress.message)}</span>
         </div>
-        <div class="progress-track" class:indeterminate={progressPercent === null}>
+        <div data-desktop-client-progress-track data-indeterminate={progressPercent === null}>
           <span
-            class="progress-fill"
+            data-desktop-client-progress-fill
             style={`width: ${progressPercent === null ? 38 : Math.max(2, Math.min(100, progressPercent)).toFixed(1)}%`}
           ></span>
         </div>
-        <div class="progress-meta">
+        <div data-desktop-client-progress-meta>
           <span>{progressPercent === null ? $t("codexClient.progressUnknown") : `${progressPercent.toFixed(0)}%`}</span>
           <span>{progressByteLabel(progress)}</span>
         </div>
@@ -288,36 +344,27 @@
     {/if}
   </section>
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("codexClient.planTitle")}</h2>
-        <p>{planUnavailable ? planUnavailableText : planRefreshing && effectivePlan ? planRefreshText : effectiveRelease?.manifestUrl ?? $t("codexClient.planNotLoaded")}</p>
+        <p>{planUnavailable ? planUnavailableText : effectiveRelease?.manifestUrl ?? $t("codexClient.planNotLoaded")}</p>
       </div>
-      <div class="section-actions">
+      <div class={sectionActionsClass}>
         {#if planUnavailable}
           <StatusPill status="info" label={planUnavailableText} />
         {:else if effectivePlan}
           <StatusPill status={effectivePlan.upToDate ? "ok" : "warning"} label={effectivePlan.upToDate ? $t("codexClient.upToDate") : $t("codexClient.updateAvailable")} />
-          {#if planRefreshing}
-            <StatusPill status="info" label={planRefreshText} />
-          {/if}
         {/if}
       </div>
     </div>
-    <div class="preview-list codex-client-list">
+    <div class={desktopClientPreviewListRecipe()}>
       {#if planUnavailable}
-        <div class="empty-row">
-          <AppIcon name={planRefreshing ? "loading" : "info"} class={planRefreshing ? "spin" : ""} size={18} />
+        <div class={cx(emptyRowRecipe(), inlineEmptyRowClass)}>
+          <AppIcon name={planRefreshing ? "loading" : "info"} class={planRefreshing ? spinRecipe() : ""} size={18} />
           {planUnavailableText}
         </div>
       {:else if effectivePlan}
-        {#if planRefreshing}
-          <div class="empty-row">
-            <AppIcon name="loading" class="spin" size={18} />
-            {planRefreshText}
-          </div>
-        {/if}
         <div>
           <strong>{$t("codexClient.downloadUrl")}</strong>
           <span>{effectivePlan.packageUrl}</span>
@@ -346,39 +393,33 @@
           </div>
         {/if}
         {#each effectivePlan.warnings as warning}
-          <div class="warning-row">
+          <div class={warningRowClass}>
             <strong>{$t("status.warning")}</strong>
             <span>{warning}</span>
           </div>
         {/each}
       {:else}
-        <div class="empty-row">{$t("codexClient.planNotLoaded")}</div>
+        <div class={emptyRowRecipe()}>{$t("codexClient.planNotLoaded")}</div>
       {/if}
     </div>
   </section>
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("codexClient.capabilities")}</h2>
         <p>{$t("codexClient.capabilityHint")}</p>
       </div>
     </div>
-    <div class="doctor-list">
+    <div class={doctorListRecipe()}>
       {#if planUnavailable}
-        <div class="empty-row">
-          <AppIcon name={planRefreshing ? "loading" : "info"} class={planRefreshing ? "spin" : ""} size={18} />
+        <div class={cx(emptyRowRecipe(), inlineEmptyRowClass)}>
+          <AppIcon name={planRefreshing ? "loading" : "info"} class={planRefreshing ? spinRecipe() : ""} size={18} />
           {planUnavailableText}
         </div>
       {:else}
-        {#if planRefreshing && effectivePlan}
-          <div class="empty-row">
-            <AppIcon name="loading" class="spin" size={18} />
-            {planRefreshText}
-          </div>
-        {/if}
         {#each effectivePlan?.capabilities ?? [] as capability}
-          <div class="doctor-row">
+          <div class={doctorRowRecipe()}>
             <StatusPill status={capability.status} label={$t(`status.${capability.status}` as Parameters<typeof $t>[0])} />
             <div>
               <h3>{capability.label}</h3>
@@ -386,21 +427,21 @@
             </div>
           </div>
         {:else}
-          <div class="empty-row">{$t("codexClient.capabilityEmpty")}</div>
+          <div class={emptyRowRecipe()}>{$t("codexClient.capabilityEmpty")}</div>
         {/each}
       {/if}
     </div>
   </section>
 
-  <section class="panel-band">
-    <div class="section-heading">
-      <div>
+  <section class={panelRecipe()}>
+    <div class={sectionHeadingRecipe()}>
+      <div class={headingCopyClass}>
         <h2>{$t("codexClient.settingsTitle")}</h2>
         <p>{$t("codexClient.settingsHint")}</p>
       </div>
     </div>
     {#if settingsDraft}
-      <div class="settings-list codex-client-settings">
+      <div class={desktopClientSettingsListRecipe()}>
         {#if isMacos}
           <label>
             {$t("codexClient.source")}
@@ -420,7 +461,7 @@
             on:input={(event) => updateCodexClientDraft({ installRoot: event.currentTarget.value })}
           />
         </label>
-        <label class="native-write-toggle">
+        <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.autoCheck}
@@ -431,7 +472,7 @@
             <small>{$t("codexClient.autoCheckHint")}</small>
           </span>
         </label>
-        <label class="native-write-toggle">
+        <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.keepUserDataOnUninstall}
@@ -449,15 +490,15 @@
 </div>
 
 {#if confirmUninstall}
-  <div class="modal-backdrop">
-    <div class="modal-panel">
-      <div class="modal-body">
+  <div class={desktopClientModalBackdropRecipe()}>
+    <div class={desktopClientModalPanelRecipe()}>
+      <div class={desktopClientModalBodyRecipe()}>
         <div>
-        <span class="eyebrow">{$t("codexClient.uninstallEyebrow")}</span>
+        <span class={eyebrowRecipe()}>{$t("codexClient.uninstallEyebrow")}</span>
         <h2>{$t("codexClient.uninstallTitle")}</h2>
         <p>{$t("codexClient.uninstallDescription")}</p>
       </div>
-      <div class="preview-list">
+      <div class={desktopClientPreviewListRecipe()}>
         <div>
           <strong>{$t("codexClient.currentVersion")}</strong>
           <span>{installed?.version ?? $t("common.none")} / {installed?.path ?? $t("common.none")}</span>
@@ -469,9 +510,9 @@
       </div>
       </div>
 
-      <div class="modal-actions">
-        <button class="secondary-button" on:click={() => setCodexClientConfirmUninstall(false)}>{$t("common.cancel")}</button>
-        <button class="primary-button" disabled={busyAction !== null} on:click={removeCodex}>
+      <div class={desktopClientModalActionsRecipe()}>
+        <button class={actionButtonRecipe()} on:click={() => setCodexClientConfirmUninstall(false)}>{$t("common.cancel")}</button>
+        <button class={actionButtonRecipe({ tone: "primary" })} disabled={busyAction !== null} on:click={removeCodex}>
           <AppIcon name="delete" size={16} />
           {busyAction === "uninstall" ? $t("codexClient.uninstalling") : $t("codexClient.confirmUninstall")}
         </button>

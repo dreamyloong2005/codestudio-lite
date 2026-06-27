@@ -92,6 +92,51 @@ test("desktop client page entry hydrates cache before background refresh", () =>
   );
 });
 
+test("Codex Client cached update plan does not render foreground refresh placeholders", () => {
+  const route = read("src/routes/CodexClient.svelte");
+
+  assert.match(route, /planRefreshing\s*=\s*kindView\.planRefreshing/);
+  assert.match(route, /effectivePlan\s*=\s*planUnavailable \? null : plan/);
+  assert.match(route, /\{effectivePlan\.packageUrl\}/);
+  assert.match(route, /\{effectivePlan\.sha256\}/);
+  assert.match(route, /\{effectivePlan\.installRoot \?\? \$t\("common\.none"\)\}/);
+
+  const planSection = route.slice(
+    route.indexOf('<h2>{$t("codexClient.planTitle")}</h2>'),
+    route.indexOf('<h2>{$t("codexClient.capabilities")}</h2>')
+  );
+  const capabilitySection = route.slice(
+    route.indexOf('<h2>{$t("codexClient.capabilities")}</h2>'),
+    route.indexOf('<h2>{$t("codexClient.settingsTitle")}</h2>')
+  );
+
+  assert.ok(planSection.length > 0, "Codex Client update plan section should be present");
+  assert.ok(capabilitySection.length > 0, "Codex Client capability section should be present");
+  assert.doesNotMatch(planSection, /planRefreshing && effectivePlan \? planRefreshText/);
+  assert.doesNotMatch(planSection, /<StatusPill status="info" label=\{planRefreshText\}/);
+  assert.doesNotMatch(planSection, /\{#if planRefreshing\}[\s\S]*\{planRefreshText\}/);
+  assert.doesNotMatch(capabilitySection, /\{#if planRefreshing && effectivePlan\}[\s\S]*\{planRefreshText\}/);
+});
+
+test("Claude Desktop cached update plan does not render foreground refresh placeholders", () => {
+  const route = read("src/routes/ClaudeDesktop.svelte");
+
+  assert.match(route, /activePlanDetails\s*=\s*kindView\.plan/);
+  assert.match(route, /\{activePlanDetails\.downloadUrl\}/);
+  assert.match(route, /\{activePlanDetails\.sha256\}/);
+  assert.match(route, /\{activePlanDetails\.installLocation\}/);
+
+  const planSection = route.slice(
+    route.indexOf('<h2>{$t("codexClient.planTitle")}</h2>'),
+    route.indexOf('<h2>{$t("claudeDesktop.capabilities")}</h2>')
+  );
+
+  assert.ok(planSection.length > 0, "Claude Desktop update plan section should be present");
+  assert.doesNotMatch(planSection, /planRefreshing && activePlanDetails \? \$t\("codexClient\.planRefreshing"\)/);
+  assert.doesNotMatch(planSection, /<StatusPill status="info" label=\{\$t\("codexClient\.planRefreshing"\)\}/);
+  assert.doesNotMatch(planSection, /\{#if planRefreshing\}[\s\S]*\$t\("codexClient\.planRefreshing"\)/);
+});
+
 test("Claude Desktop keeps cached update plan visible and renders only download hash and install location", () => {
   const route = read("src/routes/ClaudeDesktop.svelte");
   const store = read("src/lib/claudeDesktopStore.ts");
@@ -417,7 +462,10 @@ test("Claude Desktop isolates Windows App and EXE tab operation state", () => {
   assert.match(route, /progress\s*=\s*kindView\.progress/);
   assert.match(route, /progressPercent\s*=\s*progress\?\.percent/);
   assert.match(route, /progressByteLabel\(progress\)/);
-  assert.match(route, /class="install-progress"/);
+  assert.match(route, /desktopClientProgressRecipe\(\)/);
+  assert.match(route, /data-desktop-client-progress-copy/);
+  assert.match(route, /data-desktop-client-progress-track/);
+  assert.match(route, /data-desktop-client-progress-fill/);
   assert.match(route, /claudeDesktop\.progressBytes/);
   assert.match(route, /liveLogGroups\s*=\s*groupedProgressLogs\(kindView\.progressLogs\)/);
   assert.match(route, /kindView\.loading/);

@@ -6,6 +6,35 @@
   import AppIcon from "../components/AppIcon.svelte";
   import SecretInput from "../components/SecretInput.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
+  import {
+    actionButtonRecipe,
+    eyebrowRecipe,
+    wizardActionsRecipe,
+    wizardButtonRowRecipe,
+    wizardChoiceButtonRecipe,
+    wizardChoiceGridRecipe,
+    wizardCodexAuthCardRecipe,
+    wizardFieldErrorRecipe,
+    wizardFormGridRecipe,
+    wizardInlineNoticeRecipe,
+    wizardModeChoiceRecipe,
+    wizardPanelRecipe,
+    wizardPreviewBoxRecipe,
+    wizardPreviewHeadingRecipe,
+    wizardPreviewWarningsRecipe,
+    routeStackRecipe,
+    topStripRecipe,
+    wizardSecurityNoteRecipe,
+    wizardStepContentRecipe,
+    wizardStepItemRecipe,
+    wizardStepperRecipe,
+    spinRecipe,
+    wizardWideFieldRecipe,
+    wizardWriteContentPreviewRecipe,
+    wizardWritePreviewListRecipe,
+    wizardWritePreviewMetaRecipe,
+    wizardWritePreviewRowRecipe
+  } from "../../styled-system/recipes";
   import type {
     DetectionSnapshot,
     InstallState,
@@ -687,20 +716,20 @@
   }
 </script>
 
-<div class="route-stack wizard-route">
-  <section class="top-strip">
+<div class={routeStackRecipe({ width: "full" })}>
+  <section class={topStripRecipe()}>
     <div>
-      <span class="eyebrow">{$t("wizard.eyebrow")}</span>
+      <span class={eyebrowRecipe()}>{$t("wizard.eyebrow")}</span>
       <h1>{$t(steps[currentStep])}</h1>
       <p>{$t("wizard.progress", { current: currentStep + 1, total: steps.length })}</p>
     </div>
-    <div class="wizard-actions">
-      <button class="secondary-button" title={$t("common.back")} disabled={currentStep === 0} on:click={() => (currentStep -= 1)}>
+    <div class={wizardActionsRecipe()}>
+      <button class={actionButtonRecipe()} title={$t("common.back")} disabled={currentStep === 0} on:click={() => (currentStep -= 1)}>
         <AppIcon name="arrowLeft" size={16} />
         {$t("common.back")}
       </button>
       <button
-        class="primary-button"
+        class={actionButtonRecipe({ tone: "primary" })}
         title={$t(currentStep === steps.length - 1 ? "common.save" : "common.next")}
         disabled={currentStep === steps.length - 1 ? !canApply || previewing : !canContinue}
         on:click={handlePrimaryAction}
@@ -716,12 +745,11 @@
     </div>
   </section>
 
-  <div class="stepper">
+  <div class={wizardStepperRecipe()}>
     {#each steps as step, index}
       <div
-        class="stepper-item"
-        class:active={index === currentStep}
-        class:done={index < currentStep}
+        class={wizardStepItemRecipe()}
+        data-step-state={index === currentStep ? "active" : index < currentStep ? "done" : "idle"}
         title={$t(step)}
         aria-current={index === currentStep ? "step" : undefined}
       >
@@ -734,22 +762,23 @@
     {/each}
   </div>
 
-  <section class="panel-band wizard-panel">
+  <section class={wizardPanelRecipe()}>
     {#key currentStep}
-    <div class="wizard-step-content" in:fly={wizardStepEnter} out:fade={wizardStepExit}>
+    <div class={wizardStepContentRecipe()} in:fly={wizardStepEnter} out:fade={wizardStepExit}>
     {#if currentStep === 0}
-      <div class="preview-heading">
+      <div class={wizardPreviewHeadingRecipe()}>
         <div>
           <h2>{$t("wizard.chooseClientTitle")}</h2>
           <p>{$t("wizard.chooseClientDescription")}</p>
         </div>
       </div>
-      <div class="field-grid choices wizard-tool-choices">
+      <div class={wizardChoiceGridRecipe({ kind: "tool" })}>
         {#each visibleToolDefaults as tool}
           {@const toolStatus = toolStatusForProfileTool(tool.id)}
           {@const installed = toolCanCreateProfile(tool.id)}
           <button
-            class:selected={selectedTool === tool.id}
+            class={wizardChoiceButtonRecipe({ kind: "tool" })}
+            data-selected={selectedTool === tool.id}
             disabled={!installed}
             title={installed ? tool.label : $t("wizard.error.toolNotInstalled", { tool: tool.label })}
             on:click={() => applyToolDefaults(tool.id, undefined, profileMode)}
@@ -760,11 +789,12 @@
           </button>
         {/each}
       </div>
-      <div class="wizard-mode-choice">
+      <div class={wizardModeChoiceRecipe()}>
         <strong>{$t("profiles.providerModeTitle")}</strong>
-        <div class="field-grid choices compact-choices">
+        <div class={wizardChoiceGridRecipe({ kind: "compact" })}>
           <button
-            class:selected={profileMode === "config"}
+            class={wizardChoiceButtonRecipe({ kind: "compact" })}
+            data-selected={profileMode === "config"}
             type="button"
             on:click={() => setProfileMode("config")}
           >
@@ -772,7 +802,8 @@
             <span>{$t("profiles.mode.config")}</span>
           </button>
           <button
-            class:selected={profileMode === "gateway"}
+            class={wizardChoiceButtonRecipe({ kind: "compact" })}
+            data-selected={profileMode === "gateway"}
             type="button"
             on:click={() => setProfileMode("gateway")}
           >
@@ -782,10 +813,10 @@
         </div>
       </div>
       {#if !selectedToolInstalled}
-        <div class="inline-error">{applyBlockedMessage()}</div>
+        <div class={wizardInlineNoticeRecipe({ tone: "error" })}>{applyBlockedMessage()}</div>
       {/if}
     {:else if currentStep === 1}
-      <div class="preview-heading">
+      <div class={wizardPreviewHeadingRecipe()}>
         <div>
           <h2>{$t("wizard.connectionTitle")}</h2>
           <p>{$t("wizard.connectionDescription", { mode: applyModeLabel(profileMode) })}</p>
@@ -793,9 +824,10 @@
       </div>
 
       {#if canUseCodexOAuthConfig}
-        <div class="field-grid choices compact-choices">
+        <div class={wizardChoiceGridRecipe({ kind: "compact" })}>
           <button
-            class:selected={!codexOAuthConfig}
+            class={wizardChoiceButtonRecipe({ kind: "compact" })}
+            data-selected={!codexOAuthConfig}
             type="button"
             on:click={() => selectCodexOAuthConfig(false)}
           >
@@ -803,7 +835,8 @@
             <span>{$t("wizard.codexOAuth.typeApi")}</span>
           </button>
           <button
-            class:selected={codexOAuthConfig}
+            class={wizardChoiceButtonRecipe({ kind: "compact" })}
+            data-selected={codexOAuthConfig}
             type="button"
             on:click={() => selectCodexOAuthConfig(true)}
           >
@@ -813,12 +846,12 @@
         </div>
       {/if}
 
-      <div class="form-grid">
+      <div class={wizardFormGridRecipe()}>
         <label>
           {$t("wizard.profileName")}
           <input bind:value={profileName} />
         </label>
-        <label class="wide-field">
+        <label class={wizardWideFieldRecipe()}>
           {$t("profiles.remarkLabel")}
           <textarea bind:value={profileRemark} rows="2" placeholder={$t("profiles.remarkPlaceholder")}></textarea>
         </label>
@@ -839,7 +872,7 @@
             {$t("wizard.providerBaseUrl")}
             <input value={baseUrl} on:input={handleBaseUrlInput} on:blur={normalizeBaseUrlInput} />
             {#if visibleBaseUrlErrorKey}
-              <small class="field-error">{$t(visibleBaseUrlErrorKey)}</small>
+              <small class={wizardFieldErrorRecipe()}>{$t(visibleBaseUrlErrorKey)}</small>
             {/if}
           </label>
           <label>
@@ -849,7 +882,7 @@
         {/if}
       </div>
       {#if codexOAuthConfig}
-        <div class="codex-auth-card">
+        <div class={wizardCodexAuthCardRecipe()}>
           <div>
             <strong>{$t("wizard.codexOAuth.authTitle")}</strong>
             <span>
@@ -865,37 +898,37 @@
               <small>{localCodexAuth.path}</small>
             {/if}
           </div>
-          <div class="button-row">
-            <button class="secondary-button" type="button" disabled={codexAuthChecking} on:click={startCodexAuthorization}>
+          <div class={wizardButtonRowRecipe()}>
+            <button class={actionButtonRecipe()} type="button" disabled={codexAuthChecking} on:click={startCodexAuthorization}>
               {#if codexAuthChecking}
-                <AppIcon name="loading" class="spin" size={16} />
+                <AppIcon name="loading" class={spinRecipe()} size={16} />
                 {$t("common.loading")}
               {:else}
                 <AppIcon name="externalLink" size={16} />
                 {$t("wizard.codexOAuth.openLogin")}
               {/if}
             </button>
-            <button class="secondary-button" type="button" disabled={codexAuthChecking} on:click={refreshCodexAuthStatus}>
-              <AppIcon name={codexAuthChecking ? "loading" : "refresh"} class={codexAuthChecking ? "spin" : ""} size={16} />
+            <button class={actionButtonRecipe()} type="button" disabled={codexAuthChecking} on:click={refreshCodexAuthStatus}>
+              <AppIcon name={codexAuthChecking ? "loading" : "refresh"} class={codexAuthChecking ? spinRecipe() : ""} size={16} />
               {$t("wizard.codexOAuth.recheck")}
             </button>
           </div>
         </div>
         {#if codexAuthError}
-          <div class="inline-error">{codexAuthError}</div>
+          <div class={wizardInlineNoticeRecipe({ tone: "error" })}>{codexAuthError}</div>
         {/if}
         {#if codexAuthMessage}
-          <div class="inline-success">{codexAuthMessage}</div>
+          <div class={wizardInlineNoticeRecipe({ tone: "success" })}>{codexAuthMessage}</div>
         {/if}
       {:else}
-        <div class="security-note">
+        <div class={wizardSecurityNoteRecipe()}>
           <AppIcon name="key" size={18} />
           {$t("wizard.securityNote")}
         </div>
       {/if}
     {:else if currentStep === 2}
-      <div class="preview-box">
-        <div class="preview-heading">
+      <div class={wizardPreviewBoxRecipe()}>
+        <div class={wizardPreviewHeadingRecipe()}>
           <div>
             <h2>{$t("wizard.writePreview")}</h2>
             {#if writePreview}
@@ -907,21 +940,21 @@
         </div>
 
         {#if previewError}
-          <div class="inline-error">{errorLabel(previewError)}</div>
+          <div class={wizardInlineNoticeRecipe({ tone: "error" })}>{errorLabel(previewError)}</div>
         {/if}
         {#if saveError}
-          <div class="inline-error">{saveError}</div>
+          <div class={wizardInlineNoticeRecipe({ tone: "error" })}>{saveError}</div>
         {/if}
         {#if savedProfileName}
-          <div class="inline-success">{$t("wizard.savedProfile", { name: savedProfileName })}</div>
+          <div class={wizardInlineNoticeRecipe({ tone: "success" })}>{$t("wizard.savedProfile", { name: savedProfileName })}</div>
         {/if}
 
         {#if writePreview}
-          <div class="preview-list write-preview-list">
+          <div class={wizardWritePreviewListRecipe()}>
             {#each writePreview.items as item}
-              <div class="write-preview-row">
+              <div class={wizardWritePreviewRowRecipe()}>
                 <strong>{writePreviewLabel(item)}</strong>
-                <span class="write-preview-meta">
+                <span class={wizardWritePreviewMetaRecipe()}>
                   <b>{actionLabel(item.action)}</b>
                 </span>
                 {#if item.path}
@@ -929,7 +962,7 @@
                 {/if}
                 <span>{writePreviewDetail(item)}</span>
                 {#if item.content}
-                  <div class="write-content-preview">
+                  <div class={wizardWriteContentPreviewRecipe()}>
                     <strong>{$t("wizard.writeContentPreview")}</strong>
                     <pre>{item.content}</pre>
                   </div>
@@ -939,7 +972,7 @@
           </div>
 
           {#if writePreview.warnings.length > 0}
-            <div class="preview-warnings">
+            <div class={wizardPreviewWarningsRecipe()}>
               {#each writePreview.warnings as warning}
                 <span>{warningLabel(warning)}</span>
               {/each}

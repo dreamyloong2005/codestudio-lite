@@ -4,6 +4,7 @@
   import "@xterm/xterm/css/xterm.css";
   import AppIcon from "../components/AppIcon.svelte";
   import { t } from "../lib/i18n";
+  import { actionButtonRecipe, terminalPanelActionsRecipe, terminalPanelFrameRecipe, terminalPanelHeaderRecipe, terminalPanelRecipe, terminalPanelStatusRecipe, terminalPanelTitleRecipe } from "../../styled-system/recipes";
   import {
     clearTerminalSession,
     disposeTerminalSession,
@@ -16,6 +17,8 @@
 
   export let onBack: () => void = () => {};
 
+  type TerminalStatusTone = "running" | "exited" | "idle" | "error";
+
   let container: HTMLDivElement | null = null;
   let term: Terminal | null = null;
   let resizeObserver: ResizeObserver | null = null;
@@ -23,6 +26,7 @@
   let sessionRunning = false;
   let sessionExitCode: number | null = null;
   let sessionError: string | null = null;
+  let terminalStatusTone: TerminalStatusTone = "idle";
 
   // Subscribe to store but only read fields we actually render — avoid
   // pulling sessionId into a reactive variable that would toggle {#if}.
@@ -132,95 +136,46 @@
     clearTerminalSession();
     onBack();
   }
+
+  $: terminalStatusTone = sessionError
+    ? "error"
+    : sessionRunning
+      ? "running"
+    : sessionExitCode !== null
+        ? "exited"
+        : "idle";
 </script>
 
-<section class="terminal-panel">
-  <header class="terminal-panel-header">
-    <div class="terminal-panel-title">
+<section class={terminalPanelRecipe()}>
+  <header class={terminalPanelHeaderRecipe()}>
+    <div class={terminalPanelTitleRecipe()}>
       <AppIcon name="system" size={18} />
       <strong>{$t("terminal.title", { name: sessionToolName || $t("terminal.console") })}</strong>
     </div>
-    <div class="terminal-panel-status">
+    <div class={terminalPanelStatusRecipe({ tone: terminalStatusTone })}>
       {#if sessionError}
-        <span class="terminal-error">{sessionError}</span>
+        <span>{sessionError}</span>
       {:else if sessionRunning}
-        <span class="terminal-running">{$t("common.running")}</span>
+        <span>{$t("common.running")}</span>
       {:else if sessionExitCode !== null}
-        <span class="terminal-exited">{$t("terminal.exitCode", { code: sessionExitCode })}</span>
+        <span>{$t("terminal.exitCode", { code: sessionExitCode })}</span>
       {:else}
-        <span class="terminal-idle">{$t("terminal.ready")}</span>
+        <span>{$t("terminal.ready")}</span>
       {/if}
     </div>
-    <div class="terminal-panel-actions">
+    <div class={terminalPanelActionsRecipe()}>
       {#if sessionRunning}
-        <button class="secondary-button" type="button" on:click={handleStop}>
+        <button class={actionButtonRecipe()} type="button" on:click={handleStop}>
           <AppIcon name="stop" size={16} />
           {$t("common.stop")}
         </button>
       {/if}
-      <button class="secondary-button" type="button" on:click={handleBack}>
+      <button class={actionButtonRecipe()} type="button" on:click={handleBack}>
         <AppIcon name="arrowLeft" size={16} />
         {$t("terminal.back")}
       </button>
     </div>
   </header>
 
-  <div class="terminal-panel-frame" bind:this={container}></div>
+  <div class={terminalPanelFrameRecipe()} data-terminal-frame bind:this={container}></div>
 </section>
-
-<style>
-  .terminal-panel {
-    display: grid;
-    grid-template-rows: auto 1fr;
-    gap: 14px;
-    min-height: 0;
-    height: 100%;
-  }
-  .terminal-panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .terminal-panel-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text);
-  }
-  .terminal-panel-title strong {
-    font-size: 15px;
-  }
-  .terminal-panel-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    font-weight: 750;
-  }
-  .terminal-running { color: #22c55e; }
-  .terminal-exited { color: var(--text-muted); }
-  .terminal-idle { color: var(--text-muted); }
-  .terminal-error { color: var(--danger, #ef4444); }
-  .terminal-panel-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .terminal-panel-frame {
-    min-height: 0;
-    height: 100%;
-    overflow: hidden;
-    border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    background: #0f172a;
-    padding: 8px;
-  }
-  :global(.terminal-panel-frame .xterm) {
-    height: 100%;
-  }
-  :global(.terminal-panel-frame .xterm-viewport) {
-    border-radius: 8px;
-  }
-</style>

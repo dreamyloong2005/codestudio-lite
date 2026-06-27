@@ -1,3 +1,4 @@
+import "./panda.css";
 import "./styles.css";
 import App from "./App.svelte";
 import { mount } from "svelte";

@@ -1,4 +1,5 @@
 node_modules/
+styled-system/
 dist/
 dist-portable/
 .tmp-tests/
@@ -12,4 +13,5 @@ src-tauri/target/
 !.env.example
 # Temporary one-off patch/build scripts (not part of the codebase)
 /*.cjs
+!/postcss.config.cjs
 /*.mjs
