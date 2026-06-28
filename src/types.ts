@@ -172,6 +172,17 @@ export interface ClaudeDesktopPendingLaunch {
   requestedAt: string | null;
 }
 
+export interface ClaudeDesktopLocalizationProgress {
+  phase: "launching" | "debugger" | "injecting" | "done" | "failed";
+  message: string;
+  attempt: number;
+  maxAttempts: number;
+  done: boolean;
+  success: boolean;
+  attached?: number | null;
+  error?: string | null;
+}
+
 export interface ClaudeDesktopPlan {
   downloadUrl: string;
   sha256: string;

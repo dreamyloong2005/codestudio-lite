@@ -12,7 +12,9 @@ use crate::core::platform::package;
 use crate::core::process_control;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::core::profile;
-use crate::core::types::{ClaudeDesktopPendingLaunch, InstallTerminalOutput};
+use crate::core::types::{
+    ClaudeDesktopLocalizationProgress, ClaudeDesktopPendingLaunch, InstallTerminalOutput,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -36,8 +38,9 @@ use tungstenite::{connect, Message};
 const CLAUDE_NODE_INSPECT_PORT: u16 = 9229;
 const CLAUDE_ZH_INJECTION_RETRY_COUNT: usize = 30;
 const CLAUDE_ZH_INJECTION_RETRY_MS: u64 = 500;
-#[cfg(target_os = "windows")]
 const CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+const CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT: u32 = 5;
+const CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS: u64 = 1_500;
 #[cfg(target_os = "macos")]
 const MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 #[cfg(target_os = "macos")]
@@ -49,7 +52,7 @@ const WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
 #[cfg(target_os = "windows")]
 const WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS: u64 = 100;
 #[cfg(target_os = "windows")]
-const WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(20);
+const WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TERMINAL_OUTPUT_EVENT: &str = "install-terminal://output";
 #[cfg(target_os = "macos")]
 static MACOS_ACCESSIBILITY_PROMPT_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -83,8 +86,7 @@ pub fn launch_with_app(localize: bool, app: Option<tauri::AppHandle>) -> Result<
 
     #[cfg(target_os = "windows")]
     {
-        let _ = app;
-        launch_windows_claude_desktop(localize)?;
+        launch_windows_claude_desktop(localize, app)?;
     }
 
     #[cfg(target_os = "macos")]
@@ -234,32 +236,125 @@ pub fn spawn_localization_injector(app: tauri::AppHandle, session_id: String) {
 }
 
 pub fn spawn_silent_localization_injector() {
+    spawn_silent_localization_injector_with_app(None);
+}
+
+pub fn spawn_silent_localization_injector_with_app(app: Option<tauri::AppHandle>) {
     thread::spawn(move || {
-        #[cfg(target_os = "windows")]
-        {
-            let _manual_debugger_activation_fallback = "manualDebuggerActivationFallback";
-            thread::spawn(move || {
-                let _ = enable_claude_main_process_debugger();
-            });
-            let _ = retry_inject_localization_until(CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT);
+        run_background_localization_retry_loop(app);
+    });
+}
+
+fn emit_localization_progress(
+    app: Option<&tauri::AppHandle>,
+    phase: &str,
+    message: &str,
+    attempt: u32,
+    max_attempts: u32,
+    done: bool,
+    success: bool,
+    attached: Option<usize>,
+    error: Option<String>,
+) {
+    let Some(app) = app else {
+        return;
+    };
+    let _ = app.emit(
+        "claude-desktop://localization-progress",
+        ClaudeDesktopLocalizationProgress {
+            phase: phase.to_string(),
+            message: message.to_string(),
+            attempt,
+            max_attempts,
+            done,
+            success,
+            attached,
+            error,
+        },
+    );
+}
+
+fn run_background_localization_retry_loop(app: Option<tauri::AppHandle>) {
+    let _manual_debugger_activation_fallback = "manualDebuggerActivationFallback";
+    let mut last_error = "Claude Desktop localization did not start.".to_string();
+    for attempt in 1..=CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT {
+        emit_localization_progress(
+            app.as_ref(),
+            "debugger",
+            "claudeDesktop.localizationDebugger",
+            attempt,
+            CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT,
+            false,
+            false,
+            None,
+            None,
+        );
+
+        let debugger_result = request_claude_main_process_debugger_for_background_retry();
+
+        match debugger_result {
+            Ok(()) => {
+                emit_localization_progress(
+                    app.as_ref(),
+                    "injecting",
+                    "claudeDesktop.localizationInjecting",
+                    attempt,
+                    CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT,
+                    false,
+                    false,
+                    None,
+                    None,
+                );
+                match retry_inject_localization_until(CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT) {
+                    Ok(attached) => {
+                        emit_localization_progress(
+                            app.as_ref(),
+                            "done",
+                            "claudeDesktop.localizationDone",
+                            attempt,
+                            CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT,
+                            true,
+                            true,
+                            Some(attached),
+                            None,
+                        );
+                        return;
+                    }
+                    Err(err) => {
+                        last_error = err;
+                    }
+                }
+            }
+            Err(err) => {
+                last_error = err;
+            }
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let _ = enable_claude_main_process_debugger();
-            let _ = retry_inject_localization();
+        if attempt < CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT {
+            thread::sleep(Duration::from_millis(
+                CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS,
+            ));
         }
-    });
+    }
+
+    emit_localization_progress(
+        app.as_ref(),
+        "failed",
+        "claudeDesktop.localizationFailed",
+        CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT,
+        CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT,
+        true,
+        false,
+        None,
+        Some(last_error),
+    );
 }
 
 fn retry_localization_after_background_debugger_request() -> Result<usize, String> {
     #[cfg(target_os = "windows")]
     {
         let _manual_debugger_activation_fallback = "manualDebuggerActivationFallback";
-        thread::spawn(move || {
-            let _ = enable_claude_main_process_debugger();
-        });
-        return retry_inject_localization_until(CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT);
+        return run_background_localization_retry_loop_for_terminal();
     }
 
     #[cfg(target_os = "macos")]
@@ -270,6 +365,58 @@ fn retry_localization_after_background_debugger_request() -> Result<usize, Strin
 
     #[allow(unreachable_code)]
     retry_inject_localization()
+}
+
+fn run_background_localization_retry_loop_for_terminal() -> Result<usize, String> {
+    let mut last_error = "Claude Desktop localization did not start.".to_string();
+    for attempt in 1..=CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT {
+        match request_claude_main_process_debugger_for_background_retry() {
+            Ok(()) => {
+                match retry_inject_localization_until(CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT) {
+                    Ok(attached) => return Ok(attached),
+                    Err(err) => last_error = err,
+                }
+            }
+            Err(err) => last_error = err,
+        }
+
+        if attempt < CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT {
+            thread::sleep(Duration::from_millis(
+                CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS,
+            ));
+        }
+    }
+    Err(last_error)
+}
+
+fn request_claude_main_process_debugger_for_background_retry() -> Result<(), String> {
+    if claude_node_inspector_available() {
+        return Ok(());
+    }
+    request_claude_main_process_debugger_once()?;
+    if wait_for_claude_node_inspector() {
+        Ok(())
+    } else {
+        Err(
+            "Claude main process debugger request finished, but no Node inspector endpoint opened yet."
+                .to_string(),
+        )
+    }
+}
+
+fn request_claude_main_process_debugger_once() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        return request_windows_claude_main_process_debugger_once();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return request_macos_claude_main_process_debugger_once();
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 fn ensure_patch_files() -> Result<PathBuf, String> {
@@ -374,7 +521,7 @@ fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
 
 fn powershell_file_command(path: &Path) -> String {
     format!(
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File {}",
+        "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {}",
         windows_shell_quote(&path.to_string_lossy())
     )
 }
@@ -384,7 +531,10 @@ fn sh_file_command(path: &Path) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn launch_windows_claude_desktop(localize: bool) -> Result<Option<u32>, String> {
+fn launch_windows_claude_desktop(
+    localize: bool,
+    app: Option<tauri::AppHandle>,
+) -> Result<Option<u32>, String> {
     let args = claude_launch_args(localize);
     close_existing_claude_for_localized_launch()?;
     if localize {
@@ -393,13 +543,24 @@ fn launch_windows_claude_desktop(localize: bool) -> Result<Option<u32>, String> 
         write_localized_launch_marker()?;
         if package::detect_first_msix_package(claude_desktop_windows_package_identities()).is_some()
         {
-            launch_windows_claude_msix(&args)?;
+            launch_windows_claude_localized_msix_desktop_package(&args)?;
         } else if let Some(exe) = find_windows_claude_exe() {
             launch_windows_claude_exe(exe, &args)?;
         } else {
-            launch_windows_claude_msix(&args)?;
+            launch_windows_claude_localized_msix_desktop_package(&args)?;
         }
-        spawn_silent_localization_injector();
+        emit_localization_progress(
+            app.as_ref(),
+            "launching",
+            "claudeDesktop.localizationLaunching",
+            0,
+            CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT,
+            false,
+            false,
+            None,
+            None,
+        );
+        spawn_silent_localization_injector_with_app(app);
         return Ok(None);
     }
 
@@ -412,6 +573,27 @@ fn launch_windows_claude_desktop(localize: bool) -> Result<Option<u32>, String> 
     }
 
     launch_windows_claude_msix(&args)
+}
+
+#[cfg(target_os = "windows")]
+fn launch_windows_claude_localized_msix_desktop_package(
+    args: &[String],
+) -> Result<Option<u32>, String> {
+    match package::launch_first_desktop_package_with_args(
+        claude_desktop_windows_package_identities(),
+        args,
+    ) {
+        Ok(()) => {
+            for _ in 0..20 {
+                if process_control::is_process_running("claude") {
+                    return Ok(None);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            launch_windows_claude_msix(args)
+        }
+        Err(_) => launch_windows_claude_msix(args),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -519,8 +701,12 @@ fn macos_pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn claude_launch_args(_localize: bool) -> Vec<String> {
-    Vec::new()
+fn claude_launch_args(localize: bool) -> Vec<String> {
+    if localize {
+        vec![format!("--inspect=127.0.0.1:{CLAUDE_NODE_INSPECT_PORT}")]
+    } else {
+        Vec::new()
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -756,52 +942,92 @@ function Start-ClaudeWindowsApp {
   Start-Process -FilePath $target
 }
 
+function Get-ClaudeProcessMap {
+  $map = @{}
+  foreach ($proc in (Get-Process -Name 'claude' -ErrorAction SilentlyContinue)) {
+    try { $map[[int]$proc.Id] = $proc } catch {}
+  }
+  $map
+}
+
+function Build-ClaudeWindowCandidate([IntPtr]$hWnd, $proc) {
+  if (-not $proc -or $hWnd -eq [IntPtr]::Zero) { return $null }
+
+  $titleBuilder = New-Object System.Text.StringBuilder 512
+  [CslClaudeWin32]::GetWindowText($hWnd, $titleBuilder, $titleBuilder.Capacity) | Out-Null
+  $classBuilder = New-Object System.Text.StringBuilder 256
+  [CslClaudeWin32]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
+  $rect = New-Object CslClaudeWin32+RECT
+  [CslClaudeWin32]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
+
+  $width = $rect.Right - $rect.Left
+  $height = $rect.Bottom - $rect.Top
+  if ($width -lt 320 -or $height -lt 240) { return $null }
+
+  $title = $titleBuilder.ToString()
+  $isInspectorPrompt = Test-ClaudeInspectorPromptCandidate $title $width $height
+  $titleScore = if ($title -match 'Claude|chat') { 8 } elseif ($title.Length -gt 0) { 2 } else { 0 }
+
+  $path = ''
+  try { $path = $proc.Path } catch { $path = '' }
+  if ($path -and $path.IndexOf('Claude', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    return $null
+  }
+
+  $className = $classBuilder.ToString()
+  if ($className -ne 'Chrome_WidgetWin_1') { return $null }
+
+  [pscustomobject]@{
+    Hwnd = $hWnd
+    ProcessId = [int]$proc.Id
+    Title = $title
+    ClassName = $className
+    Visible = [CslClaudeWin32]::IsWindowVisible($hWnd)
+    Iconic = [CslClaudeWin32]::IsIconic($hWnd)
+    IsInspectorPrompt = $isInspectorPrompt
+    TitleScore = $titleScore
+    Width = $width
+    Height = $height
+    Area = $width * $height
+  }
+}
+
+function Get-ClaudeMainWindowFromProcessHandles($claudeProcesses) {
+  $candidates = @()
+  foreach ($proc in $claudeProcesses.Values) {
+    try {
+      $hWnd = [IntPtr]$proc.MainWindowHandle
+      if ($hWnd -eq [IntPtr]::Zero) { continue }
+      $candidate = Build-ClaudeWindowCandidate $hWnd $proc
+      if ($candidate -and -not $candidate.IsInspectorPrompt) { $candidates += $candidate }
+    } catch {}
+  }
+  $selected = $candidates |
+    Sort-Object -Property @{ Expression = { if ($_.Visible) { 1 } else { 0 } }; Descending = $true },
+                          @{ Expression = { $_.TitleScore }; Descending = $true },
+                          @{ Expression = { $_.Area }; Descending = $true },
+                          @{ Expression = { $_.ProcessId }; Descending = $true } |
+    Select-Object -First 1
+  if ($selected) {
+    Write-ClaudeDebuggerLog "Selected Claude window from process handle hwnd=[$($selected.Hwnd)] pid=[$($selected.ProcessId)] title=[$($selected.Title)] size=[$($selected.Width)x$($selected.Height)]."
+  }
+  $selected
+}
+
 function Get-ClaudeMainWindow {
   $windows = New-Object System.Collections.Generic.List[object]
+  $claudeProcesses = Get-ClaudeProcessMap
+  if ($claudeProcesses.Count -eq 0) { return $null }
+  $candidate = Get-ClaudeMainWindowFromProcessHandles $claudeProcesses
+  if ($candidate) { return $candidate }
   [CslClaudeWin32]::EnumWindows({
     param([IntPtr]$hWnd, [IntPtr]$extraData)
     $processId = [uint32]0
     [CslClaudeWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId) | Out-Null
-    $proc = Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
-    if (-not $proc -or $proc.ProcessName -ne 'claude') { return $true }
-
-    $titleBuilder = New-Object System.Text.StringBuilder 512
-    [CslClaudeWin32]::GetWindowText($hWnd, $titleBuilder, $titleBuilder.Capacity) | Out-Null
-    $classBuilder = New-Object System.Text.StringBuilder 256
-    [CslClaudeWin32]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
-    $rect = New-Object CslClaudeWin32+RECT
-    [CslClaudeWin32]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
-
-    $width = $rect.Right - $rect.Left
-    $height = $rect.Bottom - $rect.Top
-    if ($width -lt 320 -or $height -lt 240) { return $true }
-
-    $title = $titleBuilder.ToString()
-    $isInspectorPrompt = Test-ClaudeInspectorPromptCandidate $title $width $height
-    $titleScore = if ($title -match 'Claude|chat') { 8 } elseif ($title.Length -gt 0) { 2 } else { 0 }
-
-    $path = ''
-    try { $path = $proc.Path } catch { $path = '' }
-    if ($path -and $path.IndexOf('Claude', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-      return $true
-    }
-
-    $className = $classBuilder.ToString()
-    if ($className -ne 'Chrome_WidgetWin_1') { return $true }
-
-    $windows.Add([pscustomobject]@{
-      Hwnd = $hWnd
-      ProcessId = [int]$processId
-      Title = $title
-      ClassName = $className
-      Visible = [CslClaudeWin32]::IsWindowVisible($hWnd)
-      Iconic = [CslClaudeWin32]::IsIconic($hWnd)
-      IsInspectorPrompt = $isInspectorPrompt
-      TitleScore = $titleScore
-      Width = $width
-      Height = $height
-      Area = $width * $height
-    }) | Out-Null
+    $proc = $claudeProcesses[[int]$processId]
+    if (-not $proc) { return $true }
+    $candidate = Build-ClaudeWindowCandidate $hWnd $proc
+    if ($candidate) { $windows.Add($candidate) | Out-Null }
     return $true
   }, [IntPtr]::Zero) | Out-Null
 
@@ -1432,10 +1658,10 @@ function Close-ClaudeBlockingWebModals($window) {
       # Gauge success by the in-window Menu button reappearing (it is hidden
       # while a blocking popup covers the toolbar) rather than by the modal
       # element's visibility, which stays stale after the popup is dismissed.
-      if ($invoked -and (Wait-ClaudeCondition 30 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } })) { $closed += 1; continue }
+      if ($invoked -and (Wait-ClaudeCondition 8 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } })) { $closed += 1; continue }
       $invoked = Invoke-ClaudeElementDefaultAction $button
       if (-not $invoked) { break }
-      if (Wait-ClaudeCondition 30 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } }) { $closed += 1; continue }
+      if (Wait-ClaudeCondition 8 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } }) { $closed += 1; continue }
       break
     }
 
@@ -1591,7 +1817,7 @@ if ($window) {
   Write-ClaudeDebuggerLog 'Using existing Claude window before app activation.'
 } else {
   Start-ClaudeWindowsApp
-  $window = Wait-ClaudeCondition 30 40 {
+  $window = Wait-ClaudeCondition 8 40 {
     $candidate = Get-ClaudeMainWindow
     if ($candidate) { $candidate } else { $null }
   }
@@ -1633,7 +1859,7 @@ $debuggerNames = @(
 # popup. Once the Menu button appears, the dismiss search stops too.
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($window.Hwnd)
 $menuReady = $false
-for ($phase = 0; $phase -lt 8; $phase++) {
+for ($phase = 0; $phase -lt 4; $phase++) {
   if (Find-ClaudeMenuButton $window) {
     $menuReady = $true
     Write-ClaudeDebuggerLog 'Claude in-window menu button appeared; proceeding to menu automation.'
@@ -1647,7 +1873,7 @@ for ($phase = 0; $phase -lt 8; $phase++) {
     if (-not $invoked) { $invoked = Invoke-ClaudeElementDefaultAction $closeButton }
     if ($invoked) {
       # Give the popup a moment to dismiss before the next Menu check.
-      Wait-ClaudeCondition 30 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } } | Out-Null
+      Wait-ClaudeCondition 8 50 { if (Find-ClaudeMenuButton $window) { $true } else { $null } } | Out-Null
     }
   } else {
     # No dismiss button found this round; briefly keep polling for the Menu
@@ -1780,6 +2006,8 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-ExecutionPolicy",
             "Bypass",
             "-File",
@@ -2829,7 +3057,11 @@ fn windows_shell_quote(value: &str) -> String {
 }
 
 fn windows_launch_script(localize: bool) -> String {
-    let args = "$argsList = @()".to_string();
+    let args = if localize {
+        format!("$argsList = @('--inspect=127.0.0.1:{CLAUDE_NODE_INSPECT_PORT}')")
+    } else {
+        "$argsList = @()".to_string()
+    };
     let localized_marker = if localize {
         r#"$markerDir = Join-Path $HOME '.codestudio-lite\claude-desktop-patch'
 New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
@@ -2838,14 +3070,45 @@ Set-Content -LiteralPath (Join-Path $markerDir 'localized-launch.flag') -Value '
     } else {
         ""
     };
-    // Both localized and non-localized launches activate the app by MSIX
-    // app identity (shell:AppsFolder). Localized launch does not pass debug
-    // arguments or rewrite Claude files; CodeStudio Lite opens Claude's
-    // official main-process debugger after launch and injects at runtime.
-    let msix_launch = r#"
+    // 本地化 MSIX 启动先尝试 packaged desktop execution，让 Node
+    // inspector 参数进入 Claude 的 Electron 主进程。Desktop Bridge
+    // 不可用时再回退到 app identity 激活。
+    let msix_launch = if localize {
+        r#"
+  function Wait-ClaudeLaunchProcess([int]$attempts, [int]$delayMs) {
+    for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
+      $proc = Get-Process -Name 'claude' -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($proc) { return $true }
+      Start-Sleep -Milliseconds $delayMs
+    }
+    return $false
+  }
+  $launchedDesktopPackage = $false
+  if (Get-Command Invoke-CommandInDesktopPackage -ErrorAction SilentlyContinue) {
+    try {
+      $command = [string]$app.Executable
+      if ($command) {
+        $commandPath = Join-Path $pkg.InstallLocation $command
+        if (-not (Test-Path -LiteralPath $commandPath)) { throw "Package executable was not found: $commandPath" }
+        $argsLine = [string]::Join(' ', $argsList)
+        Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId $appId -Command $commandPath -Args $argsLine -ErrorAction Stop
+        $launchedDesktopPackage = Wait-ClaudeLaunchProcess 20 100
+      }
+    } catch {
+      $launchedDesktopPackage = $false
+    }
+  }
+  if (-not $launchedDesktopPackage) {
+    $target = 'shell:AppsFolder\' + $pkg.PackageFamilyName + '!' + $appId
+    Start-Process -FilePath $target
+  }
+"#
+    } else {
+        r#"
   $target = 'shell:AppsFolder\' + $pkg.PackageFamilyName + '!' + $appId
   Start-Process -FilePath $target
-"#;
+"#
+    };
     format!(
         r#"$ErrorActionPreference = 'Stop'
 $pkgNames = @('Claude', 'Anthropic.Claude')

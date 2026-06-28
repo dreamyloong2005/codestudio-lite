@@ -948,13 +948,10 @@ $appId = [string]$app.Id
 if (-not $appId) {{ $appId = 'App' }}
 $command = [string]$app.Executable
 if (-not $command) {{ throw 'Package executable is unavailable.' }}
+$commandPath = Join-Path $pkg.InstallLocation $command
+if (-not (Test-Path -LiteralPath $commandPath)) {{ throw "Package executable was not found: $commandPath" }}
 $argsLine = {arguments}
-$startCommand = "Start-Process -FilePath '" + $command.Replace("'", "''") + "'"
-if ($argsLine) {{
-  $startCommand += " -ArgumentList '" + $argsLine.Replace("'", "''") + "'"
-}}
-$innerArgs = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + $startCommand.Replace('"', '\"') + '"'
-Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId $appId -Command 'powershell.exe' -Args $innerArgs -ErrorAction Stop
+Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId $appId -Command $commandPath -Args $argsLine -ErrorAction Stop
 "#,
         package_family_name = ps_quote(package_family_name),
         arguments = ps_quote(&argument_line),
@@ -1472,9 +1469,11 @@ mod tests {
         );
 
         assert!(script.contains("Invoke-CommandInDesktopPackage"));
-        assert!(script.contains("Start-Process"));
-        assert!(script.contains("-Command"));
-        assert!(script.contains("powershell.exe"));
+        assert!(script.contains("$commandPath = Join-Path $pkg.InstallLocation $command"));
+        assert!(script.contains("-Command $commandPath -Args $argsLine"));
+        assert!(!script.contains("-Command $command -Args $argsLine"));
+        assert!(!script.contains("Start-Process"));
+        assert!(!script.contains("powershell.exe"));
         assert!(script.contains("'Claude_pzs8sxrjxfjjc'"));
         assert!(script.contains("--remote-debugging-port=9229"));
         assert!(!script.contains("__CODESTUDIO"));

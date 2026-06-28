@@ -80,7 +80,6 @@
   $: statusTone = (installed ? "ok" : "warning") as Severity;
   $: canStage = Boolean(effectivePlan && !effectivePlan.upToDate && effectivePlan.route !== "unsupported");
   $: canInstall = canStage;
-  $: isRunning = state?.running ?? false;
   $: canLaunch = Boolean(installed);
   $: canUninstall = Boolean(installed);
   $: progressPercent = progress?.percent ?? null;
@@ -210,7 +209,7 @@
     <div class={topActionsRecipe()}>
       <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch || busyAction !== null} on:click={launchCodex}>
         <AppIcon name="play" size={16} />
-        {$t(isRunning ? "codexClient.restart" : "codexClient.launch")}
+        {$t("codexClient.launch")}
       </button>
       <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={refreshCodex}>
         <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? spinRecipe() : ""} />

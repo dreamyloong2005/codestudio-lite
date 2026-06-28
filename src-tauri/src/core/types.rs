@@ -229,6 +229,21 @@ pub struct InstallTerminalOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ClaudeDesktopLocalizationProgress {
+    pub phase: String,
+    pub message: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub done: bool,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolLaunchShellOption {
     pub id: String,
     pub label: String,

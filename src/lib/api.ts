@@ -6,6 +6,7 @@ import type {
   ApplyProfileRequest,
   ApplyProfileResult,
   BackupManifest,
+  ClaudeDesktopLocalizationProgress,
   ClaudeDesktopLaunchRequest,
   ClaudeDesktopPendingLaunch,
   ClaudeDesktopInstallKinds,
@@ -77,6 +78,7 @@ import type {
 const isTauri = () => Boolean(window.__TAURI_INTERNALS__);
 const codexClientProgressListeners = new Set<(progress: CodexClientProgress) => void>();
 const toolInstallProgressListeners = new Set<(progress: ToolInstallProgress) => void>();
+const claudeDesktopLocalizationProgressListeners = new Set<(progress: ClaudeDesktopLocalizationProgress) => void>();
 const installTerminalOutputListeners = new Set<(output: InstallTerminalOutput) => void>();
 const PROTOCOL_OPENAI_CHAT_COMPLETIONS = "openai-chat-completions";
 const PROTOCOL_OPENAI_RESPONSES = "openai-responses";
@@ -954,6 +956,19 @@ export async function launchClaudeDesktop(request: ClaudeDesktopLaunchRequest = 
   if (isTauri()) {
     return invoke("launch_claude_desktop", { localize: request.localize });
   }
+}
+
+export async function listenClaudeDesktopLocalizationProgress(
+  handler: (progress: ClaudeDesktopLocalizationProgress) => void
+): Promise<() => void> {
+  if (isTauri()) {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<ClaudeDesktopLocalizationProgress>("claude-desktop://localization-progress", (event) =>
+      handler(event.payload)
+    );
+  }
+  claudeDesktopLocalizationProgressListeners.add(handler);
+  return () => claudeDesktopLocalizationProgressListeners.delete(handler);
 }
 
 export async function takePendingClaudeDesktopLaunchAfterRestart(): Promise<ClaudeDesktopPendingLaunch | null> {

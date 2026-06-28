@@ -8,7 +8,7 @@
     launchClaudeDesktop,
     restartClaudeDesktopAfterAccessibilityGrant
   } from "../lib/api";
-  import { t, type TranslationKey } from "../lib/i18n";
+  import { locale, t, type TranslationKey } from "../lib/i18n";
   import {
     claudeDesktopView,
     claudeDesktopVisibleInstallKinds,
@@ -23,6 +23,7 @@
     setClaudeDesktopLocalizeLaunch,
     setClaudeDesktopPendingLaunchAfterRestart,
     setClaudeDesktopSelectedKind,
+    startClaudeDesktopLocalizationProgressListener,
     startClaudeDesktopProgressListener
   } from "../lib/claudeDesktopStore";
   import { css } from "../../styled-system/css";
@@ -69,6 +70,7 @@
   $: activePlanDetails = kindView.plan;
   $: busyAction = kindView.busyAction;
   $: progress = kindView.progress;
+  $: localizationProgress = view.localizationProgress;
   $: progressPercent = progress?.percent ?? null;
   $: progressStepLabel = progress?.step && progress.stepTotal
     ? $t("claudeDesktop.progressStep", { current: progress.step, total: progress.stepTotal })
@@ -80,7 +82,6 @@
   $: canInstall = !installed && Boolean(installPlan?.canInstall) && busyAction === null;
   $: canUpdate = installed && Boolean(status?.updateAvailable && updatePlan?.canInstall) && busyAction === null;
   $: canUninstall = installed && busyAction === null;
-  $: isRunning = status?.running ?? false;
   $: canLaunch = installed && busyAction === null && !launching;
   $: activePlan = installed ? updatePlan : installPlan;
   $: activePlanAvailable = Boolean(activePlan?.canInstall);
@@ -122,6 +123,7 @@
 
   onMount(() => {
     startClaudeDesktopProgressListener();
+    startClaudeDesktopLocalizationProgressListener();
     void initializeClaudeDesktopPage();
   });
 
@@ -214,12 +216,43 @@
     return label === key ? value : label;
   }
 
+  const localizationMessageFallbacks: Record<string, Record<string, string>> = {
+    "claudeDesktop.localizationLaunching": {
+      "zh-CN": "已启动 Claude Desktop，正在后台准备汉化...",
+      "zh-TW": "已啟動 Claude Desktop，正在背景準備漢化...",
+      "en-US": "Claude Desktop has launched; preparing localization in the background..."
+    },
+    "claudeDesktop.localizationDebugger": {
+      "zh-CN": "正在检测并开启 Claude 主进程调试器...",
+      "zh-TW": "正在偵測並啟用 Claude 主進程偵錯器...",
+      "en-US": "Checking and enabling Claude Main Process Debugger..."
+    },
+    "claudeDesktop.localizationInjecting": {
+      "zh-CN": "正在通过调试器注入中文界面资源...",
+      "zh-TW": "正在透過偵錯器注入中文介面資源...",
+      "en-US": "Injecting Chinese UI resources through the debugger..."
+    },
+    "claudeDesktop.localizationDone": {
+      "zh-CN": "Claude Desktop 汉化已生效。",
+      "zh-TW": "Claude Desktop 漢化已生效。",
+      "en-US": "Claude Desktop localization is active."
+    },
+    "claudeDesktop.localizationFailed": {
+      "zh-CN": "Claude Desktop 汉化未能自动生效。",
+      "zh-TW": "Claude Desktop 漢化未能自動生效。",
+      "en-US": "Claude Desktop localization did not activate automatically."
+    }
+  };
+
   function formatProgressMessage(message: string | null | undefined) {
     if (!message) {
       return $t("claudeDesktop.progressWorking");
     }
     if (message.startsWith("claudeDesktop.")) {
-      return $t(message as TranslationKey);
+      const localized = $t(message as TranslationKey);
+      return localized === message
+        ? localizationMessageFallbacks[message]?.[$locale] ?? localizationMessageFallbacks[message]?.["en-US"] ?? localized
+        : localized;
     }
     return message;
   }
@@ -267,8 +300,8 @@
     launching = true;
     try {
       await launchClaudeDesktop({ localize });
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-      await refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true });
+      launching = false;
+      void refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("ACCESSIBILITY_NOT_TRUSTED")) {
@@ -345,13 +378,13 @@
       </div>
     </div>
     <div class={topActionsRecipe()}>
-      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch} title={$t(isRunning ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: "Claude Desktop" })} on:click={launchClaude}>
+      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch} title={$t("toolLaunch.actionTitle", { name: "Claude Desktop" })} on:click={launchClaude}>
         {#if launching}
           <AppIcon name="loading" size={16} class={spinRecipe()} />
-          {$t(isRunning ? "toolLaunch.restarting" : "toolLaunch.starting")}
+          {$t("toolLaunch.starting")}
         {:else}
           <AppIcon name="play" size={16} />
-          {$t(isRunning ? "toolLaunch.restart" : "toolLaunch.action")}
+          {$t("toolLaunch.action")}
         {/if}
       </button>
       <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true })}>
@@ -365,7 +398,7 @@
     <DismissibleNotice tone="error" message={view.error} on:dismiss={dismissClaudeDesktopError} />
   {/if}
   {#if view.success}
-    <DismissibleNotice tone="success" message={view.success} on:dismiss={dismissClaudeDesktopSuccess} />
+    <DismissibleNotice tone="success" message={formatProgressMessage(view.success)} on:dismiss={dismissClaudeDesktopSuccess} />
   {/if}
   {#if launchError}
     <DismissibleNotice tone="error" message={launchError} on:dismiss={dismissLaunchError} />
@@ -476,6 +509,24 @@
         <div data-desktop-client-progress-meta>
           <span>{progressPercent === null ? $t("claudeDesktop.progressUnknown") : `${progressPercent.toFixed(0)}%`}</span>
           <span>{progressByteLabel(progress)}</span>
+        </div>
+      </div>
+    {/if}
+    {#if localizationProgress && (localizationProgress.phase !== "done" || localizationProgress.success)}
+      <div class={desktopClientProgressRecipe()} aria-live="polite">
+        <div data-desktop-client-progress-copy>
+          <strong>{progressPhaseLabel(localizationProgress.phase)}</strong>
+          <span>{formatProgressMessage(localizationProgress.error ?? localizationProgress.message)}</span>
+        </div>
+        <div data-desktop-client-progress-track data-indeterminate={localizationProgress.phase !== "done" && localizationProgress.phase !== "failed"}>
+          <span
+            data-desktop-client-progress-fill
+            style={`width: ${localizationProgress.phase === "done" ? 100 : localizationProgress.phase === "failed" ? 100 : 38}%`}
+          ></span>
+        </div>
+        <div data-desktop-client-progress-meta>
+          <span>{localizationProgress.attempt}/{localizationProgress.maxAttempts}</span>
+          <span>{localizationProgress.attached ?? $t("claudeDesktop.progressUnknown")}</span>
         </div>
       </div>
     {/if}

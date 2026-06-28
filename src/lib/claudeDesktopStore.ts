@@ -3,6 +3,7 @@ import {
   inspectClaudeDesktopPage,
   installTool,
   launchClaudeDesktop,
+  listenClaudeDesktopLocalizationProgress,
   listenToolInstallProgress,
   loadCachedDetection,
   openClaudeDesktopPath,
@@ -11,6 +12,7 @@ import {
 } from "./api";
 import type {
   ClaudeDesktopInstallKinds,
+  ClaudeDesktopLocalizationProgress,
   ClaudeDesktopPendingLaunch,
   ClaudeDesktopPlan,
   CodexClientCapability,
@@ -54,6 +56,7 @@ interface ClaudeDesktopViewState {
   // Stored in the view store rather than component-local state so it is not
   // reset to its default when the page unmounts/remounts on navigation.
   localizeLaunch: boolean;
+  localizationProgress: ClaudeDesktopLocalizationProgress | null;
   // Per-kind install detection (MSIX vs native .exe) for the page tabs.
   installKinds: ClaudeDesktopInstallKinds | null;
   // Which install-kind tab is selected: "msix" (Windows App) or "exe".
@@ -121,6 +124,7 @@ const initialState: ClaudeDesktopViewState = {
   success: null,
   confirmUninstall: false,
   localizeLaunch: readPersistedLocalizeLaunch(),
+  localizationProgress: null,
   installKinds: null,
   selectedKind: "msix",
   capabilities: [],
@@ -133,6 +137,7 @@ let loadPromise: Promise<void> | null = null;
 let lastNavigationRefreshAt = Math.max(readRefreshTimestamp("claudeDesktop"), readRefreshTimestamp("detection"));
 const NAVIGATION_REFRESH_TTL_MS = REFRESH_CACHE_TTL_MS;
 let progressListenerStarted = false;
+let localizationProgressListenerStarted = false;
 let progressLogKeys = new Set<string>();
 
 function patch(next: Partial<ClaudeDesktopViewState>) {
@@ -441,8 +446,26 @@ export function startClaudeDesktopProgressListener() {
   });
 }
 
+export function startClaudeDesktopLocalizationProgressListener() {
+  if (localizationProgressListenerStarted) {
+    return;
+  }
+  localizationProgressListenerStarted = true;
+  listenClaudeDesktopLocalizationProgress((progress) => {
+    patch({
+      localizationProgress: progress,
+      error: progress.phase === "failed" ? progress.error ?? progress.message : get(claudeDesktopView).error,
+      success: progress.phase === "done" ? "claudeDesktop.localizationDone" : get(claudeDesktopView).success
+    });
+  }).catch((err) => {
+    localizationProgressListenerStarted = false;
+    patch({ error: err instanceof Error ? err.message : String(err) });
+  });
+}
+
 export async function ensureClaudeDesktopLoaded() {
   startClaudeDesktopProgressListener();
+  startClaudeDesktopLocalizationProgressListener();
   const snapshot = get(claudeDesktopView);
   if (hasBusyAction(snapshot)) {
     return;
@@ -490,6 +513,7 @@ export async function refreshClaudeDesktop(
   options: { forceFresh?: boolean } = {}
 ) {
   startClaudeDesktopProgressListener();
+  startClaudeDesktopLocalizationProgressListener();
   if (get(claudeDesktopView).kindViews[installKind].busyAction && !force) {
     return;
   }
@@ -568,6 +592,8 @@ async function runAction(
 }
 
 export async function launchClaudeDesktopFromDashboard() {
+  startClaudeDesktopLocalizationProgressListener();
+  patch({ localizationProgress: null });
   const installKind = get(claudeDesktopView).selectedKind;
   await launchClaudeDesktop({ localize: getClaudeDesktopLocalizeLaunch() });
   await new Promise((resolve) => setTimeout(resolve, 2500));

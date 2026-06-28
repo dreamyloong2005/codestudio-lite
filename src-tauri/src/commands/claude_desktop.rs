@@ -4,9 +4,16 @@ use crate::core::types::{ClaudeDesktopPageState, ClaudeDesktopPendingLaunch, Cla
 use crate::core::{claude_desktop_patch, detector, tool_installer};
 
 #[tauri::command]
-pub fn launch_claude_desktop(app: tauri::AppHandle, localize: Option<bool>) -> Result<(), String> {
+pub async fn launch_claude_desktop(
+    app: tauri::AppHandle,
+    localize: Option<bool>,
+) -> Result<(), String> {
     let localize = localize.unwrap_or(false);
-    claude_desktop_patch::launch_with_app(localize, Some(app))
+    tauri::async_runtime::spawn_blocking(move || {
+        claude_desktop_patch::launch_with_app(localize, Some(app))
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
@@ -37,7 +44,9 @@ pub fn plan_claude_desktop_update() -> Result<ClaudeDesktopPlan, String> {
 }
 
 #[tauri::command]
-pub async fn inspect_claude_desktop_page(force: Option<bool>) -> Result<ClaudeDesktopPageState, String> {
+pub async fn inspect_claude_desktop_page(
+    force: Option<bool>,
+) -> Result<ClaudeDesktopPageState, String> {
     let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         let snapshot = if force {
@@ -49,8 +58,10 @@ pub async fn inspect_claude_desktop_page(force: Option<bool>) -> Result<ClaudeDe
             .tools
             .iter()
             .find(|tool| tool.id == "claude-desktop");
-        let install_plan = tool_installer::plan_tool_install_for_status("claude-desktop", status).ok();
-        let update_plan = tool_installer::plan_tool_update_for_status("claude-desktop", status).ok();
+        let install_plan =
+            tool_installer::plan_tool_install_for_status("claude-desktop", status).ok();
+        let update_plan =
+            tool_installer::plan_tool_update_for_status("claude-desktop", status).ok();
         let plan = tool_installer::plan_claude_desktop_update_for_status(status).ok();
         let capabilities = package::probe_msix_capabilities()
             .into_iter()

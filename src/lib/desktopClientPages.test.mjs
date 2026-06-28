@@ -256,6 +256,9 @@ test("Claude Desktop launch does not expose console selection", () => {
 test("Claude Desktop launch can enable runtime localization", () => {
   const route = read("src/routes/ClaudeDesktop.svelte");
   const api = read("src/lib/api.ts");
+  const store = read("src/lib/claudeDesktopStore.ts");
+  const types = read("src/types.ts");
+  const coreTypes = read("src-tauri/src/core/types.rs");
   const command = read("src-tauri/src/commands/claude_desktop.rs");
   const coreMod = read("src-tauri/src/core/mod.rs");
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
@@ -265,11 +268,23 @@ test("Claude Desktop launch can enable runtime localization", () => {
   assert.match(route, /launchClaudeWithLocalization\(localizeClaudeLaunch\)/);
   assert.match(route, /localize: accessibilityLaunchLocalize/);
   assert.match(api, /invoke\("launch_claude_desktop", \{ localize: request\.localize \}\)/);
+  assert.match(api, /listenClaudeDesktopLocalizationProgress/);
+  assert.match(api, /claude-desktop:\/\/localization-progress/);
+  assert.match(store, /listenClaudeDesktopLocalizationProgress/);
+  assert.match(store, /localizationProgress:\s*ClaudeDesktopLocalizationProgress \| null/);
+  assert.match(store, /startClaudeDesktopLocalizationProgressListener/);
+  assert.match(route, /launching\s*=\s*false/);
+  assert.match(types, /export interface ClaudeDesktopLocalizationProgress/);
+  assert.match(types, /phase:\s*"launching" \| "debugger" \| "injecting" \| "done" \| "failed"/);
+  assert.match(coreTypes, /pub struct ClaudeDesktopLocalizationProgress/);
   assert.match(command, /app: tauri::AppHandle/);
   assert.match(command, /claude_desktop_patch::launch_with_app\(localize, Some\(app\)\)/);
   assert.match(coreMod, /pub mod claude_desktop_patch;/);
   assert.match(patch, /TRANSLATION_RUNTIME/);
   assert.match(patch, /Page\.addScriptToEvaluateOnNewDocument/);
+  assert.match(patch, /spawn_silent_localization_injector_with_app/);
+  assert.match(patch, /emit_localization_progress/);
+  assert.match(patch, /CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT/);
 });
 
 test("Claude Desktop localization uses native payloads with a small runtime fallback", () => {
@@ -298,13 +313,12 @@ test("Claude Desktop localized Windows launch uses official debugger runtime inj
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
   const productionPatch = patch.slice(0, patch.indexOf("mod tests {"));
 
-  // The old destructive patch paths are gone. Windows now matches macOS:
-  // launch the official Claude app, open Claude's official main-process
-  // debugger route, then inject localization through the Node inspector.
+  // 旧的破坏性 patch 路径已经移除。Windows 会先尝试通过启动参数打开
+  // Claude Node inspector，失败才回退到官方主进程调试器菜单，再做运行时注入。
   assert.doesNotMatch(productionPatch, /process\._debugProcess/);
   assert.doesNotMatch(productionPatch, /kill"\)\s*\.args\(\["-USR1", &pid\]\)/);
   assert.doesNotMatch(productionPatch, /trigger_node_inspector/);
-  assert.doesNotMatch(productionPatch, /--inspect/);
+  assert.match(productionPatch, /--inspect=127\.0\.0\.1:\{CLAUDE_NODE_INSPECT_PORT\}/);
   assert.doesNotMatch(productionPatch, /--remote-debugging-port/);
   assert.doesNotMatch(productionPatch, new RegExp(["apply", "_localization_patch"].join("")));
   assert.doesNotMatch(productionPatch, new RegExp(["activate", "_localized_claude_msix"].join("")));
@@ -319,14 +333,14 @@ test("Claude Desktop localized Windows launch uses official debugger runtime inj
   assert.match(productionPatch, /build_main_process_injection_source/);
   const launchFunction = productionPatch.slice(
     productionPatch.indexOf("fn launch_windows_claude_desktop"),
-    productionPatch.indexOf("fn launch_windows_claude_msix")
+    productionPatch.indexOf("fn repair_claude_msix_registration")
   );
   assert.match(launchFunction, /if localize \{/);
   assert.match(launchFunction, /close_existing_claude_for_localized_launch\(\)\?/);
   assert.match(launchFunction, /ensure_patch_files\(\)\?/);
   assert.match(launchFunction, /ensure_claude_desktop_developer_mode\(\)\?/);
   assert.match(launchFunction, /write_localized_launch_marker\(\)\?/);
-  assert.match(launchFunction, /spawn_silent_localization_injector\(\)/);
+  assert.match(launchFunction, /spawn_silent_localization_injector_with_app\(app\)/);
   assert.doesNotMatch(launchFunction, /ensure_windows_claude_main_process_debugger\(\)\?/);
   assert.doesNotMatch(launchFunction, /retry_inject_localization\(\)\?/);
   assert.ok(
@@ -336,29 +350,55 @@ test("Claude Desktop localized Windows launch uses official debugger runtime inj
   );
   assert.doesNotMatch(launchFunction, new RegExp(["apply", "_localization_patch\\(\\)\\?"].join("")));
   assert.doesNotMatch(launchFunction, new RegExp(["activate", "_localized_claude\\(\\)\\?"].join("")));
-  // Non-localized launch still falls back to MSIX/exe activation.
+  assert.match(launchFunction, /launch_windows_claude_localized_msix_desktop_package\(&args\)/);
+  assert.match(launchFunction, /package::launch_first_desktop_package_with_args/);
+  assert.ok(
+    launchFunction.indexOf("launch_windows_claude_localized_msix_desktop_package(&args)") <
+      launchFunction.indexOf("launch_windows_claude_msix(&args)"),
+    "localized MSIX launch should pass inspect args through desktop package execution before app identity fallback"
+  );
+  // 非本地化启动仍然保留 MSIX/exe 激活路径。
   assert.match(launchFunction, /launch_windows_claude_msix\(&args\)/);
   assert.match(launchFunction, /find_windows_claude_exe\(\)/);
   assert.match(launchFunction, /launch_windows_claude_exe\(exe, &args\)/);
 });
 
-test("Claude Desktop Windows launch scripts stay clean and avoid debug argv", () => {
+test("Claude Desktop Windows launch scripts pass localized inspect args through desktop package", () => {
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
 
   const scriptFunction = patch.slice(
     patch.indexOf("fn windows_launch_script"),
     patch.indexOf("fn inject_localization")
   );
-  // Both localized and non-localized scripts activate by MSIX app identity
-  // (shell:AppsFolder) and never pass debug arguments. The debugger is opened
-  // by the host through Claude's official Developer route after launch.
+  // 本地化脚本先尝试 packaged desktop execution，让 --inspect 到达 Claude
+  // Electron 主进程，同时保留 app identity 激活作为 fallback。
   assert.match(scriptFunction, /shell:AppsFolder\\/);
   assert.match(scriptFunction, /PackageFamilyName/);
   assert.match(scriptFunction, /Add-AppxPackage -Register/);
   assert.match(scriptFunction, /WindowsApps/);
   assert.match(scriptFunction, /app identity activation is required/);
+  assert.match(scriptFunction, /Invoke-CommandInDesktopPackage/);
+  assert.match(scriptFunction, /\$commandPath = Join-Path \$pkg\.InstallLocation \$command/);
+  assert.match(scriptFunction, /-Command \$commandPath -Args \$argsLine/);
+  assert.doesNotMatch(scriptFunction, /-Command \$command -Args \$argsLine/);
+  assert.match(scriptFunction, /Wait-ClaudeLaunchProcess/);
+  assert.match(scriptFunction, /Get-Process -Name 'claude'/);
+  const invokeIndex = scriptFunction.indexOf("Invoke-CommandInDesktopPackage");
+  const verifyIndex = scriptFunction.indexOf(
+    "$launchedDesktopPackage = Wait-ClaudeLaunchProcess",
+    invokeIndex
+  );
+  const fallbackIndex = scriptFunction.indexOf("Start-Process -FilePath $target", verifyIndex);
+  assert.ok(
+    invokeIndex >= 0 && verifyIndex > invokeIndex,
+    "localized launch script should verify Desktop Bridge launch before skipping app identity fallback"
+  );
+  assert.ok(
+    fallbackIndex > verifyIndex,
+    "localized launch script should keep app identity fallback when Desktop Bridge does not start Claude"
+  );
   assert.doesNotMatch(scriptFunction, /Join-Path \$pkg\.InstallLocation 'app\\Claude\.exe'/);
-  assert.doesNotMatch(scriptFunction, /--inspect/);
+  assert.match(scriptFunction, /--inspect=127\.0\.0\.1:\{CLAUDE_NODE_INSPECT_PORT\}/);
   assert.doesNotMatch(scriptFunction, /--remote-debugging-port/);
 });
 
@@ -375,6 +415,94 @@ test("Claude Desktop terminal localization command uses the localized Windows la
   );
   assert.match(windowsBranch, /launch-claude-zh\.ps1/);
   assert.doesNotMatch(windowsBranch, /launch-claude\.ps1"\)\)/);
+});
+
+test("Claude Desktop Windows launch script command hides PowerShell windows", () => {
+  const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
+  const packageCore = read("src-tauri/src/core/platform/package.rs");
+
+  const desktopPackageScript = packageCore.slice(
+    packageCore.indexOf("fn desktop_package_fallback_script"),
+    packageCore.indexOf("fn quote_windows_argument")
+  );
+  const launchScript = patch.slice(
+    patch.indexOf("fn windows_launch_script"),
+    patch.indexOf("fn inject_localization")
+  );
+  const powershellCommand = patch.slice(
+    patch.indexOf("fn powershell_file_command"),
+    patch.indexOf("fn sh_file_command")
+  );
+
+  assert.match(powershellCommand, /-WindowStyle Hidden/);
+  assert.doesNotMatch(desktopPackageScript, /-Command 'powershell\.exe'/);
+  assert.doesNotMatch(desktopPackageScript, /-Args \$innerArgs/);
+  assert.match(desktopPackageScript, /\$commandPath = Join-Path \$pkg\.InstallLocation \$command/);
+  assert.match(desktopPackageScript, /-Command \$commandPath -Args \$argsLine/);
+  assert.doesNotMatch(desktopPackageScript, /-Command \$command -Args \$argsLine/);
+  assert.doesNotMatch(launchScript, /-Command 'powershell\.exe'/);
+  assert.doesNotMatch(launchScript, /-Args \$innerArgs/);
+  assert.match(launchScript, /\$commandPath = Join-Path \$pkg\.InstallLocation \$command/);
+  assert.match(launchScript, /-Command \$commandPath -Args \$argsLine/);
+  assert.doesNotMatch(launchScript, /-Command \$command -Args \$argsLine/);
+});
+
+test("Claude Desktop localization progress keys are translated with fallbacks", () => {
+  const route = read("src/routes/ClaudeDesktop.svelte");
+  const store = read("src/lib/claudeDesktopStore.ts");
+
+  const formatter = route.slice(
+    route.indexOf("const localizationMessageFallbacks"),
+    route.indexOf("function progressByteLabel")
+  );
+
+  assert.match(formatter, /claudeDesktop\.localizationDone/);
+  assert.match(formatter, /localized === message/);
+  assert.match(formatter, /localizationMessageFallbacks\[message\]/);
+  assert.match(
+    route,
+    /formatProgressMessage\(localizationProgress\.error \?\? localizationProgress\.message\)/
+  );
+  assert.match(route, /message=\{formatProgressMessage\(view\.success\)\}/);
+  assert.doesNotMatch(route, /message=\{view\.success\}/);
+  assert.doesNotMatch(store, /success:\s*progress\.phase === "done" \? progress\.message/);
+});
+
+test("desktop client launch buttons always show launch copy", () => {
+  const claudeRoute = read("src/routes/ClaudeDesktop.svelte");
+  const codexRoute = read("src/routes/CodexClient.svelte");
+
+  const claudeTopActions = claudeRoute.slice(
+    claudeRoute.indexOf("<div class={topActionsRecipe()}>"),
+    claudeRoute.indexOf("</div>", claudeRoute.indexOf("<button class={actionButtonRecipe()}"))
+  );
+  const codexTopActions = codexRoute.slice(
+    codexRoute.indexOf("<div class={topActionsRecipe()}>"),
+    codexRoute.indexOf("</div>", codexRoute.indexOf("<button class={actionButtonRecipe()}"))
+  );
+
+  assert.match(claudeTopActions, /\$t\("toolLaunch\.actionTitle"/);
+  assert.match(claudeTopActions, /\$t\("toolLaunch\.starting"\)/);
+  assert.match(claudeTopActions, /\$t\("toolLaunch\.action"\)/);
+  assert.doesNotMatch(claudeTopActions, /toolLaunch\.restart|toolLaunch\.restarting|toolLaunch\.restartTitle/);
+  assert.match(codexTopActions, /\$t\("codexClient\.launch"\)/);
+  assert.doesNotMatch(codexTopActions, /codexClient\.restart/);
+});
+
+test("Claude Desktop localized launch returns without blocking the UI", () => {
+  const route = read("src/routes/ClaudeDesktop.svelte");
+  const command = read("src-tauri/src/commands/claude_desktop.rs");
+
+  const launchHandler = route.slice(
+    route.indexOf("async function launchClaudeWithLocalization"),
+    route.indexOf("async function resumePendingLaunchAfterRestart")
+  );
+
+  assert.match(command, /pub async fn launch_claude_desktop/);
+  assert.match(command, /tauri::async_runtime::spawn_blocking/);
+  assert.match(launchHandler, /void refreshClaudeDesktop\(true,\s*effectiveSelectedKind,\s*\{ forceFresh: true \}\)/);
+  assert.doesNotMatch(launchHandler, /setTimeout\(resolve,\s*2500\)/);
+  assert.doesNotMatch(launchHandler, /await refreshClaudeDesktop\(true,\s*effectiveSelectedKind,\s*\{ forceFresh: true \}\)/);
 });
 
 test("Claude Desktop external terminal localization starts the injector", () => {
