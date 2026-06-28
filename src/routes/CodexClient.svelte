@@ -36,7 +36,6 @@
     doctorListRecipe,
     doctorRowRecipe,
     emptyRowRecipe,
-    eyebrowRecipe,
     nativeToggleRecipe,
     panelRecipe,
     routeStackRecipe,
@@ -198,7 +197,6 @@
 <div class={routeStackRecipe({ width: "desktopClient" })}>
   <section class={topStripRecipe()}>
     <div>
-      <span class={eyebrowRecipe()}>{$t("codexClient.eyebrow")}</span>
       <h1>{$t("codexClient.title")}</h1>
       <p>{$t("codexClient.subtitle")}</p>
       <div class={statusStripRecipe()}>
@@ -491,7 +489,6 @@
     <div class={desktopClientModalPanelRecipe()}>
       <div class={desktopClientModalBodyRecipe()}>
         <div>
-        <span class={eyebrowRecipe()}>{$t("codexClient.uninstallEyebrow")}</span>
         <h2>{$t("codexClient.uninstallTitle")}</h2>
         <p>{$t("codexClient.uninstallDescription")}</p>
       </div>

@@ -28,8 +28,6 @@ use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "windows")]
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
@@ -45,12 +43,6 @@ const CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS: u64 = 1_500;
 const MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 #[cfg(target_os = "macos")]
 const MACOS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
-#[cfg(target_os = "windows")]
-const WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
-#[cfg(target_os = "windows")]
-const WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS: u64 = 1_000;
-#[cfg(target_os = "windows")]
-const WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS: u64 = 100;
 #[cfg(target_os = "windows")]
 const WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TERMINAL_OUTPUT_EVENT: &str = "install-terminal://output";
@@ -359,7 +351,7 @@ fn retry_localization_after_background_debugger_request() -> Result<usize, Strin
 
     #[cfg(target_os = "macos")]
     {
-        enable_claude_main_process_debugger()?;
+        enable_macos_claude_main_process_debugger()?;
         return retry_inject_localization();
     }
 
@@ -711,119 +703,6 @@ fn ensure_claude_desktop_developer_mode() -> Result<(), String> {
     profile::ensure_claude_desktop_developer_mode()
         .map(|_| ())
         .map_err(|err| format!("Failed to enable Claude Desktop developer mode: {err}"))
-}
-
-fn enable_claude_main_process_debugger() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        return ensure_windows_claude_main_process_debugger();
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        return enable_macos_claude_main_process_debugger();
-    }
-
-    #[allow(unreachable_code)]
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn ensure_windows_claude_main_process_debugger() -> Result<(), String> {
-    if claude_node_inspector_available() {
-        return Ok(());
-    }
-
-    let started = Instant::now();
-    let mut last_error = "Claude Node inspector endpoint was not available.".to_string();
-    while started.elapsed() < WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT {
-        if claude_node_inspector_available() {
-            return Ok(());
-        }
-
-        match request_windows_claude_main_process_debugger_until_available() {
-            Ok(()) => {
-                return Ok(());
-            }
-            Err(err) => {
-                last_error = err;
-            }
-        }
-        thread::sleep(Duration::from_millis(
-            WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS,
-        ));
-    }
-
-    Err(format!(
-        "Timed out waiting for Claude main process debugger on Windows. Open Claude, use Developer > Enable Main Process Debugger, then retry localized launch. Last error: {last_error}."
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn request_windows_claude_main_process_debugger_until_available() -> Result<(), String> {
-    let (sender, receiver) = mpsc::channel();
-    let request_thread = thread::spawn(move || {
-        let result = request_windows_claude_main_process_debugger_once();
-        let _ = sender.send(result);
-    });
-    let started = Instant::now();
-    let mut request_result: Option<Result<(), String>> = None;
-
-    while started.elapsed() < WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT {
-        if claude_node_inspector_available() {
-            return Ok(());
-        }
-
-        match receiver.try_recv() {
-            Ok(result) => {
-                request_result = Some(result);
-                break;
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                thread::sleep(Duration::from_millis(WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS));
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                request_result = Some(Err(
-                    "PowerShell debugger automation exited without reporting a result.".to_string(),
-                ));
-                break;
-            }
-        }
-    }
-
-    if request_result.is_none() {
-        if claude_node_inspector_available() {
-            return Ok(());
-        }
-        request_result = Some(
-            receiver
-                .try_recv()
-                .unwrap_or_else(|_| {
-                    Err(format!(
-                        "PowerShell debugger automation did not finish within {} seconds while waiting for inspector availability.",
-                        WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT.as_secs()
-                    ))
-                }),
-        );
-    }
-
-    let _ = request_thread.join();
-
-    match request_result.unwrap_or_else(|| {
-        Err("PowerShell debugger automation finished without a result.".to_string())
-    }) {
-        Ok(()) => {
-            if wait_for_claude_node_inspector() {
-                Ok(())
-            } else {
-                Err(
-                    "Claude main process debugger automation completed, but no Claude Node inspector endpoint opened yet."
-                        .to_string(),
-                )
-            }
-        }
-        Err(err) => Err(err),
-    }
 }
 
 #[cfg(target_os = "windows")]

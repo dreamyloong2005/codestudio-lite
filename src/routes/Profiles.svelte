@@ -38,7 +38,6 @@
     desktopClientModalPanelRecipe,
     desktopClientPreviewListRecipe,
     emptyRowRecipe,
-    eyebrowRecipe,
     iconButtonRecipe,
     nativeToggleRecipe,
     profileAvatarRecipe,
@@ -1776,7 +1775,6 @@
   {#if !embedded}
     <section class={topStripRecipe({ compact: true })}>
       <div>
-        <span class={eyebrowRecipe()}>{$t("profiles.eyebrow")}</span>
         <h1>{$t(routeTitleKey)}</h1>
       </div>
       <div class={topActionsRecipe()}>
@@ -1881,7 +1879,7 @@
                     </span>
                     <div class={profileAvatarRecipe()} data-profile-avatar aria-hidden="true">
                       {#if profileUsesToolIcon(profile)}
-                        <ToolIcon toolId={profile.app} label={profileDisplayName(profile)} variant="choice" />
+                        <ToolIcon toolId={profile.app} label={profileDisplayName(profile)} variant="heading" />
                       {:else if profileIconIsImage(profileIcon)}
                         <img src={profileIcon} alt="" />
                       {:else}
@@ -1979,7 +1977,6 @@
       <div class={cx(desktopClientModalPanelRecipe(), usageModalPanelClass)} role="dialog" aria-modal="true" aria-labelledby="usage-title">
         <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class={eyebrowRecipe()}>{$t("profiles.usage.eyebrow")}</span>
           <h2 id="usage-title">{$t("profiles.usage.title", { name: pendingUsageProfile.name })}</h2>
         </div>
 
@@ -2170,7 +2167,6 @@
       <div class={cx(desktopClientModalPanelRecipe(), modalPanelWideClass)} role="dialog" aria-modal="true" aria-labelledby="edit-title">
         <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class={eyebrowRecipe()}>{$t("profiles.editEyebrow")}</span>
           <h2 id="edit-title">{$t("profiles.editTitle", { name: pendingEdit.name })}</h2>
           <p>{$t("profiles.editDescription")}</p>
         </div>
@@ -2295,7 +2291,6 @@
       <div class={desktopClientModalPanelRecipe()} role="dialog" aria-modal="true" aria-labelledby="delete-title">
         <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class={eyebrowRecipe()}>{$t("profiles.deleteEyebrow")}</span>
           <h2 id="delete-title">{$t("profiles.deleteTitle", { name: pendingDelete.name })}</h2>
           <p>{$t("profiles.deleteDescription")}</p>
         </div>
@@ -2325,7 +2320,6 @@
       <div class={cx(desktopClientModalPanelRecipe(), modalPanelWideClass)} role="dialog" aria-modal="true" aria-labelledby="apply-title">
         <div class={desktopClientModalBodyRecipe()}>
           <div>
-          <span class={eyebrowRecipe()}>{$t("profiles.applyEyebrow")}</span>
           <h2 id="apply-title">{$t("profiles.applyTitle", { name: pendingApply.name })}</h2>
         </div>
 

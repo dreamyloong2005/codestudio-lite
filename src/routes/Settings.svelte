@@ -16,7 +16,6 @@
   import { cx } from "../../styled-system/css";
   import {
     actionButtonRecipe,
-    eyebrowRecipe,
     panelRecipe,
     profileInlineNoticeRecipe,
     routeStackRecipe,
@@ -138,7 +137,6 @@
 <div class={routeStackRecipe({ width: "full" })}>
   <section class={topStripRecipe({ compact: true })}>
     <div>
-      <span class={eyebrowRecipe()}>{$t("settings.eyebrow")}</span>
       <h1>{$t("settings.title")}</h1>
       <p>{$t("settings.subtitle")}</p>
     </div>

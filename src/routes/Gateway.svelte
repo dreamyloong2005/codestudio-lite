@@ -8,7 +8,6 @@
   import {
     actionButtonRecipe,
     emptyRowRecipe,
-    eyebrowRecipe,
     gatewayHeroRecipe,
     gatewayInlineErrorRecipe,
     gatewayMetricsRecipe,
@@ -133,7 +132,6 @@
 <div class={routeStackRecipe({ width: "full" })}>
   <section class={cx(topStripRecipe(), gatewayHeroRecipe({ tone: gatewayTone }))}>
     <div>
-      <span class={eyebrowRecipe()}>{$t("gateway.eyebrow")}</span>
       <h1>{$t("gateway.title")}</h1>
       <p>{$t("gateway.subtitle")}</p>
     </div>
@@ -199,7 +197,6 @@
   <section class={cx(panelRecipe(), gatewayRequestPanelRecipe())}>
     <div class={cx(sectionHeadingRecipe({ compact: true }), gatewayHeadingClass)}>
       <div>
-        <span class={eyebrowRecipe()}>{$t("gateway.recentRequests")}</span>
         <h2>{$t("gateway.requestLogTitle")}</h2>
       </div>
       <button class={actionButtonRecipe()} on:click={refreshRequestLog} disabled={requestLogLoading}>

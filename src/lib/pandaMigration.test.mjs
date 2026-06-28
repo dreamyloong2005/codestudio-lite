@@ -99,6 +99,7 @@ test("ToolIcon owns icon tone and size styling through Panda", () => {
   const component = read("src/components/ToolIcon.svelte");
   const styles = read("src/styles.css");
   const pandaConfig = read("panda.config.ts");
+  const toolIcon = recipeBlock(pandaConfig, "toolIconRecipe", "problemListRecipe");
 
   assert.match(component, /import \{ toolIconRecipe \} from "\.\.\/\.\.\/styled-system\/recipes";/);
   assert.match(component, /toolIconRecipe\(\{\s*variant,\s*tone: iconTone\s*\}\)/s);
@@ -112,11 +113,15 @@ test("ToolIcon owns icon tone and size styling through Panda", () => {
   assert.doesNotMatch(component, /class=\{`tool-icon/);
   assert.doesNotMatch(styles, /\.tool-icon/);
   assert.doesNotMatch(pandaConfig, /"[^"]*\.tool-icon/);
-  assert.match(pandaConfig, /codex:\s*\{[\s\S]*?background: "#111111"/);
-  assert.match(pandaConfig, /vscode:\s*\{[\s\S]*?background: "#007ACC"/);
-  assert.match(pandaConfig, /"&\[data-tool-icon-tone='vscode'\] img": \{[\s\S]*?width: "24px"[\s\S]*?height: "24px"/);
-  assert.match(pandaConfig, /choice:\s*\{[\s\S]*?"&\[data-tool-icon-tone='vscode'\] img": \{[\s\S]*?width: "18px"[\s\S]*?height: "18px"/);
-  assert.doesNotMatch(pandaConfig, /data-tool-icon-tone='vscode'][\s\S]*?width: "30px"/);
+  assert.match(toolIcon, /codex:\s*\{[\s\S]*?background: "#111111"[\s\S]*?\}/);
+  assert.match(toolIcon, /"&\[data-tool-icon-tone='codex'\]": \{[\s\S]*?background: "#111111"[\s\S]*?\}/);
+  assert.doesNotMatch(toolIcon, /"&\[data-tool-icon-tone='codex-app'\]": \{[\s\S]*?background: "#111111"/);
+  assert.match(toolIcon, /"codex-app": \{[\s\S]*?background: "#fff"[\s\S]*?\}/);
+  assert.doesNotMatch(toolIcon, /"codex-app": \{[\s\S]*?background: "#111111"/);
+  assert.match(toolIcon, /vscode:\s*\{[\s\S]*?background: "#007ACC"/);
+  assert.match(toolIcon, /"&\[data-tool-icon-tone='vscode'\] img": \{[\s\S]*?width: "24px"[\s\S]*?height: "24px"/);
+  assert.match(toolIcon, /choice:\s*\{[\s\S]*?"&\[data-tool-icon-tone='vscode'\] img": \{[\s\S]*?width: "18px"[\s\S]*?height: "18px"/);
+  assert.doesNotMatch(toolIcon, /data-tool-icon-tone='vscode'][\s\S]*?width: "30px"/);
 });
 
 test("unowned legacy tool and profile globals are removed", () => {
@@ -198,6 +203,74 @@ test("shared panel components use Panda panel and button recipes", () => {
   assert.doesNotMatch(problemList, /class="section-heading"/);
   assert.doesNotMatch(problemList, /class="primary-button"/);
   assert.doesNotMatch(problemList, /class="empty-row"/);
+});
+
+test("shared button typography stays compact after the Panda migration", () => {
+  const pandaConfig = read("panda.config.ts");
+  const appNavButton = recipeBlock(pandaConfig, "appNavButtonRecipe", "appNavLabelRecipe");
+  const appNavLabel = recipeBlock(pandaConfig, "appNavLabelRecipe", "appNavUpdateDotRecipe");
+  const actionButton = recipeBlock(pandaConfig, "actionButtonRecipe", "iconButtonRecipe");
+  const iconButton = recipeBlock(pandaConfig, "iconButtonRecipe", "emptyRowRecipe");
+  const dashboardCardActions = recipeBlock(pandaConfig, "dashboardCardActionsRecipe", "dashboardOverflowRecipe");
+  const dashboardOverflow = recipeBlock(pandaConfig, "dashboardOverflowRecipe", "dashboardEnvConflictRecipe");
+  const desktopTabs = recipeBlock(pandaConfig, "desktopClientTabsRecipe", "desktopClientMetricsRecipe");
+  const gatewaySegmented = recipeBlock(pandaConfig, "gatewaySegmentedRecipe", "gatewayInlineErrorRecipe");
+  const profileToolTabs = recipeBlock(pandaConfig, "profileToolTabsRecipe", "profileToolSectionRecipe");
+  const profileUsageTemplateRow = recipeBlock(pandaConfig, "profileUsageTemplateRowRecipe", "profileUsageCodeFieldRecipe");
+  const wizardChoiceButton = recipeBlock(pandaConfig, "wizardChoiceButtonRecipe", "wizardModeChoiceRecipe");
+
+  assert.match(appNavButton, /minHeight:\s*"34px"/);
+  assert.match(appNavButton, /padding:\s*"0 8px"/);
+  assert.match(appNavLabel, /fontSize:\s*"12px"/);
+  assert.match(actionButton, /minHeight:\s*"32px"/);
+  assert.match(actionButton, /padding:\s*"0 10px"/);
+  assert.match(actionButton, /fontSize:\s*"11px"/);
+  assert.match(actionButton, /compact:\s*\{[\s\S]*?minHeight:\s*"30px"/);
+  assert.match(actionButton, /compact:\s*\{[\s\S]*?padding:\s*"0 9px"/);
+  assert.match(actionButton, /compact:\s*\{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(iconButton, /width:\s*"32px"/);
+  assert.match(iconButton, /minHeight:\s*"32px"/);
+  assert.match(iconButton, /compact:\s*\{[\s\S]*?height:\s*"28px"/);
+  assert.match(iconButton, /compact:\s*\{[\s\S]*?width:\s*"28px"/);
+  assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?minHeight:\s*"28px"/);
+  assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?padding:\s*"0 7px"/);
+  assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(dashboardOverflow, /"& > summary": \{[\s\S]*?width:\s*"32px"/);
+  assert.match(dashboardOverflow, /"& > summary": \{[\s\S]*?height:\s*"28px"/);
+  assert.match(desktopTabs, /"& button": \{[\s\S]*?minHeight:\s*"34px"/);
+  assert.match(desktopTabs, /"& button": \{[\s\S]*?padding:\s*"0 10px"/);
+  assert.match(desktopTabs, /"& button": \{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(gatewaySegmented, /"& button": \{[\s\S]*?minHeight:\s*"30px"/);
+  assert.match(gatewaySegmented, /"& button": \{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(profileToolTabs, /"& > button": \{[\s\S]*?minWidth:\s*"136px"/);
+  assert.match(profileToolTabs, /"& > button": \{[\s\S]*?minHeight:\s*"46px"/);
+  assert.match(profileToolTabs, /"& > button": \{[\s\S]*?padding:\s*"7px 9px"/);
+  assert.match(profileToolTabs, /"& strong": \{[\s\S]*?fontSize:\s*"11px"/);
+  assert.match(profileUsageTemplateRow, /"& button": \{[\s\S]*?minHeight:\s*"30px"/);
+  assert.match(profileUsageTemplateRow, /"& button": \{[\s\S]*?padding:\s*"0 10px"/);
+  assert.match(profileUsageTemplateRow, /"& button": \{[\s\S]*?fontSize:\s*"11px"/);
+  assert.match(wizardChoiceButton, /minHeight:\s*"44px"/);
+  assert.match(wizardChoiceButton, /fontSize:\s*"11px"/);
+  assert.match(wizardChoiceButton, /kind:\s*\{[\s\S]*?tool:\s*\{[\s\S]*?minHeight:\s*"78px"/);
+  assert.match(wizardChoiceButton, /kind:\s*\{[\s\S]*?tool:\s*\{[\s\S]*?padding:\s*"12px 10px 10px"/);
+});
+
+test("non-button typography is unchanged by compact button sizing", () => {
+  const pandaConfig = read("panda.config.ts");
+  const notice = recipeBlock(pandaConfig, "noticeRecipe", "statusPillRecipe");
+  const toolIcon = recipeBlock(pandaConfig, "toolIconRecipe", "problemListRecipe");
+  const dashboardCommandBox = recipeBlock(pandaConfig, "dashboardCommandBoxRecipe", "dashboardCommandListRecipe");
+  const dashboardCommandList = recipeBlock(pandaConfig, "dashboardCommandListRecipe", "dashboardInfoGridRecipe");
+  const dashboardInfoGrid = recipeBlock(pandaConfig, "dashboardInfoGridRecipe", "dashboardPreviewListRecipe");
+  const dashboardPreviewList = recipeBlock(pandaConfig, "dashboardPreviewListRecipe", "dashboardLogRecipe");
+
+  assert.match(notice, /fontSize:\s*"13px"/);
+  assert.match(toolIcon, /"\& \[data-tool-icon-fallback-text\]": \{[\s\S]*?fontSize:\s*"11px"/);
+  assert.match(dashboardCommandBox, /"& span": \{[\s\S]*?fontSize:\s*"12px"/);
+  assert.match(dashboardCommandList, /"& span": \{[\s\S]*?fontSize:\s*"12px"/);
+  assert.match(dashboardInfoGrid, /"& > span": \{[\s\S]*?fontSize:\s*"12px"/);
+  assert.match(dashboardInfoGrid, /"& strong": \{[\s\S]*?fontSize:\s*"13px"/);
+  assert.match(dashboardPreviewList, /"& span": \{[\s\S]*?fontSize:\s*"13px"/);
 });
 
 test("Dashboard main cards use Panda recipes for route surfaces", () => {
@@ -403,8 +476,8 @@ test("desktop client recipes keep panel content comfortably inset and controls c
   const doctorList = recipeBlock(pandaConfig, "doctorListRecipe", "doctorRowRecipe");
 
   assert.match(tabs, /gap:\s*"var\(--space-sm\)"/);
-  assert.match(tabs, /minHeight:\s*"40px"/);
-  assert.match(tabs, /padding:\s*"0 var\(--space-md\)"/);
+  assert.match(tabs, /minHeight:\s*"34px"/);
+  assert.match(tabs, /padding:\s*"0 10px"/);
 
   assert.match(metrics, /gap:\s*"var\(--space-md\)"/);
   assert.match(metrics, /padding:\s*"var\(--space-lg\)"/);
@@ -412,7 +485,7 @@ test("desktop client recipes keep panel content comfortably inset and controls c
 
   assert.match(actions, /gap:\s*"var\(--space-sm\)"/);
   assert.match(actions, /padding:\s*"0 var\(--space-lg\) var\(--space-lg\)"/);
-  assert.match(actions, /"& button": \{[\s\S]*?minHeight:\s*"40px"/);
+  assert.match(actions, /"& button": \{[\s\S]*?minHeight:\s*"34px"/);
 
   assert.match(progress, /margin:\s*"0 var\(--space-lg\) var\(--space-lg\)"/);
   assert.doesNotMatch(progress, /var\(--space-sm\).*2px/);
@@ -501,8 +574,9 @@ test("unused preview-list global compatibility styles are removed", () => {
   assert.doesNotMatch(styles, /\.preview-list/);
 });
 
-test("shared utility globals for eyebrows and spinning icons are removed", () => {
+test("shared utility globals for spinning icons are removed and visible eyebrows are not rendered", () => {
   const styles = read("src/styles.css");
+  const pandaConfig = read("panda.config.ts");
   const productionSurfaces = [
     "src/components/ToolStatusCard.svelte",
     "src/routes/Dashboard.svelte",
@@ -514,9 +588,9 @@ test("shared utility globals for eyebrows and spinning icons are removed", () =>
     "src/routes/Settings.svelte"
   ].map((file) => read(file)).join("\n");
 
-  assert.match(read("panda.config.ts"), /eyebrowRecipe/);
-  assert.match(read("panda.config.ts"), /spinRecipe/);
-  assert.match(productionSurfaces, /eyebrowRecipe\(\)/);
+  assert.doesNotMatch(pandaConfig, /eyebrowRecipe/);
+  assert.match(pandaConfig, /spinRecipe/);
+  assert.doesNotMatch(productionSurfaces, /eyebrowRecipe/);
   assert.match(productionSurfaces, /spinRecipe\(\)/);
   assert.doesNotMatch(productionSurfaces, /class="eyebrow"/);
   assert.doesNotMatch(productionSurfaces, /class="spin"/);
@@ -609,6 +683,20 @@ test("Profiles main card list uses Panda recipes", () => {
   assert.match(route, /data-builtin=\{profile\.isBuiltin\}/);
   assert.match(route, /data-drag-active=\{sortableActiveId === profile\.id\}/);
   assert.match(route, /querySelector\("\[data-profile-card\]"\)/);
+  assert.match(
+    route,
+    /<div class=\{profileAvatarRecipe\(\)\} data-profile-avatar aria-hidden="true">[\s\S]*?<ToolIcon toolId=\{profile\.app\} label=\{profileDisplayName\(profile\)\} variant="heading" \/>/
+  );
+
+  const pandaConfig = read("panda.config.ts");
+  const avatarRecipe = recipeBlock(pandaConfig, "profileAvatarRecipe", "profileIdentityRecipe");
+  assert.match(avatarRecipe, /"& \[data-tool-icon-variant\]": \{[\s\S]*?display:\s*"grid"/);
+  assert.match(avatarRecipe, /"& \[data-tool-icon-variant\]": \{[\s\S]*?flex:\s*"0 0 100%"/);
+  assert.match(avatarRecipe, /"& \[data-tool-icon-variant\]": \{[\s\S]*?minWidth:\s*"100%"/);
+  assert.match(avatarRecipe, /"& \[data-tool-icon-variant\]": \{[\s\S]*?minHeight:\s*"100%"/);
+  assert.match(avatarRecipe, /"& \[data-tool-icon-variant\]": \{[\s\S]*?placeItems:\s*"center"/);
+  assert.match(avatarRecipe, /"&:has\(\[data-tool-icon-tone='hermes'\]\)": \{[\s\S]*?overflow:\s*"visible"/);
+  assert.match(avatarRecipe, /"& \[data-tool-icon-tone='hermes'\] img": \{[\s\S]*?width:\s*"36px"[\s\S]*?height:\s*"36px"/);
 
   assert.doesNotMatch(mainMarkup, /class="panel-band profile-tool-section"/);
   assert.doesNotMatch(mainMarkup, /class="profile-grid"/);
@@ -900,13 +988,14 @@ test("App shell and navigation use Panda recipes", () => {
   const app = read("src/App.svelte");
   const styles = read("src/styles.css");
 
-  assert.match(app, /import \{ appBrandMarkRecipe, appBrandRecipe, appErrorBannerRecipe, appNavButtonRecipe, appNavLabelRecipe, appNavRecipe, appNavSectionTitleRecipe, appNavUpdateDotRecipe, appRouteTransitionRecipe, appShellRecipe, appSidebarRecipe, appWorkspaceRecipe \} from "\.\.\/styled-system\/recipes";/);
+  assert.match(app, /import \{ appBrandMarkRecipe, appBrandRecipe, appErrorBannerRecipe, appNavButtonRecipe, appNavLabelRecipe, appNavRecipe, appNavUpdateDotRecipe, appRouteTransitionRecipe, appShellRecipe, appSidebarRecipe, appWorkspaceRecipe \} from "\.\.\/styled-system\/recipes";/);
   assert.match(app, /appShellRecipe\(\)/);
   assert.match(app, /appSidebarRecipe\(\)/);
   assert.match(app, /appBrandRecipe\(\)/);
   assert.match(app, /appBrandMarkRecipe\(\)/);
   assert.match(app, /appNavRecipe\(\)/);
-  assert.match(app, /appNavSectionTitleRecipe\(\)/);
+  assert.doesNotMatch(app, /appNavSectionTitleRecipe/);
+  assert.doesNotMatch(app, />Workspace</);
   assert.match(app, /appNavButtonRecipe\(\)/);
   assert.match(app, /data-active=\{route === item\.id\}/);
   assert.match(app, /appNavLabelRecipe\(\)/);

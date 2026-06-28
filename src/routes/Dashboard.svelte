@@ -37,7 +37,6 @@
     dashboardTerminalFrameRecipe,
     dashboardTerminalHeaderRecipe,
     emptyRowRecipe,
-    eyebrowRecipe,
     iconButtonRecipe,
     noticeRecipe,
     panelRecipe,
@@ -1053,7 +1052,6 @@
 <div class={routeStackRecipe({ width: "full" })}>
   <section class={topStripRecipe()}>
     <div>
-      <span class={eyebrowRecipe()}>{$t("dashboard.eyebrow")}</span>
       <h1>{$t("dashboard.title")}</h1>
       <p>{$t("dashboard.subtitle")}</p>
     </div>
@@ -1452,7 +1450,6 @@
     <div class={dashboardModalPanelRecipe()} role="dialog" aria-modal="true" aria-labelledby="tool-install-title">
       <div class={dashboardModalBodyRecipe()}>
         <div>
-        <span class={eyebrowRecipe()}>{$t("toolInstall.eyebrow")}</span>
         <h2 id="tool-install-title">
           {$t(installMode === "update" ? "toolInstall.updateTitle" : "toolInstall.title", { name: pendingInstallTool.name })}
         </h2>
@@ -1678,7 +1675,6 @@
     <div class={dashboardModalPanelRecipe()} role="dialog" aria-modal="true" aria-labelledby="tool-launch-title">
       <div class={dashboardModalBodyRecipe()}>
         <div>
-          <span class={eyebrowRecipe()}>{$t("toolLaunch.eyebrow")}</span>
           <h2 id="tool-launch-title">{$t("toolLaunch.title", { name: pendingLaunchTool.name })}</h2>
           <p>{$t("toolLaunch.description")}</p>
         </div>

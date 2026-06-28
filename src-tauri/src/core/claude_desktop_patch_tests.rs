@@ -98,6 +98,15 @@ fn production_between(start: &str, end: &str, label: &str) -> &'static str {
     source_between(production_source(), start, end, label)
 }
 
+fn function_body_between(start_fn: &str, end_fn: &str, label: &str) -> &'static str {
+    source_between(
+        production_source(),
+        &format!("\nfn {start_fn}"),
+        &format!("\nfn {end_fn}"),
+        label,
+    )
+}
+
 fn windows_debugger_request_body() -> &'static str {
     patch_between(
         "fn request_windows_claude_main_process_debugger_once()",
@@ -213,9 +222,18 @@ fn windows_localization_is_runtime_only_and_does_not_patch_installed_app() {
     let production_source = production_source();
     assert_contains_all(
         production_source,
+        &["request_windows_claude_main_process_debugger_once"],
+    );
+    assert_contains_none(
+        production_source,
         &[
-            "ensure_windows_claude_main_process_debugger",
-            "enable_claude_main_process_debugger",
+            "fn enable_claude_main_process_debugger()",
+            "fn ensure_windows_claude_main_process_debugger()",
+            "fn request_windows_claude_main_process_debugger_until_available()",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS",
+            "mpsc::channel",
         ],
     );
 
@@ -227,9 +245,9 @@ fn windows_localization_is_runtime_only_and_does_not_patch_installed_app() {
     assert!(ensure_body.contains("ensure_patch_files()?"));
     assert!(!ensure_body.contains(concat!("apply_", "localization_patch")));
 
-    let windows_launch_body = production_between(
-        "fn launch_windows_claude_desktop",
-        "fn launch_windows_claude_msix",
+    let windows_launch_body = function_body_between(
+        "launch_windows_claude_desktop",
+        "launch_windows_claude_msix",
         "Windows launch",
     );
     assert_contains_all(
@@ -237,7 +255,7 @@ fn windows_localization_is_runtime_only_and_does_not_patch_installed_app() {
         &[
             "ensure_patch_files()?",
             "write_localized_launch_marker()?",
-            "spawn_silent_localization_injector()",
+            "spawn_silent_localization_injector_with_app(app)",
         ],
     );
     assert_order(
@@ -250,6 +268,7 @@ fn windows_localization_is_runtime_only_and_does_not_patch_installed_app() {
         windows_launch_body,
         &[
             "ensure_windows_claude_main_process_debugger()?",
+            "enable_claude_main_process_debugger()",
             "retry_inject_localization()?",
             concat!("apply_", "localization_patch"),
             concat!("activate_", "localized_claude"),
@@ -286,27 +305,25 @@ fn windows_localization_is_runtime_only_and_does_not_patch_installed_app() {
 
 #[test]
 fn direct_claude_desktop_launch_spawns_background_injector_on_windows() {
-    let production_source = production_source();
     let launch_body = production_between(
         "pub fn launch_with_app",
         "pub fn base_launch_command",
         "launch_with_app",
     );
 
-    assert!(launch_body.contains("launch_windows_claude_desktop(localize)?"));
+    assert!(launch_body.contains("launch_windows_claude_desktop(localize, app)?"));
     assert!(
         !launch_body.contains("spawn_silent_localization_injector()"),
         "launch_with_app should delegate Windows background injection to the Windows launch helper"
     );
 
-    let windows_launch_body = source_between(
-        production_source,
-        "fn launch_windows_claude_desktop",
-        "fn launch_windows_claude_msix",
+    let windows_launch_body = function_body_between(
+        "launch_windows_claude_desktop",
+        "launch_windows_claude_msix",
         "Windows launch",
     );
     assert!(
-        windows_launch_body.contains("spawn_silent_localization_injector()"),
+        windows_launch_body.contains("spawn_silent_localization_injector_with_app(app)"),
         "direct localized Windows launch should return after app activation and inject in the background"
     );
 }
@@ -314,10 +331,9 @@ fn direct_claude_desktop_launch_spawns_background_injector_on_windows() {
 #[test]
 fn direct_claude_desktop_launch_uses_async_helpers_on_both_platforms() {
     let source = production_source();
-    let windows_launch_body = source_between(
-        source,
-        "fn launch_windows_claude_desktop",
-        "fn launch_windows_claude_msix",
+    let windows_launch_body = function_body_between(
+        "launch_windows_claude_desktop",
+        "launch_windows_claude_msix",
         "Windows launch",
     );
     let macos_localized_body = source_between(
@@ -335,7 +351,10 @@ fn direct_claude_desktop_launch_uses_async_helpers_on_both_platforms() {
 
     assert_contains_all(
         windows_launch_body,
-        &["spawn_silent_localization_injector()", "return Ok(None);"],
+        &[
+            "spawn_silent_localization_injector_with_app(app)",
+            "return Ok(None);",
+        ],
     );
     assert_contains_none(
         windows_launch_body,
@@ -365,40 +384,50 @@ fn direct_claude_desktop_launch_uses_async_helpers_on_both_platforms() {
 #[test]
 fn silent_windows_injector_waits_for_manual_debugger_activation() {
     let silent_body = patch_between(
-        "pub fn spawn_silent_localization_injector",
-        "fn ensure_patch_files",
+        "pub fn spawn_silent_localization_injector()",
+        "fn emit_localization_progress",
         "spawn_silent_localization_injector",
     );
-
+    let retry_body = patch_between(
+        "fn run_background_localization_retry_loop",
+        "fn retry_localization_after_background_debugger_request",
+        "background localization retry loop",
+    );
     assert_contains_all(
         silent_body,
         &[
-            "manualDebuggerActivationFallback",
             "thread::spawn(move || {",
-            "request_claude_main_process_debugger_once()",
+            "run_background_localization_retry_loop(app)",
+        ],
+    );
+    assert_contains_all(
+        retry_body,
+        &[
+            "manualDebuggerActivationFallback",
+            "request_claude_main_process_debugger_for_background_retry()",
             "retry_inject_localization_until(",
             "CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT",
         ],
     );
     assert_order(
-        silent_body,
-        "thread::spawn(move || {",
-        "request_claude_main_process_debugger_once()",
-        "silent injector should spawn a helper thread before trying to open the debugger",
+        retry_body,
+        "request_claude_main_process_debugger_for_background_retry()",
+        "retry_inject_localization_until(",
+        "extended localization retry loop should keep running after debugger request",
     );
     assert_order(
         silent_body,
-        "request_claude_main_process_debugger_once()",
-        "retry_inject_localization_until(",
-        "extended localization retry loop should keep running after helper start",
+        "thread::spawn(move || {",
+        "run_background_localization_retry_loop(app)",
+        "silent injector should spawn a helper thread before trying to open the debugger",
     );
 }
 
 #[test]
 fn silent_injector_reports_background_progress_and_retries_debugger_enablement() {
     let silent_body = patch_between(
-        "pub fn spawn_silent_localization_injector",
-        "fn ensure_patch_files",
+        "pub fn spawn_silent_localization_injector()",
+        "fn emit_localization_progress",
         "spawn_silent_localization_injector",
     );
 
@@ -407,12 +436,6 @@ fn silent_injector_reports_background_progress_and_retries_debugger_enablement()
         &[
             "spawn_silent_localization_injector_with_app",
             "run_background_localization_retry_loop",
-            "CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT",
-            "emit_localization_progress",
-            "\"debugger\"",
-            "\"injecting\"",
-            "\"done\"",
-            "\"failed\"",
         ],
     );
     assert_order(
@@ -427,35 +450,59 @@ fn silent_injector_reports_background_progress_and_retries_debugger_enablement()
         "fn retry_localization_after_background_debugger_request",
         "background localization retry loop",
     );
+    let request_body = patch_between(
+        "fn request_claude_main_process_debugger_for_background_retry()",
+        "fn request_claude_main_process_debugger_once()",
+        "background debugger request helper",
+    );
+    assert_contains_all(
+        retry_body,
+        &[
+            "CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT",
+            "emit_localization_progress",
+            "\"debugger\"",
+            "\"injecting\"",
+            "\"done\"",
+            "\"failed\"",
+        ],
+    );
     assert_contains_all(
         retry_body,
         &[
             "for attempt in 1..=CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT",
-            "claude_node_inspector_available()",
-            "request_claude_main_process_debugger_once()",
+            "request_claude_main_process_debugger_for_background_retry()",
             "retry_inject_localization_until",
             "CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT",
-            "thread::sleep(Duration::from_millis(CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS))",
+            "thread::sleep(Duration::from_millis(",
+            "CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS",
             "last_error",
             "emit_localization_progress",
         ],
     );
+    assert_contains_all(
+        request_body,
+        &[
+            "claude_node_inspector_available()",
+            "request_claude_main_process_debugger_once()?",
+            "wait_for_claude_node_inspector()",
+        ],
+    );
     assert_order(
-        retry_body,
+        request_body,
         "claude_node_inspector_available()",
         "request_claude_main_process_debugger_once()",
         "background retry loop should try the already-open inspector before opening Claude menus",
     );
     assert_order(
         retry_body,
-        "request_claude_main_process_debugger_once()",
+        "request_claude_main_process_debugger_for_background_retry()",
         "retry_inject_localization_until",
         "background retry loop should make one fast debugger request before injection",
     );
     assert_order(
         retry_body,
         "Err(err) =>",
-        "thread::sleep(Duration::from_millis(CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS))",
+        "thread::sleep(Duration::from_millis(",
         "failed attempts should delay and retry instead of being ignored",
     );
 }
@@ -467,19 +514,35 @@ fn background_localization_retry_loop_avoids_long_debugger_wait() {
         "fn retry_localization_after_background_debugger_request",
         "background localization retry loop",
     );
+    let request_body = patch_between(
+        "fn request_claude_main_process_debugger_for_background_retry()",
+        "fn request_claude_main_process_debugger_once()",
+        "background debugger request helper",
+    );
 
     assert_contains_all(
         retry_body,
         &[
-            "request_claude_main_process_debugger_once()",
+            "request_claude_main_process_debugger_for_background_retry()",
+        ],
+    );
+    assert_contains_all(
+        request_body,
+        &[
             "claude_node_inspector_available()",
+            "request_claude_main_process_debugger_once()?",
+            "wait_for_claude_node_inspector()",
         ],
     );
     assert_contains_none(
         retry_body,
         &[
             "enable_claude_main_process_debugger()",
+            "ensure_windows_claude_main_process_debugger",
+            "request_windows_claude_main_process_debugger_until_available",
             "WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS",
             "MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT",
         ],
     );
@@ -517,7 +580,7 @@ fn terminal_windows_injector_keeps_waiting_after_debugger_automation_failure() {
         retry_body,
         &[
             "run_background_localization_retry_loop_for_terminal()",
-            "request_claude_main_process_debugger_once()",
+            "request_claude_main_process_debugger_for_background_retry()",
             "for attempt in 1..=CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT",
         ],
     );
@@ -605,7 +668,7 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
 
     let macos_launch_body = patch_between(
         "fn launch_macos_claude_desktop_localized(",
-        "fn enable_macos_claude_main_process_debugger",
+        "fn ensure_claude_desktop_developer_mode",
         "macOS launch",
     );
     assert_contains_all(
@@ -650,14 +713,14 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
     }
 
     let silent_body = patch_between(
-        "pub fn spawn_silent_localization_injector",
+        "fn retry_localization_after_background_debugger_request()",
         "fn ensure_patch_files",
-        "spawn_silent_localization_injector",
+        "terminal/background retry bridge",
     );
     assert_contains_all(
         silent_body,
         &[
-            "enable_claude_main_process_debugger()",
+            "enable_macos_claude_main_process_debugger()",
             "retry_inject_localization()",
         ],
     );
@@ -758,8 +821,7 @@ fn localized_launch_uses_official_debugger_runtime_injection_without_debug_args(
     assert_contains_all(
         production_source,
         &[
-            "ensure_windows_claude_main_process_debugger",
-            "enable_claude_main_process_debugger",
+            "request_windows_claude_main_process_debugger_once",
             "retry_inject_localization",
         ],
     );
@@ -1107,27 +1169,40 @@ fn windows_debugger_automation_polls_to_close_inspector_prompt() {
 
 #[test]
 fn windows_debugger_request_waits_for_inspector_while_automation_runs() {
-    let ensure_body = production_between(
-        "fn ensure_windows_claude_main_process_debugger()",
+    let background_retry_body = production_between(
+        "fn request_claude_main_process_debugger_for_background_retry()",
         "fn request_windows_claude_main_process_debugger_once()",
-        "ensure_windows_claude_main_process_debugger",
+        "request_claude_main_process_debugger_for_background_retry",
     );
 
     assert_contains_all(
-        ensure_body,
+        background_retry_body,
         &[
-            "request_windows_claude_main_process_debugger_until_available",
-            "mpsc::channel",
-            "request_thread",
-            "WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS",
             "claude_node_inspector_available()",
+            "request_claude_main_process_debugger_once()?",
+            "wait_for_claude_node_inspector()",
         ],
     );
     assert_order(
-        ensure_body,
-        "request_windows_claude_main_process_debugger_until_available",
-        "thread::sleep(Duration::from_millis(",
-        "Windows debugger requests should wait for inspector availability before outer retry sleep",
+        background_retry_body,
+        "request_claude_main_process_debugger_once()?",
+        "wait_for_claude_node_inspector()",
+        "Windows debugger requests should wait for inspector availability after the one-shot menu request",
+    );
+
+    let production_source = production_source();
+    assert_contains_none(
+        production_source,
+        &[
+            "fn enable_claude_main_process_debugger()",
+            "fn ensure_windows_claude_main_process_debugger()",
+            "fn request_windows_claude_main_process_debugger_until_available()",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_RETRY_MS",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_POLL_MS",
+            "mpsc::channel",
+            "request_thread",
+        ],
     );
 }
 
@@ -1610,11 +1685,11 @@ fn macos_debugger_menu_is_not_clicked_when_inspector_is_already_open() {
     assert!(background_retry_body.contains("request_claude_main_process_debugger_once()"));
     assert!(!background_retry_body.contains("wait_for_macos_claude_main_process_debugger()"));
     let silent_body = patch_between(
-        "pub fn spawn_silent_localization_injector",
-        "fn ensure_patch_files",
+        "pub fn spawn_silent_localization_injector()",
+        "fn emit_localization_progress",
         "spawn_silent_localization_injector",
     );
-    assert!(silent_body.contains("request_claude_main_process_debugger_once()"));
+    assert!(silent_body.contains("run_background_localization_retry_loop(app)"));
     assert!(!silent_body.contains("wait_for_macos_claude_main_process_debugger()"));
 
     assert_contains_all(

@@ -8,7 +8,6 @@
   import ToolIcon from "../components/ToolIcon.svelte";
   import {
     actionButtonRecipe,
-    eyebrowRecipe,
     wizardActionsRecipe,
     wizardButtonRowRecipe,
     wizardChoiceButtonRecipe,
@@ -719,7 +718,6 @@
 <div class={routeStackRecipe({ width: "full" })}>
   <section class={topStripRecipe()}>
     <div>
-      <span class={eyebrowRecipe()}>{$t("wizard.eyebrow")}</span>
       <h1>{$t(steps[currentStep])}</h1>
       <p>{$t("wizard.progress", { current: currentStep + 1, total: steps.length })}</p>
     </div>

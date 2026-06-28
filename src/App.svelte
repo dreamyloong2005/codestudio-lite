@@ -26,7 +26,7 @@
   import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./lib/refreshCache";
   import { applyTheme } from "./lib/theme";
   import { disposeTerminalSession } from "./lib/terminalSessionStore";
-  import { appBrandMarkRecipe, appBrandRecipe, appErrorBannerRecipe, appNavButtonRecipe, appNavLabelRecipe, appNavRecipe, appNavSectionTitleRecipe, appNavUpdateDotRecipe, appRouteTransitionRecipe, appShellRecipe, appSidebarRecipe, appWorkspaceRecipe } from "../styled-system/recipes";
+  import { appBrandMarkRecipe, appBrandRecipe, appErrorBannerRecipe, appNavButtonRecipe, appNavLabelRecipe, appNavRecipe, appNavUpdateDotRecipe, appRouteTransitionRecipe, appShellRecipe, appSidebarRecipe, appWorkspaceRecipe } from "../styled-system/recipes";
   import ClaudeDesktop from "./routes/ClaudeDesktop.svelte";
   import CodexClient from "./routes/CodexClient.svelte";
   import Dashboard from "./routes/Dashboard.svelte";
@@ -484,7 +484,6 @@
     </div>
 
     <nav class={appNavRecipe()} aria-label="Primary">
-      <div class={appNavSectionTitleRecipe()}>Workspace</div>
       {#each visibleNavItems as item}
         <button class={appNavButtonRecipe()} data-active={route === item.id} title={$t(item.labelKey)} on:click={() => selectRoute(item.id)}>
           <AppIcon name={item.icon} size={18} />

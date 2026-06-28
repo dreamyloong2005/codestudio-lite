@@ -45,7 +45,6 @@
     doctorListRecipe,
     doctorRowRecipe,
     emptyRowRecipe,
-    eyebrowRecipe,
     nativeToggleRecipe,
     panelRecipe,
     routeStackRecipe,
@@ -369,7 +368,6 @@
 <div class={routeStackRecipe({ width: "desktopClient" })}>
   <section class={topStripRecipe()}>
     <div>
-      <span class={eyebrowRecipe()}>{$t("claudeDesktop.eyebrow")}</span>
       <h1>{$t("claudeDesktop.title")}</h1>
       <p>{$t("claudeDesktop.subtitle")}</p>
       <div class={statusStripRecipe()}>
@@ -628,7 +626,6 @@
     <div class={desktopClientModalPanelRecipe()}>
       <div class={desktopClientModalBodyRecipe()}>
         <div>
-          <span class={eyebrowRecipe()}>{$t("claudeDesktop.accessibilityEyebrow")}</span>
           <h2>{$t("claudeDesktop.accessibilityTitle")}</h2>
           <p>{$t("claudeDesktop.accessibilityDescription")}</p>
         </div>
@@ -652,7 +649,6 @@
     <div class={desktopClientModalPanelRecipe()}>
       <div class={desktopClientModalBodyRecipe()}>
         <div>
-          <span class={eyebrowRecipe()}>{$t("claudeDesktop.uninstallEyebrow")}</span>
           <h2>{$t("claudeDesktop.uninstallTitle")}</h2>
           <p>{$t("claudeDesktop.uninstallDescription")}</p>
         </div>

@@ -131,22 +131,6 @@ export default defineConfig({
             }
           }
         },
-        appNavSectionTitleRecipe: {
-          className: "cs-app-nav-section-title",
-          description: "Application navigation section label.",
-          base: {
-            padding: "7px 10px 8px",
-            color: "var(--text-muted)",
-            fontFamily: "ui-monospace, \"SFMono-Regular\", Consolas, monospace",
-            fontSize: "10px",
-            fontWeight: "700",
-            lineHeight: "1",
-            textTransform: "uppercase",
-            "@media (max-width: 900px)": {
-              display: "none"
-            }
-          }
-        },
         appNavButtonRecipe: {
           className: "cs-app-nav-button",
           description: "Application navigation button.",
@@ -154,11 +138,11 @@ export default defineConfig({
             position: "relative",
             display: "flex",
             alignItems: "center",
-            gap: "10px",
+            gap: "8px",
             width: "100%",
-            minHeight: "38px",
+            minHeight: "34px",
             borderRadius: "7px",
-            padding: "0 10px",
+            padding: "0 8px",
             background: "transparent",
             color: "var(--text-muted)",
             textAlign: "left",
@@ -193,8 +177,8 @@ export default defineConfig({
             },
             "@media (max-width: 900px)": {
               justifyContent: "center",
-              minHeight: "38px",
-              padding: "0 8px"
+              minHeight: "34px",
+              padding: "0 6px"
             },
             "@media (prefers-reduced-motion: reduce)": {
               transition: "none",
@@ -219,7 +203,7 @@ export default defineConfig({
             minWidth: 0,
             flex: 1,
             overflow: "hidden",
-            fontSize: "14px",
+            fontSize: "12px",
             fontWeight: "650",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -572,11 +556,11 @@ export default defineConfig({
             alignItems: "center",
             justifyContent: "center",
             gap: "7px",
-            minHeight: "36px",
+            minHeight: "32px",
             border: "1px solid transparent",
             borderRadius: "7px",
-            padding: "0 13px",
-            fontSize: "13px",
+            padding: "0 10px",
+            fontSize: "11px",
             fontWeight: "700",
             whiteSpace: "nowrap",
             transition:
@@ -615,8 +599,9 @@ export default defineConfig({
                 width: "auto",
                 minWidth: 0,
                 height: "auto",
-                minHeight: "34px",
-                padding: "0 11px",
+                minHeight: "30px",
+                padding: "0 9px",
+                fontSize: "10px",
                 lineHeight: "1.25"
               }
             }
@@ -633,8 +618,8 @@ export default defineConfig({
             alignItems: "center",
             justifyContent: "center",
             gap: "7px",
-            width: "36px",
-            minHeight: "36px",
+            width: "32px",
+            minHeight: "32px",
             border: "1px solid transparent",
             borderRadius: "7px",
             background: "var(--surface-soft)",
@@ -661,8 +646,9 @@ export default defineConfig({
             },
             compact: {
               true: {
-                height: "30px",
-                minHeight: "30px",
+                width: "28px",
+                height: "28px",
+                minHeight: "28px",
                 padding: 0
               }
             }
@@ -675,18 +661,6 @@ export default defineConfig({
             padding: "18px",
             color: "var(--text-muted)",
             textAlign: "center"
-          }
-        },
-        eyebrowRecipe: {
-          className: "cs-eyebrow",
-          description: "Shared compact uppercase eyebrow label.",
-          base: {
-            color: "var(--accent)",
-            fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
-            fontSize: "11px",
-            fontWeight: "800",
-            lineHeight: "1",
-            textTransform: "uppercase"
           }
         },
         spinRecipe: {
@@ -711,6 +685,10 @@ export default defineConfig({
             borderRadius: "7px",
             background: "var(--surface-soft)",
             color: "var(--text)",
+            "&[data-tool-icon-tone='codex']": {
+              borderColor: "#111111",
+              background: "#111111"
+            },
             "& img": {
               display: "block",
               width: "22px",
@@ -1067,9 +1045,9 @@ export default defineConfig({
               flex: "0 0 auto",
               width: "auto",
               minWidth: 0,
-              minHeight: "30px",
-              padding: "0 8px",
-              fontSize: "12px",
+              minHeight: "28px",
+              padding: "0 7px",
+              fontSize: "10px",
               textAlign: "center"
             },
             "@media (max-width: 860px)": {
@@ -1087,9 +1065,9 @@ export default defineConfig({
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              width: "36px",
-              height: "30px",
-              minHeight: "30px",
+              width: "32px",
+              height: "28px",
+              minHeight: "28px",
               padding: 0,
               cursor: "pointer",
               listStyle: "none",
@@ -1802,12 +1780,12 @@ export default defineConfig({
             minWidth: 0,
             "& button": {
               minWidth: 0,
-              minHeight: "34px",
+              minHeight: "30px",
               border: "1px solid var(--border)",
               borderRadius: "7px",
               background: "var(--surface-strong)",
               color: "var(--text-soft)",
-              fontSize: "12px",
+              fontSize: "10px",
               fontWeight: "800",
               transition: "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick)"
             },
@@ -2233,14 +2211,14 @@ export default defineConfig({
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
-              gap: "7px",
-              minHeight: "40px",
+              gap: "6px",
+              minHeight: "34px",
               border: "1px solid var(--border)",
               borderRadius: "8px",
               background: "var(--surface-strong)",
               color: "var(--text-soft)",
-              padding: "0 var(--space-md)",
-              fontSize: "12px",
+              padding: "0 10px",
+              fontSize: "10px",
               fontWeight: "800",
               transition:
                 "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick)",
@@ -2306,7 +2284,7 @@ export default defineConfig({
             flexWrap: "wrap",
             padding: "0 var(--space-lg) var(--space-lg)",
             "& button": {
-              minHeight: "40px"
+              minHeight: "34px"
             },
             "@media (max-width: 860px)": {
               justifyContent: "flex-start",
@@ -2659,16 +2637,16 @@ export default defineConfig({
               display: "grid",
               gridTemplateColumns: "auto minmax(0, 1fr)",
               alignItems: "center",
-              gap: "9px",
+              gap: "8px",
               flex: "0 0 auto",
-              minWidth: "154px",
-              maxWidth: "220px",
-              minHeight: "54px",
+              minWidth: "136px",
+              maxWidth: "196px",
+              minHeight: "46px",
               border: "1px solid var(--border)",
               borderRadius: "7px",
               background: "var(--surface-strong)",
               color: "var(--text-soft)",
-              padding: "8px 10px",
+              padding: "7px 9px",
               textAlign: "left",
               scrollSnapAlign: "start",
               animation: "surface-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) backwards",
@@ -2723,7 +2701,7 @@ export default defineConfig({
             },
             "& strong": {
               color: "var(--text)",
-              fontSize: "13px",
+              fontSize: "11px",
               fontWeight: "800",
               lineHeight: "1.2"
             },
@@ -2735,7 +2713,7 @@ export default defineConfig({
             },
             "@media (max-width: 860px)": {
               "& > button": {
-                minWidth: "132px"
+                minWidth: "124px"
               }
             },
             "@media (prefers-reduced-motion: reduce)": {
@@ -2923,14 +2901,27 @@ export default defineConfig({
               objectFit: "cover"
             },
             "& [data-tool-icon-variant]": {
+              display: "grid",
+              flex: "0 0 100%",
+              placeItems: "center",
               width: "100%",
+              minWidth: "100%",
               height: "100%",
+              minHeight: "100%",
               border: 0,
               borderRadius: "inherit"
             },
             "& [data-tool-icon-variant] img": {
               width: "78%",
               height: "78%",
+              objectFit: "contain"
+            },
+            "&:has([data-tool-icon-tone='hermes'])": {
+              overflow: "visible"
+            },
+            "& [data-tool-icon-tone='hermes'] img": {
+              width: "36px",
+              height: "36px",
               objectFit: "contain"
             }
           },
@@ -3278,13 +3269,13 @@ export default defineConfig({
             gap: "8px",
             flexWrap: "wrap",
             "& button": {
-              minHeight: "34px",
+              minHeight: "30px",
               border: "1px solid var(--border)",
               borderRadius: "7px",
               background: "var(--surface-strong)",
               color: "var(--text-soft)",
-              padding: "0 12px",
-              fontSize: "13px",
+              padding: "0 10px",
+              fontSize: "11px",
               fontWeight: "800",
               transition:
                 "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick)"
@@ -3523,12 +3514,13 @@ export default defineConfig({
             alignItems: "center",
             justifyContent: "center",
             flexWrap: "wrap",
-            gap: "9px",
-            minHeight: "50px",
+            gap: "8px",
+            minHeight: "44px",
             border: "1px solid var(--border)",
             borderRadius: "7px",
             background: "var(--surface-strong)",
             color: "var(--text-soft)",
+            fontSize: "11px",
             fontWeight: "700",
             transition:
               "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick), opacity var(--motion-quick), transform var(--motion-spring), box-shadow var(--motion-smooth)",
@@ -3547,7 +3539,7 @@ export default defineConfig({
             "& small": {
               width: "100%",
               color: "var(--text-muted)",
-              fontSize: "11px",
+              fontSize: "10px",
               fontWeight: "700",
               textAlign: "center"
             },
@@ -3573,9 +3565,9 @@ export default defineConfig({
                 gridTemplateRows: "auto auto auto",
                 placeItems: "center",
                 alignContent: "center",
-                gap: "7px",
-                minHeight: "92px",
-                padding: "14px 12px 12px",
+                gap: "6px",
+                minHeight: "78px",
+                padding: "12px 10px 10px",
                 textAlign: "center",
                 animation: "surface-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) backwards",
                 animationDelay: "calc(min(var(--surface-index, 0), 8) * 28ms)",
