@@ -313,12 +313,13 @@ test("Claude Desktop localized Windows launch uses official debugger runtime inj
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
   const productionPatch = patch.slice(0, patch.indexOf("mod tests {"));
 
-  // 旧的破坏性 patch 路径已经移除。Windows 会先尝试通过启动参数打开
-  // Claude Node inspector，失败才回退到官方主进程调试器菜单，再做运行时注入。
+  // 旧的破坏性 patch 路径已经移除。Windows 不再依赖已被 Claude
+  // fuse 掉的 inspect 启动参数，默认直接通过官方主进程调试器菜单
+  // 打开 Node inspector，再做运行时注入。
   assert.doesNotMatch(productionPatch, /process\._debugProcess/);
   assert.doesNotMatch(productionPatch, /kill"\)\s*\.args\(\["-USR1", &pid\]\)/);
   assert.doesNotMatch(productionPatch, /trigger_node_inspector/);
-  assert.match(productionPatch, /--inspect=127\.0\.0\.1:\{CLAUDE_NODE_INSPECT_PORT\}/);
+  assert.doesNotMatch(productionPatch, /--inspect=127\.0\.0\.1:\{CLAUDE_NODE_INSPECT_PORT\}/);
   assert.doesNotMatch(productionPatch, /--remote-debugging-port/);
   assert.doesNotMatch(productionPatch, new RegExp(["apply", "_localization_patch"].join("")));
   assert.doesNotMatch(productionPatch, new RegExp(["activate", "_localized_claude_msix"].join("")));
@@ -350,55 +351,35 @@ test("Claude Desktop localized Windows launch uses official debugger runtime inj
   );
   assert.doesNotMatch(launchFunction, new RegExp(["apply", "_localization_patch\\(\\)\\?"].join("")));
   assert.doesNotMatch(launchFunction, new RegExp(["activate", "_localized_claude\\(\\)\\?"].join("")));
-  assert.match(launchFunction, /launch_windows_claude_localized_msix_desktop_package\(&args\)/);
-  assert.match(launchFunction, /package::launch_first_desktop_package_with_args/);
-  assert.ok(
-    launchFunction.indexOf("launch_windows_claude_localized_msix_desktop_package(&args)") <
-      launchFunction.indexOf("launch_windows_claude_msix(&args)"),
-    "localized MSIX launch should pass inspect args through desktop package execution before app identity fallback"
-  );
+  assert.doesNotMatch(launchFunction, /launch_windows_claude_localized_msix_desktop_package\(&args\)/);
+  assert.doesNotMatch(launchFunction, /package::launch_first_desktop_package_with_args/);
   // 非本地化启动仍然保留 MSIX/exe 激活路径。
   assert.match(launchFunction, /launch_windows_claude_msix\(&args\)/);
   assert.match(launchFunction, /find_windows_claude_exe\(\)/);
   assert.match(launchFunction, /launch_windows_claude_exe\(exe, &args\)/);
 });
 
-test("Claude Desktop Windows launch scripts pass localized inspect args through desktop package", () => {
+test("Claude Desktop Windows launch scripts avoid fused inspect args", () => {
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
 
   const scriptFunction = patch.slice(
     patch.indexOf("fn windows_launch_script"),
     patch.indexOf("fn inject_localization")
   );
-  // 本地化脚本先尝试 packaged desktop execution，让 --inspect 到达 Claude
-  // Electron 主进程，同时保留 app identity 激活作为 fallback。
+  // Claude 已 fuse 掉 inspect 启动参数，本地化脚本只负责正常激活 App；
+  // 调试器由菜单自动化开启。
   assert.match(scriptFunction, /shell:AppsFolder\\/);
   assert.match(scriptFunction, /PackageFamilyName/);
   assert.match(scriptFunction, /Add-AppxPackage -Register/);
   assert.match(scriptFunction, /WindowsApps/);
   assert.match(scriptFunction, /app identity activation is required/);
-  assert.match(scriptFunction, /Invoke-CommandInDesktopPackage/);
-  assert.match(scriptFunction, /\$commandPath = Join-Path \$pkg\.InstallLocation \$command/);
-  assert.match(scriptFunction, /-Command \$commandPath -Args \$argsLine/);
+  assert.doesNotMatch(scriptFunction, /Invoke-CommandInDesktopPackage/);
+  assert.doesNotMatch(scriptFunction, /\$commandPath = Join-Path \$pkg\.InstallLocation \$command/);
+  assert.doesNotMatch(scriptFunction, /-Command \$commandPath -Args \$argsLine/);
   assert.doesNotMatch(scriptFunction, /-Command \$command -Args \$argsLine/);
-  assert.match(scriptFunction, /Wait-ClaudeLaunchProcess/);
-  assert.match(scriptFunction, /Get-Process -Name 'claude'/);
-  const invokeIndex = scriptFunction.indexOf("Invoke-CommandInDesktopPackage");
-  const verifyIndex = scriptFunction.indexOf(
-    "$launchedDesktopPackage = Wait-ClaudeLaunchProcess",
-    invokeIndex
-  );
-  const fallbackIndex = scriptFunction.indexOf("Start-Process -FilePath $target", verifyIndex);
-  assert.ok(
-    invokeIndex >= 0 && verifyIndex > invokeIndex,
-    "localized launch script should verify Desktop Bridge launch before skipping app identity fallback"
-  );
-  assert.ok(
-    fallbackIndex > verifyIndex,
-    "localized launch script should keep app identity fallback when Desktop Bridge does not start Claude"
-  );
+  assert.doesNotMatch(scriptFunction, /Wait-ClaudeLaunchProcess/);
   assert.doesNotMatch(scriptFunction, /Join-Path \$pkg\.InstallLocation 'app\\Claude\.exe'/);
-  assert.match(scriptFunction, /--inspect=127\.0\.0\.1:\{CLAUDE_NODE_INSPECT_PORT\}/);
+  assert.doesNotMatch(scriptFunction, /--inspect=127\.0\.0\.1:\{CLAUDE_NODE_INSPECT_PORT\}/);
   assert.doesNotMatch(scriptFunction, /--remote-debugging-port/);
 });
 
@@ -442,9 +423,23 @@ test("Claude Desktop Windows launch script command hides PowerShell windows", ()
   assert.doesNotMatch(desktopPackageScript, /-Command \$command -Args \$argsLine/);
   assert.doesNotMatch(launchScript, /-Command 'powershell\.exe'/);
   assert.doesNotMatch(launchScript, /-Args \$innerArgs/);
-  assert.match(launchScript, /\$commandPath = Join-Path \$pkg\.InstallLocation \$command/);
-  assert.match(launchScript, /-Command \$commandPath -Args \$argsLine/);
   assert.doesNotMatch(launchScript, /-Command \$command -Args \$argsLine/);
+});
+
+test("Claude Desktop Windows debugger menu automation moves only menu popups offscreen", () => {
+  const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
+  const debuggerScript = patch.slice(
+    patch.indexOf("fn request_windows_claude_main_process_debugger_once"),
+    patch.indexOf("fn run_windows_debugger_powershell_with_timeout")
+  );
+
+  assert.match(debuggerScript, /SetWindowPos/);
+  assert.match(debuggerScript, /Move-ClaudeMenuPopupsOffscreen/);
+  assert.match(debuggerScript, /Move-ClaudeMenuPopupsOffscreen \$window/);
+  assert.doesNotMatch(debuggerScript, /Move-ClaudeWindowOffscreen/);
+  assert.doesNotMatch(debuggerScript, /Restore-ClaudeWindowPlacement/);
+  assert.doesNotMatch(debuggerScript, /\$originalPlacement = Move-ClaudeWindowOffscreen \$window/);
+  assert.doesNotMatch(debuggerScript, /SetForegroundWindow\(\$window\.Hwnd\)/);
 });
 
 test("Claude Desktop localization progress keys are translated with fallbacks", () => {

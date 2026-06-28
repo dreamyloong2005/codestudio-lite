@@ -543,11 +543,11 @@ fn launch_windows_claude_desktop(
         write_localized_launch_marker()?;
         if package::detect_first_msix_package(claude_desktop_windows_package_identities()).is_some()
         {
-            launch_windows_claude_localized_msix_desktop_package(&args)?;
+            launch_windows_claude_msix(&args)?;
         } else if let Some(exe) = find_windows_claude_exe() {
             launch_windows_claude_exe(exe, &args)?;
         } else {
-            launch_windows_claude_localized_msix_desktop_package(&args)?;
+            launch_windows_claude_msix(&args)?;
         }
         emit_localization_progress(
             app.as_ref(),
@@ -573,27 +573,6 @@ fn launch_windows_claude_desktop(
     }
 
     launch_windows_claude_msix(&args)
-}
-
-#[cfg(target_os = "windows")]
-fn launch_windows_claude_localized_msix_desktop_package(
-    args: &[String],
-) -> Result<Option<u32>, String> {
-    match package::launch_first_desktop_package_with_args(
-        claude_desktop_windows_package_identities(),
-        args,
-    ) {
-        Ok(()) => {
-            for _ in 0..20 {
-                if process_control::is_process_running("claude") {
-                    return Ok(None);
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            launch_windows_claude_msix(args)
-        }
-        Err(_) => launch_windows_claude_msix(args),
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -701,12 +680,8 @@ fn macos_pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn claude_launch_args(localize: bool) -> Vec<String> {
-    if localize {
-        vec![format!("--inspect=127.0.0.1:{CLAUDE_NODE_INSPECT_PORT}")]
-    } else {
-        Vec::new()
-    }
+fn claude_launch_args(_localize: bool) -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg(target_os = "macos")]
@@ -872,8 +847,7 @@ public class CslClaudeWin32 {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
@@ -1135,6 +1109,60 @@ function Get-ClaudeAutomationRoots($window) {
 
   $roots |
     Sort-Object -Property @{ Expression = { if ($_.IsMainWindow) { 1 } else { 0 } }; Descending = $true }
+}
+
+function Move-ClaudeMenuPopupsOffscreen($window) {
+  $moved = 0
+  [CslClaudeWin32]::EnumWindows({
+    param([IntPtr]$hWnd, [IntPtr]$extraData)
+    if ($hWnd -eq $window.Hwnd) { return $true }
+
+    $processId = [uint32]0
+    [CslClaudeWin32]::GetWindowThreadProcessId($hWnd, [ref]$processId) | Out-Null
+    if ([int]$processId -ne [int]$window.ProcessId) { return $true }
+
+    $classBuilder = New-Object System.Text.StringBuilder 256
+    [CslClaudeWin32]::GetClassName($hWnd, $classBuilder, $classBuilder.Capacity) | Out-Null
+    $className = $classBuilder.ToString()
+    if ($className -notlike 'Chrome_WidgetWin_*') { return $true }
+
+    $rect = New-Object CslClaudeWin32+RECT
+    [CslClaudeWin32]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    if ($width -lt 80 -or $height -lt 40) { return $true }
+    if ($width -ge ($window.Width - 80) -and $height -ge ($window.Height - 80)) { return $true }
+
+    try {
+      $root = [System.Windows.Automation.AutomationElement]::FromHandle($hWnd)
+      if (-not $root) { return $true }
+      $hasMenuItem = $root.FindFirst(
+        [System.Windows.Automation.TreeScope]::Subtree,
+        (New-Object System.Windows.Automation.PropertyCondition(
+          [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+          [System.Windows.Automation.ControlType]::MenuItem
+        ))
+      )
+      $hasCheckBox = $root.FindFirst(
+        [System.Windows.Automation.TreeScope]::Subtree,
+        (New-Object System.Windows.Automation.PropertyCondition(
+          [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+          [System.Windows.Automation.ControlType]::CheckBox
+        ))
+      )
+      if (-not $hasMenuItem -and -not $hasCheckBox) { return $true }
+    } catch {
+      return $true
+    }
+
+    [CslClaudeWin32]::SetWindowPos($hWnd, [IntPtr]::Zero, -32000, -32000, $width, $height, 0x0014) | Out-Null
+    $moved += 1
+    return $true
+  }, [IntPtr]::Zero) | Out-Null
+  if ($moved -gt 0) {
+    Write-ClaudeDebuggerLog "Moved $moved Claude menu popup window(s) offscreen."
+  }
+  $moved
 }
 
 function Find-ClaudeMenuElement([string[]]$names, $window, [bool]$preferToggle, [bool]$popupOnly) {
@@ -1834,9 +1862,6 @@ if (-not $window) {
   throw 'Claude main window was not found after launch.'
 }
 
-[CslClaudeWin32]::ShowWindow($window.Hwnd, 9) | Out-Null
-[CslClaudeWin32]::BringWindowToTop($window.Hwnd) | Out-Null
-[CslClaudeWin32]::SetForegroundWindow($window.Hwnd) | Out-Null
 Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null
 $developerNames = @('Developer', '开发者', '開發者')
 $debuggerNames = @(
@@ -1893,6 +1918,7 @@ $developer = $null
 if (-not (Open-ClaudeMenu $window $developerNames)) {
   throw 'Claude in-window menu could not be opened through UI Automation.'
 }
+Move-ClaudeMenuPopupsOffscreen $window | Out-Null
 $developer = Find-ClaudeDeveloperMenuElement $developerNames $window
 if (-not $developer) {
   $developer = Find-ClaudeDeveloperMenuByStructure $window
@@ -1906,6 +1932,7 @@ if (-not (Invoke-Element $developer)) {
   Write-ClaudeDebuggerLog ("Developer menu could not be opened: " + (Format-ClaudeElementForLog $developer))
   throw 'Claude Developer menu could not be opened through UI Automation.'
 }
+Move-ClaudeMenuPopupsOffscreen $window | Out-Null
 
 $debuggerItem = Find-ClaudeDebuggerToggleElement $debuggerNames $window
 if (-not $debuggerItem) {
@@ -3057,11 +3084,7 @@ fn windows_shell_quote(value: &str) -> String {
 }
 
 fn windows_launch_script(localize: bool) -> String {
-    let args = if localize {
-        format!("$argsList = @('--inspect=127.0.0.1:{CLAUDE_NODE_INSPECT_PORT}')")
-    } else {
-        "$argsList = @()".to_string()
-    };
+    let args = "$argsList = @()";
     let localized_marker = if localize {
         r#"$markerDir = Join-Path $HOME '.codestudio-lite\claude-desktop-patch'
 New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
@@ -3070,45 +3093,12 @@ Set-Content -LiteralPath (Join-Path $markerDir 'localized-launch.flag') -Value '
     } else {
         ""
     };
-    // 本地化 MSIX 启动先尝试 packaged desktop execution，让 Node
-    // inspector 参数进入 Claude 的 Electron 主进程。Desktop Bridge
-    // 不可用时再回退到 app identity 激活。
-    let msix_launch = if localize {
-        r#"
-  function Wait-ClaudeLaunchProcess([int]$attempts, [int]$delayMs) {
-    for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
-      $proc = Get-Process -Name 'claude' -ErrorAction SilentlyContinue | Select-Object -First 1
-      if ($proc) { return $true }
-      Start-Sleep -Milliseconds $delayMs
-    }
-    return $false
-  }
-  $launchedDesktopPackage = $false
-  if (Get-Command Invoke-CommandInDesktopPackage -ErrorAction SilentlyContinue) {
-    try {
-      $command = [string]$app.Executable
-      if ($command) {
-        $commandPath = Join-Path $pkg.InstallLocation $command
-        if (-not (Test-Path -LiteralPath $commandPath)) { throw "Package executable was not found: $commandPath" }
-        $argsLine = [string]::Join(' ', $argsList)
-        Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId $appId -Command $commandPath -Args $argsLine -ErrorAction Stop
-        $launchedDesktopPackage = Wait-ClaudeLaunchProcess 20 100
-      }
-    } catch {
-      $launchedDesktopPackage = $false
-    }
-  }
-  if (-not $launchedDesktopPackage) {
-    $target = 'shell:AppsFolder\' + $pkg.PackageFamilyName + '!' + $appId
-    Start-Process -FilePath $target
-  }
-"#
-    } else {
-        r#"
+    // Claude 已 fuse 掉 inspect 启动参数；Windows 本地化启动只正常
+    // 激活官方 App，主进程调试器由后续菜单自动化开启。
+    let msix_launch = r#"
   $target = 'shell:AppsFolder\' + $pkg.PackageFamilyName + '!' + $appId
   Start-Process -FilePath $target
-"#
-    };
+"#;
     format!(
         r#"$ErrorActionPreference = 'Stop'
 $pkgNames = @('Claude', 'Anthropic.Claude')

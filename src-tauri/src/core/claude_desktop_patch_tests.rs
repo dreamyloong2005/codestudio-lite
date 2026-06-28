@@ -194,7 +194,7 @@ fn non_localized_command_is_unchanged() {
 }
 
 #[test]
-fn localized_windows_command_uses_inspector_launcher_without_cdp_auth() {
+fn localized_windows_command_uses_official_launcher_without_fused_inspect_args() {
     if cfg!(target_os = "windows") {
         let script = windows_launch_script(true);
         assert!(script.contains("localized-launch.flag"));
@@ -375,7 +375,7 @@ fn silent_windows_injector_waits_for_manual_debugger_activation() {
         &[
             "manualDebuggerActivationFallback",
             "thread::spawn(move || {",
-            "enable_claude_main_process_debugger()",
+            "request_claude_main_process_debugger_once()",
             "retry_inject_localization_until(",
             "CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT",
         ],
@@ -383,14 +383,105 @@ fn silent_windows_injector_waits_for_manual_debugger_activation() {
     assert_order(
         silent_body,
         "thread::spawn(move || {",
-        "enable_claude_main_process_debugger()",
+        "request_claude_main_process_debugger_once()",
         "silent injector should spawn a helper thread before trying to open the debugger",
     );
     assert_order(
         silent_body,
-        "enable_claude_main_process_debugger()",
+        "request_claude_main_process_debugger_once()",
         "retry_inject_localization_until(",
         "extended localization retry loop should keep running after helper start",
+    );
+}
+
+#[test]
+fn silent_injector_reports_background_progress_and_retries_debugger_enablement() {
+    let silent_body = patch_between(
+        "pub fn spawn_silent_localization_injector",
+        "fn ensure_patch_files",
+        "spawn_silent_localization_injector",
+    );
+
+    assert_contains_all(
+        silent_body,
+        &[
+            "spawn_silent_localization_injector_with_app",
+            "run_background_localization_retry_loop",
+            "CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT",
+            "emit_localization_progress",
+            "\"debugger\"",
+            "\"injecting\"",
+            "\"done\"",
+            "\"failed\"",
+        ],
+    );
+    assert_order(
+        silent_body,
+        "spawn_silent_localization_injector_with_app",
+        "run_background_localization_retry_loop",
+        "silent injector should delegate to the retry loop instead of swallowing one failure",
+    );
+
+    let retry_body = patch_between(
+        "fn run_background_localization_retry_loop",
+        "fn retry_localization_after_background_debugger_request",
+        "background localization retry loop",
+    );
+    assert_contains_all(
+        retry_body,
+        &[
+            "for attempt in 1..=CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT",
+            "claude_node_inspector_available()",
+            "request_claude_main_process_debugger_once()",
+            "retry_inject_localization_until",
+            "CLAUDE_ZH_BACKGROUND_INJECTION_WAIT_TIMEOUT",
+            "thread::sleep(Duration::from_millis(CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS))",
+            "last_error",
+            "emit_localization_progress",
+        ],
+    );
+    assert_order(
+        retry_body,
+        "claude_node_inspector_available()",
+        "request_claude_main_process_debugger_once()",
+        "background retry loop should try the already-open inspector before opening Claude menus",
+    );
+    assert_order(
+        retry_body,
+        "request_claude_main_process_debugger_once()",
+        "retry_inject_localization_until",
+        "background retry loop should make one fast debugger request before injection",
+    );
+    assert_order(
+        retry_body,
+        "Err(err) =>",
+        "thread::sleep(Duration::from_millis(CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_MS))",
+        "failed attempts should delay and retry instead of being ignored",
+    );
+}
+
+#[test]
+fn background_localization_retry_loop_avoids_long_debugger_wait() {
+    let retry_body = patch_between(
+        "fn run_background_localization_retry_loop",
+        "fn retry_localization_after_background_debugger_request",
+        "background localization retry loop",
+    );
+
+    assert_contains_all(
+        retry_body,
+        &[
+            "request_claude_main_process_debugger_once()",
+            "claude_node_inspector_available()",
+        ],
+    );
+    assert_contains_none(
+        retry_body,
+        &[
+            "enable_claude_main_process_debugger()",
+            "WINDOWS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT",
+            "MACOS_MAIN_PROCESS_DEBUGGER_WAIT_TIMEOUT",
+        ],
     );
 }
 
@@ -415,6 +506,20 @@ fn terminal_windows_injector_keeps_waiting_after_debugger_automation_failure() {
         "manualDebuggerActivationFallback",
         "retry_localization_after_background_debugger_request()",
         "terminal injector should mark manual fallback before retrying injection",
+    );
+
+    let retry_body = patch_between(
+        "fn retry_localization_after_background_debugger_request()",
+        "fn request_claude_main_process_debugger_for_background_retry",
+        "terminal background retry helper",
+    );
+    assert_contains_all(
+        retry_body,
+        &[
+            "run_background_localization_retry_loop_for_terminal()",
+            "request_claude_main_process_debugger_once()",
+            "for attempt in 1..=CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT",
+        ],
     );
 }
 
@@ -628,14 +733,15 @@ fn macos_plain_claude_launch_restarts_instead_of_activating_existing_process() {
 #[test]
 fn windows_launch_script_launches_cleanly_without_debug_args() {
     let script = windows_launch_script(true);
-    // Both localized and non-localized scripts activate by MSIX app
-    // identity and never pass debug arguments.
+    // Claude 已 fuse 掉 inspect 启动参数，本地化 MSIX 启动只正常激活 App；
+    // 主进程调试器由菜单自动化开启。
     assert!(script.contains("Get-AppxPackage"));
     assert!(script.contains("shell:AppsFolder"));
     assert!(script.contains("Start-Process -FilePath $target"));
     assert!(!script.contains("--inspect"));
     assert!(!script.contains("--remote-debugging-port"));
     assert!(!script.contains("Invoke-CommandInDesktopPackage"));
+    assert!(!script.contains("Wait-ClaudeLaunchProcess"));
     assert!(!script.contains("Start-Process -FilePath $exe -WorkingDirectory"));
     assert!(script.contains("app identity activation is required"));
     assert!(script.contains("localized-launch.flag"));
@@ -667,6 +773,32 @@ fn localized_launch_uses_official_debugger_runtime_injection_without_debug_args(
 }
 
 #[test]
+fn localized_windows_msix_launch_uses_app_identity_and_menu_debugger() {
+    let windows_launch_body = source_between(
+        production_source(),
+        "fn launch_windows_claude_desktop",
+        "fn launch_windows_claude_msix",
+        "Windows launch",
+    );
+
+    assert_contains_all(
+        windows_launch_body,
+        &[
+            "launch_windows_claude_msix(&args)",
+            "spawn_silent_localization_injector_with_app(app)",
+        ],
+    );
+    assert_contains_none(
+        windows_launch_body,
+        &[
+            "launch_windows_claude_localized_msix_desktop_package(&args)",
+            "package::launch_first_desktop_package_with_args",
+            "process_control::is_process_running(\"claude\")",
+        ],
+    );
+}
+
+#[test]
 fn windows_debugger_automation_uses_in_window_menu_not_alt_top_menu() {
     let request_body = windows_debugger_request_body();
     assert_contains_all(
@@ -674,6 +806,8 @@ fn windows_debugger_automation_uses_in_window_menu_not_alt_top_menu() {
         &[
             "UIAutomationClient",
             "SetProcessDPIAware",
+            "SetWindowPos",
+            "Move-ClaudeMenuPopupsOffscreen",
             "shell:AppsFolder",
             "$bang = [char]33",
             "$packagePrefix = $pkg.PackageFamilyName + $bang",
@@ -699,6 +833,26 @@ fn windows_debugger_automation_uses_in_window_menu_not_alt_top_menu() {
         "Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null",
         "if (-not (Open-ClaudeMenu $window $developerNames))",
         "inspector prompt should be closed before menu automation",
+    );
+    assert_contains_none(
+        request_body,
+        &[
+            "Move-ClaudeWindowOffscreen",
+            "Restore-ClaudeWindowPlacement",
+            "$originalPlacement = Move-ClaudeWindowOffscreen $window",
+        ],
+    );
+    assert_order(
+        request_body,
+        "if (-not (Open-ClaudeMenu $window $developerNames))",
+        "Move-ClaudeMenuPopupsOffscreen $window",
+        "menu popups should be moved offscreen immediately after opening Claude's menu",
+    );
+    assert_order(
+        request_body,
+        "Move-ClaudeMenuPopupsOffscreen $window",
+        "$developer = Find-ClaudeDeveloperMenuElement $developerNames $window",
+        "developer lookup should run after menu popup relocation",
     );
     assert_contains_all(
         request_body,
@@ -773,6 +927,9 @@ fn windows_debugger_automation_uses_in_window_menu_not_alt_top_menu() {
         &[
             "WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT",
             "child.kill()",
+            "run_windows_debugger_powershell_with_timeout",
+            "\"-WindowStyle\"",
+            "\"Hidden\"",
         ],
     );
 }
@@ -890,7 +1047,7 @@ fn windows_debugger_automation_prefers_existing_window_before_appx_activation() 
             "if ($window) {",
             "} else {",
             "Start-ClaudeWindowsApp",
-            "Wait-ClaudeCondition 30 40",
+            "Wait-ClaudeCondition 8 40",
             "if (-not $window) {",
             "Wait-ClaudeCondition 50 100",
         ],
@@ -899,6 +1056,25 @@ fn windows_debugger_automation_prefers_existing_window_before_appx_activation() 
     assert!(!request_body.contains("if (-not $window) { Start-ClaudeWindowsApp }"));
     assert!(request_body
         .contains("Write-ClaudeDebuggerLog 'Using existing Claude window before app activation.'"));
+    assert_contains_all(
+        request_body,
+        &[
+            "function Get-ClaudeProcessMap",
+            "function Build-ClaudeWindowCandidate",
+            "function Get-ClaudeMainWindowFromProcessHandles",
+            "Get-Process -Name 'claude'",
+            "$candidate = Get-ClaudeMainWindowFromProcessHandles $claudeProcesses",
+            "$claudeProcesses = Get-ClaudeProcessMap",
+            "$proc = $claudeProcesses[[int]$processId]",
+        ],
+    );
+    assert_order(
+        request_body,
+        "Get-ClaudeMainWindowFromProcessHandles $claudeProcesses",
+        "[CslClaudeWin32]::EnumWindows",
+        "main window handle fast path should run before full top-level window enumeration",
+    );
+    assert_contains_none(request_body, &["Get-Process -Id ([int]$processId)"]);
 }
 
 #[test]
@@ -963,7 +1139,7 @@ fn windows_debugger_automation_uses_short_condition_polling() {
         request_body,
         &[
             "function Wait-ClaudeCondition",
-            "Wait-ClaudeCondition 30 40",
+            "Wait-ClaudeCondition 8 40",
             "Wait-ClaudeCondition 16 40",
             "Start-Sleep -Milliseconds 40",
         ],
@@ -971,10 +1147,21 @@ fn windows_debugger_automation_uses_short_condition_polling() {
     assert_contains_none(
         request_body,
         &[
+            "Wait-ClaudeCondition 30 40",
+            "Wait-ClaudeCondition 30 50",
+            "for ($phase = 0; $phase -lt 8; $phase++)",
             "Start-Sleep -Milliseconds 120",
             "for ($attempt = 0; $attempt -lt 20; $attempt++)",
             "Start-Sleep -Milliseconds 500",
         ],
+    );
+}
+
+#[test]
+fn windows_debugger_script_timeout_allows_menu_automation_to_complete() {
+    assert_contains_all(
+        patch_source(),
+        &["WINDOWS_MAIN_PROCESS_DEBUGGER_SCRIPT_TIMEOUT: Duration = Duration::from_secs(30)"],
     );
 }
 
@@ -1420,14 +1607,14 @@ fn macos_debugger_menu_is_not_clicked_when_inspector_is_already_open() {
         "fn ensure_patch_files",
         "background retry helper",
     );
-    assert!(background_retry_body.contains("enable_claude_main_process_debugger()"));
+    assert!(background_retry_body.contains("request_claude_main_process_debugger_once()"));
     assert!(!background_retry_body.contains("wait_for_macos_claude_main_process_debugger()"));
     let silent_body = patch_between(
         "pub fn spawn_silent_localization_injector",
         "fn ensure_patch_files",
         "spawn_silent_localization_injector",
     );
-    assert!(silent_body.contains("enable_claude_main_process_debugger()"));
+    assert!(silent_body.contains("request_claude_main_process_debugger_once()"));
     assert!(!silent_body.contains("wait_for_macos_claude_main_process_debugger()"));
 
     assert_contains_all(
