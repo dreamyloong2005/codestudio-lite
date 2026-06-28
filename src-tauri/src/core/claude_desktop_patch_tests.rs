@@ -522,9 +522,7 @@ fn background_localization_retry_loop_avoids_long_debugger_wait() {
 
     assert_contains_all(
         retry_body,
-        &[
-            "request_claude_main_process_debugger_for_background_retry()",
-        ],
+        &["request_claude_main_process_debugger_for_background_retry()"],
     );
     assert_contains_all(
         request_body,
@@ -1975,6 +1973,9 @@ fn locale_runtime_translates_current_model_badges() {
     assert!(TRANSLATION_RUNTIME.contains("Currently unavailable"));
     assert!(TRANSLATION_RUNTIME.contains("For more complex tasks"));
     assert!(TRANSLATION_RUNTIME.contains("For complex tasks"));
+    assert!(TRANSLATION_RUNTIME.contains("Disable bundled skills and workflows"));
+    assert!(TRANSLATION_RUNTIME.contains("Disables Claude Code's bundled skills"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u7981\\u7528\\u5185\\u7f6e\\u6280\\u80fd"));
     assert!(TRANSLATION_RUNTIME.contains("\"Gateway\""));
     assert!(TRANSLATION_RUNTIME.contains("\"GATEWAY\""));
     assert!(!TRANSLATION_RUNTIME.contains("Can think for more complex tasks"));
@@ -2030,8 +2031,152 @@ fn bundled_zh_locale_uses_curated_terms_for_known_machine_translation_regression
         LocaleExpectation {
             key: "0hPFsTuQ1X",
             label: "inference request header help text",
-            expected: "每次向配置的提供方发送推理请求时额外附加 HTTP 标头。可用于租户级路由、组织 ID、Bedrock Guardrails 等场景。",
+            expected: "每次向配置的提供方发送推理请求时额外附加 HTTP 请求头。可用于租户级路由、组织 ID、Bedrock Guardrails 等场景。",
             forbidden: &["租户路由", "基岩", "护栏"],
+        },
+        LocaleExpectation {
+            key: "CJsWpnmYD4",
+            label: "home hero task copy",
+            expected: "让我们帮你完成一项待办",
+            forbidden: &["砍掉"],
+        },
+        LocaleExpectation {
+            key: "JQs8c3pGcl",
+            label: "gateway base url label",
+            expected: "网关 Base URL",
+            forbidden: &["网关基网"],
+        },
+        LocaleExpectation {
+            key: "/m0q/Dre6A",
+            label: "api model id label",
+            expected: "模型 ID",
+            forbidden: &["型号"],
+        },
+        LocaleExpectation {
+            key: "hv0F38ESRM",
+            label: "api model list label",
+            expected: "模型列表",
+            forbidden: &["型号"],
+        },
+        LocaleExpectation {
+            key: "g8BMTiGHB6",
+            label: "api credential type label",
+            expected: "凭据类型",
+            forbidden: &["证书类型"],
+        },
+        LocaleExpectation {
+            key: "y/6sGoi9YF",
+            label: "connectors and extensions settings nav",
+            expected: "连接器与扩展",
+            forbidden: &["连接件", "延伸"],
+        },
+        LocaleExpectation {
+            key: "xY1EE6Ndl5",
+            label: "egress requirements settings nav",
+            expected: "网络出口要求",
+            forbidden: &["逃生"],
+        },
+        LocaleExpectation {
+            key: "v7i2fnB2+A",
+            label: "desktop general settings heading",
+            expected: "桌面通用设置",
+            forbidden: &["桌面一般设置"],
+        },
+        LocaleExpectation {
+            key: "BYTC25E9Co",
+            label: "all extensions breadcrumb",
+            expected: "所有扩展",
+            forbidden: &["所有延伸"],
+        },
+        LocaleExpectation {
+            key: "5oTa1gWQsk",
+            label: "allowed egress hosts label",
+            expected: "允许外连主机",
+            forbidden: &["逃逸"],
+        },
+        LocaleExpectation {
+            key: "XhBz9JhRHE",
+            label: "allowed surfaces label",
+            expected: "允许使用的界面",
+            forbidden: &["表面"],
+        },
+        LocaleExpectation {
+            key: "aTTY7rU6Bh",
+            label: "max tokens per window label",
+            expected: "每个窗口最大 Token 数",
+            forbidden: &["令牌数", "代币"],
+        },
+        LocaleExpectation {
+            key: "P6EE/aQ7SS",
+            label: "token unit label",
+            expected: "Token",
+            forbidden: &["代币"],
+        },
+        LocaleExpectation {
+            key: "aH4De2Y20k",
+            label: "remote settings source nav",
+            expected: "配置来源",
+            forbidden: &["资料来源"],
+        },
+        LocaleExpectation {
+            key: "fHh9zisMLR",
+            label: "general limits heading",
+            expected: "通用限制",
+            forbidden: &["一般限制"],
+        },
+        LocaleExpectation {
+            key: "CCUxBOb3va",
+            label: "disable claude protocol handling label",
+            expected: "禁用 claude:// 深度链接处理",
+            forbidden: &["深链"],
+        },
+        LocaleExpectation {
+            key: "SwdskAOTqO",
+            label: "bundled node setting help text",
+            expected: "启用后，Claude 不会使用系统 Node.js 来运行扩展 MCP 服务器。当系统 Node.js 缺失或过时时，也会自动使用内置 Node.js。",
+            forbidden: &["永远不会", "系统Node"],
+        },
+        LocaleExpectation {
+            key: "Q6zr1vGzlF",
+            label: "bootstrap config toggle label",
+            expected: "使用 Bootstrap 配置",
+            forbidden: &["bootstrap 配置"],
+        },
+        LocaleExpectation {
+            key: "qjMZL1XFnR",
+            label: "bootstrap config server label",
+            expected: "Bootstrap 配置服务器",
+            forbidden: &["config server"],
+        },
+        LocaleExpectation {
+            key: "ozzKmITBMv",
+            label: "usage limit help text",
+            expected: "按账户设置的每日软上限，由客户端在指定时间窗口内统计。不是服务器强制执行的配额。",
+            forbidden: &["下文期间"],
+        },
+        LocaleExpectation {
+            key: "tmwK1KjFte",
+            label: "gateway auth scheme label",
+            expected: "网关认证方式",
+            forbidden: &["方案"],
+        },
+        LocaleExpectation {
+            key: "rdKIIOydC8",
+            label: "block baseline telemetry label",
+            expected: "阻止基础遥测",
+            forbidden: &["块本质"],
+        },
+        LocaleExpectation {
+            key: "6T78KTXhBM",
+            label: "custom inference headers label",
+            expected: "自定义推理请求头",
+            forbidden: &["推理头"],
+        },
+        LocaleExpectation {
+            key: "DPJjsItBww",
+            label: "scheduled tasks nav",
+            expected: "计划任务",
+            forbidden: &["预定"],
         },
         LocaleExpectation {
             key: "4EAtPWhM42",
@@ -2095,7 +2240,7 @@ fn bundled_zh_locale_uses_curated_terms_for_known_machine_translation_regression
 #[test]
 fn locale_runtime_source_stays_small() {
     let source = build_locale_runtime_source();
-    assert!(source.len() < 15_000);
+    assert!(source.len() < 16_000);
     assert_contains_none(&source, &["__CLAUDE_ZH_ION_LOCALE__", CLAUDE_ION_ZH_LOCALE]);
 }
 
