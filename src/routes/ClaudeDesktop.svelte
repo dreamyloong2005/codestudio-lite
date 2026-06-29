@@ -299,8 +299,6 @@
     launching = true;
     try {
       await launchClaudeDesktop({ localize });
-      launching = false;
-      void refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes("ACCESSIBILITY_NOT_TRUSTED")) {
@@ -376,7 +374,7 @@
       </div>
     </div>
     <div class={topActionsRecipe()}>
-      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch} title={$t("toolLaunch.actionTitle", { name: "Claude Desktop" })} on:click={launchClaude}>
+      <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch || launching} title={$t("toolLaunch.actionTitle", { name: "Claude Desktop" })} on:click={launchClaude}>
         {#if launching}
           <AppIcon name="loading" size={16} class={spinRecipe()} />
           {$t("toolLaunch.starting")}
@@ -385,8 +383,8 @@
           {$t("toolLaunch.action")}
         {/if}
       </button>
-      <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true })}>
-        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? spinRecipe() : ""} />
+      <button class={actionButtonRecipe()} data-refresh-button="true" disabled={kindView.loading || busyAction !== null} on:click={() => refreshClaudeDesktop(true, effectiveSelectedKind, { forceFresh: true })}>
+        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={15} class={kindView.loading ? spinRecipe() : ""} />
         {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>
     </div>

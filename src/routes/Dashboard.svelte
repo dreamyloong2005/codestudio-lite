@@ -90,6 +90,7 @@
   type DashboardRefreshOptions = { quiet?: boolean; scheduleFollowup?: boolean; showRefreshIndicator?: boolean };
   type DashboardCardAction = "update" | "repair" | "launch" | "configure";
   const dashboardCardActions: DashboardCardAction[] = ["update", "repair", "launch", "configure"];
+  const directLaunchFeedbackMs = 700;
 
   export let snapshot: DetectionSnapshot | null = null;
   export let refreshingExternally = false;
@@ -123,10 +124,11 @@
   let launchError: string | null = null;
   let planningLaunchToolId: string | null = null;
   let launchingToolId: string | null = null;
+  let directLaunchToolIds = new Set<string>();
   let selectedLaunchProfileId: string | null = null;
   let selectedLaunchShellId: string | null = null;
   let launchWorkingDirectory = "";
-  let launchMode: LaunchMode = "embedded";
+  let launchMode: LaunchMode = "external";
   let launchTerminalElement: HTMLDivElement | null = null;
   let launchTerminal: Terminal | null = null;
   let launchTerminalSessionId: string | null = null;
@@ -180,12 +182,33 @@
     return repairingToolId === tool.id;
   }
 
-  function isLaunchingTool(tool: ToolStatus) {
-    return planningLaunchToolId === tool.id || launchingToolId === tool.id;
+  function isDirectLaunchingTool(tool: ToolStatus, activeDirectLaunchToolIds: Set<string>) {
+    return activeDirectLaunchToolIds.has(tool.id);
   }
 
-  function isToolActionBusy(tool: ToolStatus) {
-    return isInstallingTool(tool) || isUpdatingTool(tool) || isRepairingTool(tool) || isLaunchingTool(tool);
+  function isLaunchingTool(
+    tool: ToolStatus,
+    activeLaunchingToolId: string | null,
+    activeDirectLaunchToolIds: Set<string>
+  ) {
+    return (
+      planningLaunchToolId === tool.id ||
+      activeLaunchingToolId === tool.id ||
+      isDirectLaunchingTool(tool, activeDirectLaunchToolIds)
+    );
+  }
+
+  function isToolActionBusy(
+    tool: ToolStatus,
+    activeLaunchingToolId: string | null,
+    activeDirectLaunchToolIds: Set<string>
+  ) {
+    return (
+      isInstallingTool(tool) ||
+      isUpdatingTool(tool) ||
+      isRepairingTool(tool) ||
+      isLaunchingTool(tool, activeLaunchingToolId, activeDirectLaunchToolIds)
+    );
   }
 
   function dashboardActionAvailable(tool: ToolStatus, action: DashboardCardAction) {
@@ -907,18 +930,29 @@
   }
 
   async function launchDesktopClient(tool: ToolStatus) {
+    if (launchingToolId) {
+      return;
+    }
+    const launchStartedAt = Date.now();
     launchingToolId = tool.id;
+    directLaunchToolIds = new Set(directLaunchToolIds).add(tool.id);
     toolActionError = null;
     const launchPromise = tool.id === "codex-app"
       ? launchManagedCodexClient()
       : launchClaudeDesktopFromDashboard();
-    launchPromise.then(() => {
-      void Promise.resolve(onRefresh({ quiet: true, scheduleFollowup: false })).catch(() => {});
-    }).catch((err) => {
+    try {
+      await tick();
+      await launchPromise;
+    } catch (err) {
       toolActionError = err instanceof Error ? err.message : String(err);
-    }).finally(() => {
+    } finally {
+      const remainingFeedbackMs = Math.max(0, directLaunchFeedbackMs - (Date.now() - launchStartedAt));
+      await new Promise((resolve) => setTimeout(resolve, remainingFeedbackMs));
+      const nextDirectLaunchToolIds = new Set(directLaunchToolIds);
+      nextDirectLaunchToolIds.delete(tool.id);
+      directLaunchToolIds = nextDirectLaunchToolIds;
       launchingToolId = null;
-    });
+    }
   }
 
   async function openToolLaunch(tool: ToolStatus) {
@@ -936,7 +970,7 @@
     selectedLaunchProfileId = null;
     selectedLaunchShellId = null;
     launchWorkingDirectory = "";
-    launchMode = "embedded";
+    launchMode = "external";
     await disposeLaunchTerminal(false);
     planningLaunchToolId = tool.id;
     toolActionMessage = null;
@@ -964,7 +998,7 @@
     selectedLaunchProfileId = null;
     selectedLaunchShellId = null;
     launchWorkingDirectory = "";
-    launchMode = "embedded";
+    launchMode = "external";
   }
 
   async function startToolLaunch() {
@@ -1056,8 +1090,8 @@
       <p>{$t("dashboard.subtitle")}</p>
     </div>
     <div class={topActionsRecipe()}>
-      <button class={actionButtonRecipe()} type="button" disabled={refreshBusy} on:click={refreshDashboard}>
-        <AppIcon name={refreshBusy ? "loading" : "refresh"} size={16} class={refreshBusy ? spinRecipe() : ""} />
+      <button class={actionButtonRecipe()} type="button" data-refresh-button="true" disabled={refreshBusy} on:click={refreshDashboard}>
+        <AppIcon name={refreshBusy ? "loading" : "refresh"} size={15} class={refreshBusy ? spinRecipe() : ""} />
         {$t(refreshBusy ? "common.refreshing" : "common.refresh")}
       </button>
     </div>
@@ -1144,7 +1178,7 @@
                 <button
                   class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if isRepairingTool(tool)}
@@ -1158,7 +1192,7 @@
               <button
                 class={actionButtonRecipe({ compact: true })}
                 title={$t("tool.installCommand", { name: tool.name })}
-                disabled={isToolActionBusy(tool)}
+                disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                 on:click={() => openInstallPlan(tool)}
               >
                 {#if isInstallingTool(tool)}
@@ -1173,7 +1207,7 @@
                 <button
                   class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.updateCommand", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => openToolActionPlan(tool, "update")}
                 >
                   {#if isUpdatingTool(tool)}
@@ -1188,7 +1222,7 @@
                 <button
                   class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if isRepairingTool(tool)}
@@ -1202,23 +1236,23 @@
               {#if isDashboardActionVisible(tool, "launch")}
                 <button
                   class={actionButtonRecipe({ compact: true })}
-                  title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  title={$t("toolLaunch.actionTitle", { name: tool.name })}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => openToolLaunch(tool)}
                 >
-                  {#if isLaunchingTool(tool)}
+                  {#if isLaunchingTool(tool, launchingToolId, directLaunchToolIds)}
                     <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="play" size={16} />
                   {/if}
-                  {isLaunchingTool(tool) ? $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restarting" : "toolLaunch.starting") : $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restart" : "toolLaunch.action")}
+                  {isLaunchingTool(tool, launchingToolId, directLaunchToolIds) ? $t("toolLaunch.starting") : $t("toolLaunch.action")}
                 </button>
               {/if}
               {#if isDashboardActionVisible(tool, "configure")}
                 <button
                   class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.createConfig", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => onConfigureTool(tool)}
                 >
                   <AppIcon name="settings" size={16} />
@@ -1238,7 +1272,7 @@
                     <button
                       class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
                       title={$t("tool.updateCommand", { name: tool.name })}
-                      disabled={isToolActionBusy(tool)}
+                      disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                       on:click|stopPropagation={() => openToolActionPlan(tool, "update")}
                     >
                       {#if isUpdatingTool(tool)}
@@ -1253,7 +1287,7 @@
                     <button
                       class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
                       title={$t("tool.repairPathTitle", { name: tool.name })}
-                      disabled={isToolActionBusy(tool)}
+                      disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                       on:click|stopPropagation={() => confirmRepairPath(tool)}
                     >
                       {#if isRepairingTool(tool)}
@@ -1267,23 +1301,23 @@
                   {#if isDashboardActionOverflowed(tool, "launch")}
                     <button
                       class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
-                      title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
-                      disabled={isToolActionBusy(tool)}
+                      title={$t("toolLaunch.actionTitle", { name: tool.name })}
+                      disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                       on:click|stopPropagation={() => openToolLaunch(tool)}
                     >
-                      {#if isLaunchingTool(tool)}
+                      {#if isLaunchingTool(tool, launchingToolId, directLaunchToolIds)}
                         <AppIcon name="loading" size={16} class={spinRecipe()} />
                       {:else}
                         <AppIcon name="play" size={16} />
                       {/if}
-                      {isLaunchingTool(tool) ? $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restarting" : "toolLaunch.starting") : $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restart" : "toolLaunch.action")}
+                      {isLaunchingTool(tool, launchingToolId, directLaunchToolIds) ? $t("toolLaunch.starting") : $t("toolLaunch.action")}
                     </button>
                   {/if}
                   {#if isDashboardActionOverflowed(tool, "configure")}
                     <button
                       class={cx(actionButtonRecipe({ compact: true }), dashboardOverflowMenuButtonClass)}
                       title={$t("tool.createConfig", { name: tool.name })}
-                      disabled={isToolActionBusy(tool)}
+                      disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                       on:click|stopPropagation={() => onConfigureTool(tool)}
                     >
                       <AppIcon name="settings" size={16} />
@@ -1335,7 +1369,7 @@
                 <button
                   class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
@@ -1349,7 +1383,7 @@
               <button
                 class={actionButtonRecipe({ compact: true })}
                 title={$t("tool.installCommand", { name: tool.name })}
-                disabled={isToolActionBusy(tool)}
+                disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                 on:click={() => openInstallPlan(tool)}
               >
                 {#if isInstallingTool(tool)}
@@ -1363,7 +1397,7 @@
               <button
                 class={actionButtonRecipe({ compact: true })}
                 title={$t("tool.updateCommand", { name: tool.name })}
-                disabled={isToolActionBusy(tool)}
+                disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                 on:click={() => openToolActionPlan(tool, "update")}
               >
                 {#if updatingToolId === tool.id}
@@ -1377,7 +1411,7 @@
                 <button
                   class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
@@ -1391,16 +1425,16 @@
               {#if canShowToolLaunch(tool)}
                 <button
                   class={actionButtonRecipe({ compact: true })}
-                  title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  title={$t("toolLaunch.actionTitle", { name: tool.name })}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => openToolLaunch(tool)}
                 >
-                  {#if isLaunchingTool(tool)}
+                  {#if isLaunchingTool(tool, launchingToolId, directLaunchToolIds)}
                     <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="play" size={16} />
                   {/if}
-                  {isLaunchingTool(tool) ? $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restarting" : "toolLaunch.starting") : $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restart" : "toolLaunch.action")}
+                  {isLaunchingTool(tool, launchingToolId, directLaunchToolIds) ? $t("toolLaunch.starting") : $t("toolLaunch.action")}
                 </button>
               {/if}
             {:else}
@@ -1408,7 +1442,7 @@
                 <button
                   class={actionButtonRecipe({ compact: true })}
                   title={$t("tool.repairPathTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => confirmRepairPath(tool)}
                 >
                   {#if repairingToolId === tool.id}
@@ -1422,16 +1456,16 @@
               {#if canShowToolLaunch(tool)}
                 <button
                   class={actionButtonRecipe({ compact: true })}
-                  title={$t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restartTitle" : "toolLaunch.actionTitle", { name: tool.name })}
-                  disabled={isToolActionBusy(tool)}
+                  title={$t("toolLaunch.actionTitle", { name: tool.name })}
+                  disabled={isToolActionBusy(tool, launchingToolId, directLaunchToolIds)}
                   on:click={() => openToolLaunch(tool)}
                 >
-                  {#if isLaunchingTool(tool)}
+                  {#if isLaunchingTool(tool, launchingToolId, directLaunchToolIds)}
                     <AppIcon name="loading" size={16} class={spinRecipe()} />
                   {:else}
                     <AppIcon name="play" size={16} />
                   {/if}
-                  {isLaunchingTool(tool) ? $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restarting" : "toolLaunch.starting") : $t(isManagedDesktopClient(tool) && tool.running ? "toolLaunch.restart" : "toolLaunch.action")}
+                  {isLaunchingTool(tool, launchingToolId, directLaunchToolIds) ? $t("toolLaunch.starting") : $t("toolLaunch.action")}
                 </button>
               {/if}
             {/if}
@@ -1769,17 +1803,6 @@
             <div class={dashboardLaunchGridRecipe({ compact: true })}>
               <button
                 type="button"
-                class={dashboardLaunchOptionClass(launchMode === "embedded")}
-                data-selected={launchMode === "embedded"}
-                aria-pressed={launchMode === "embedded"}
-                disabled={launchTerminalRunning || Boolean(launchingToolId)}
-                on:click={() => (launchMode = "embedded")}
-              >
-                <strong>{$t("toolLaunch.embedded")}</strong>
-                <span>{$t("toolLaunch.embeddedHint")}</span>
-              </button>
-              <button
-                type="button"
                 class={dashboardLaunchOptionClass(launchMode === "external")}
                 data-selected={launchMode === "external"}
                 aria-pressed={launchMode === "external"}
@@ -1788,6 +1811,17 @@
               >
                 <strong>{$t("toolLaunch.external")}</strong>
                 <span>{$t("toolLaunch.externalHint")}</span>
+              </button>
+              <button
+                type="button"
+                class={dashboardLaunchOptionClass(launchMode === "embedded")}
+                data-selected={launchMode === "embedded"}
+                aria-pressed={launchMode === "embedded"}
+                disabled={launchTerminalRunning || Boolean(launchingToolId)}
+                on:click={() => (launchMode = "embedded")}
+              >
+                <strong>{$t("toolLaunch.embedded")}</strong>
+                <span>{$t("toolLaunch.embeddedHint")}</span>
               </button>
             </div>
           </section>

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 test("dashboard cards keep installed status and three actions on one compact row", () => {
   const styles = read("src/styles.css");
@@ -42,7 +42,7 @@ test("dashboard desktop client cards use a real hit-area button for navigation",
 
   const connectedArticle = sliceBetween(
     svelte,
-    '<article\n          class={dashboardCardRecipe({ clickable: Boolean(desktopClientRouteForTool(tool.id)) })}',
+    '<article' + "\n" + '          class={dashboardCardRecipe({ clickable: Boolean(desktopClientRouteForTool(tool.id)) })}',
     '<div class={dashboardCardMainRecipe()}>',
     "connected desktop client article"
   );
@@ -57,7 +57,7 @@ test("dashboard desktop client cards use a real hit-area button for navigation",
 
   const connectedActions = sliceBetween(
     svelte,
-    '<div\n            class={dashboardCardActionsRecipe()}',
+    '<div' + "\n" + '            class={dashboardCardActionsRecipe()}',
     "</article>",
     "connected desktop client actions"
   );
@@ -101,7 +101,7 @@ test("dashboard only folds actions after two direct buttons", () => {
   );
   const connectedActions = sliceBetween(
     connectedSection,
-    '<div\n            class={dashboardCardActionsRecipe()}',
+    '<div' + "\n" + '            class={dashboardCardActionsRecipe()}',
     "</article>",
     "connected client actions"
   );
@@ -179,8 +179,10 @@ test("dashboard refresh button follows external detection refresh state", () => 
 
   assert.match(svelte, /export let refreshingExternally = false/);
   assert.match(svelte, /\$:\s*refreshBusy = refreshing \|\| refreshingExternally/);
+  assert.match(svelte, /data-refresh-button="true"/);
   assert.match(svelte, /disabled=\{refreshBusy\}/);
   assert.match(svelte, /name=\{refreshBusy \? "loading" : "refresh"\}/);
+  assert.match(svelte, /size=\{15\}/);
   assert.match(svelte, /class=\{refreshBusy \? spinRecipe\(\) : ""\}/);
   assert.match(svelte, /\$t\(refreshBusy \? "common\.refreshing" : "common\.refresh"\)/);
   assert.match(svelte, /onRefresh\(\{ quiet: false, scheduleFollowup: true, showRefreshIndicator: true \}\)/);
@@ -234,6 +236,20 @@ test("CLI launch panel accepts and forwards a working directory", () => {
 }
 );
 
+test("CLI launch panel defaults to external terminal first", () => {
+  const dashboard = read("src/routes/Dashboard.svelte");
+  const modeSection = dashboard.slice(
+    dashboard.indexOf('{$t("toolLaunch.launchMode")}'),
+    dashboard.indexOf('{$t("toolLaunch.workingDirectory")}', dashboard.indexOf('{$t("toolLaunch.launchMode")}') )
+  );
+
+  assert.match(dashboard, /let launchMode: LaunchMode = "external"/);
+  assert.match(dashboard, /launchMode = "external"/);
+  assert.ok(
+    modeSection.indexOf('class={dashboardLaunchOptionClass(launchMode === "external")}') < modeSection.indexOf('class={dashboardLaunchOptionClass(launchMode === "embedded")}') ,
+    "external launch option should render before embedded"
+  );
+});
 test("dashboard update action is the leftmost action when updates are available", () => {
   const svelte = read("src/routes/Dashboard.svelte");
   const connectedSection = sliceBetween(
@@ -244,7 +260,7 @@ test("dashboard update action is the leftmost action when updates are available"
   );
   const connectedActions = sliceBetween(
     connectedSection,
-    '<div\n            class={dashboardCardActionsRecipe()}',
+    '<div' + "\n" + '            class={dashboardCardActionsRecipe()}',
     "</article>",
     "connected client actions"
   );

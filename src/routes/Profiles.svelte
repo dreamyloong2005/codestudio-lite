@@ -1431,7 +1431,7 @@
   }
 
   function errorLabel(message: string) {
-    if (message === "Profile Name is required") {
+    if (message === "Profile Name is required" || message === "Configuration name is required") {
       return $t("wizard.error.profileNameRequired");
     }
     if (message === "Base URL must start with http:// or https://") {

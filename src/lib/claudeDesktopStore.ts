@@ -594,10 +594,7 @@ async function runAction(
 export async function launchClaudeDesktopFromDashboard() {
   startClaudeDesktopLocalizationProgressListener();
   patch({ localizationProgress: null });
-  const installKind = get(claudeDesktopView).selectedKind;
   await launchClaudeDesktop({ localize: getClaudeDesktopLocalizeLaunch() });
-  await new Promise((resolve) => setTimeout(resolve, 2500));
-  await refreshClaudeDesktop(true, installKind);
 }
 
 export async function installOrUpdateClaudeDesktop(mode?: "install" | "update") {

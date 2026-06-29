@@ -199,8 +199,8 @@
       <div>
         <h2>{$t("gateway.requestLogTitle")}</h2>
       </div>
-      <button class={actionButtonRecipe()} on:click={refreshRequestLog} disabled={requestLogLoading}>
-        <AppIcon name={requestLogLoading ? "loading" : "refresh"} class={requestLogLoading ? spinRecipe() : ""} size={16} />
+      <button class={actionButtonRecipe()} data-refresh-button="true" on:click={refreshRequestLog} disabled={requestLogLoading}>
+        <AppIcon name={requestLogLoading ? "loading" : "refresh"} class={requestLogLoading ? spinRecipe() : ""} size={15} />
         {$t("common.refresh")}
       </button>
     </div>

@@ -581,7 +581,7 @@
   }
 
   function errorLabel(message: string) {
-    if (message === "Profile Name is required") {
+    if (message === "Profile Name is required" || message === "Configuration name is required") {
       return $t("wizard.error.profileNameRequired");
     }
     if (message === "Base URL must start with http:// or https://") {
@@ -906,8 +906,8 @@
                 {$t("wizard.codexOAuth.openLogin")}
               {/if}
             </button>
-            <button class={actionButtonRecipe()} type="button" disabled={codexAuthChecking} on:click={refreshCodexAuthStatus}>
-              <AppIcon name={codexAuthChecking ? "loading" : "refresh"} class={codexAuthChecking ? spinRecipe() : ""} size={16} />
+            <button class={actionButtonRecipe()} type="button" data-refresh-button="true" disabled={codexAuthChecking} on:click={refreshCodexAuthStatus}>
+              <AppIcon name={codexAuthChecking ? "loading" : "refresh"} class={codexAuthChecking ? spinRecipe() : ""} size={15} />
               {$t("wizard.codexOAuth.recheck")}
             </button>
           </div>

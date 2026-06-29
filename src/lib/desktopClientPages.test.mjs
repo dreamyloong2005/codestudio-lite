@@ -50,7 +50,7 @@ test("route switches refresh the active CodeStudio Lite page", () => {
   assert.match(app, /route !== lastRouteRefreshRoute[\s\S]*refreshCurrentRouteAfterSwitch\(route\)/);
   assert.match(
     app,
-    /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: false, showRefreshIndicator: true \}\)/
+    /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: true, showRefreshIndicator: true \}\)/
   );
   assert.match(app, /currentRoute === "codexClient"[\s\S]*ensureCodexClientLoaded\(\)/);
   assert.match(app, /currentRoute === "claudeDesktop"[\s\S]*ensureClaudeDesktopLoaded\(\)/);
@@ -175,8 +175,7 @@ test("Claude Desktop page supports install update and uninstall through the shar
   assert.match(route, /openClaudeDesktopStagingPath/);
   assert.match(route, /claudeDesktop\.openStagingPath/);
   assert.match(store, /const CLAUDE_DESKTOP_TOOL_ID = "claude-desktop"/);
-  assert.match(store, /planToolInstall\(CLAUDE_DESKTOP_TOOL_ID\)/);
-  assert.match(store, /planToolUpdate\(CLAUDE_DESKTOP_TOOL_ID\)/);
+  assert.match(store, /inspectClaudeDesktopPage/);
   assert.match(store, /installTool\(/);
   assert.match(store, /updateTool\(/);
   assert.match(store, /uninstallTool\(/);
@@ -209,7 +208,7 @@ test("Claude Desktop page launches like a desktop client without the shared tool
   assert.match(route, /claudeDesktop\.localizeLaunch/);
   assert.match(api, /export async function launchClaudeDesktop/);
   assert.match(commandsMod, /pub mod claude_desktop;/);
-  assert.match(commands, /pub fn launch_claude_desktop/);
+  assert.match(commands, /pub async fn launch_claude_desktop/);
   assert.match(lib, /commands::claude_desktop::launch_claude_desktop/);
   assert.match(patch, /pub fn launch\(localize: bool\)/);
   assert.doesNotMatch(route, /openClaudeLaunch/);
@@ -226,7 +225,7 @@ test("Claude Desktop Windows launch uses native app activation instead of fire-a
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
 
   assert.match(patch, /package::launch_first_msix_package_with_args/);
-  assert.match(patch, /launch_windows_claude_desktop\(localize\)/);
+  assert.match(patch, /launch_windows_claude_desktop\(localize, app\)/);
   assert.match(patch, /find_windows_claude_exe\(\)/);
   const launchFunction = patch.slice(patch.indexOf("pub fn launch(localize: bool)"), patch.indexOf("pub fn base_launch_command"));
   assert.doesNotMatch(launchFunction, /hidden_command\("powershell\.exe"\)[\s\S]*\.spawn\(\)/);
@@ -327,8 +326,8 @@ test("Claude Desktop localized Windows launch uses official debugger runtime inj
   assert.doesNotMatch(productionPatch, new RegExp(["fuse", "_integrity_offset"].join("")));
   assert.doesNotMatch(productionPatch, new RegExp(["Shell", "ExecuteExW"].join("")));
   assert.doesNotMatch(productionPatch, new RegExp(["apply-claude-", "patch\\.ps1"].join("")));
-  assert.match(productionPatch, /ensure_windows_claude_main_process_debugger/);
-  assert.match(productionPatch, /enable_claude_main_process_debugger/);
+  assert.match(productionPatch, /request_windows_claude_main_process_debugger_once/);
+  assert.match(productionPatch, /request_claude_main_process_debugger_for_background_retry/);
   assert.match(productionPatch, /read_node_inspector_targets/);
   assert.match(productionPatch, /node_inspector_identity_is_claude/);
   assert.match(productionPatch, /build_main_process_injection_source/);
@@ -480,6 +479,8 @@ test("desktop client launch buttons always show launch copy", () => {
   assert.match(claudeTopActions, /\$t\("toolLaunch\.starting"\)/);
   assert.match(claudeTopActions, /\$t\("toolLaunch\.action"\)/);
   assert.doesNotMatch(claudeTopActions, /toolLaunch\.restart|toolLaunch\.restarting|toolLaunch\.restartTitle/);
+  assert.match(codexTopActions, /busyAction === "launch"/);
+  assert.match(codexTopActions, /\$t\("toolLaunch\.starting"\)/);
   assert.match(codexTopActions, /\$t\("codexClient\.launch"\)/);
   assert.doesNotMatch(codexTopActions, /codexClient\.restart/);
 });
@@ -495,11 +496,76 @@ test("Claude Desktop localized launch returns without blocking the UI", () => {
 
   assert.match(command, /pub async fn launch_claude_desktop/);
   assert.match(command, /tauri::async_runtime::spawn_blocking/);
-  assert.match(launchHandler, /void refreshClaudeDesktop\(true,\s*effectiveSelectedKind,\s*\{ forceFresh: true \}\)/);
+  assert.doesNotMatch(launchHandler, /refreshClaudeDesktop/);
   assert.doesNotMatch(launchHandler, /setTimeout\(resolve,\s*2500\)/);
-  assert.doesNotMatch(launchHandler, /await refreshClaudeDesktop\(true,\s*effectiveSelectedKind,\s*\{ forceFresh: true \}\)/);
 });
 
+test("desktop client launch actions do not trigger immediate refresh", () => {
+  const codexStore = read("src/lib/codexClientStore.ts");
+  const claudeStore = read("src/lib/claudeDesktopStore.ts");
+  const dashboard = read("src/routes/Dashboard.svelte");
+
+  const codexLaunch = codexStore.slice(
+    codexStore.indexOf("export async function launchManagedCodexClient"),
+    codexStore.length
+  );
+  const claudeDashboardLaunch = claudeStore.slice(
+    claudeStore.indexOf("export async function launchClaudeDesktopFromDashboard"),
+    claudeStore.indexOf("export async function installOrUpdateClaudeDesktop")
+  );
+  const dashboardLaunch = dashboard.slice(
+    dashboard.indexOf("async function launchDesktopClient"),
+    dashboard.indexOf("async function openToolLaunch")
+  );
+
+  assert.doesNotMatch(codexLaunch, /refreshCodexClient|setTimeout\(resolve,\s*2500\)/);
+  assert.doesNotMatch(claudeDashboardLaunch, /refreshClaudeDesktop|setTimeout\(resolve,\s*2500\)/);
+  assert.doesNotMatch(dashboardLaunch, /onRefresh\(\{ quiet: true, scheduleFollowup: false \}\)/);
+  assert.match(dashboardLaunch, /if \(launchingToolId\) \{\s*return;\s*\}/);
+});
+
+test("dashboard direct desktop launches show and lock the launch button", () => {
+  const dashboard = read("src/routes/Dashboard.svelte");
+  const dashboardLaunch = dashboard.slice(
+    dashboard.indexOf("async function launchDesktopClient"),
+    dashboard.indexOf("async function openToolLaunch")
+  );
+
+  assert.doesNotMatch(dashboard, /codexClientView/);
+  assert.doesNotMatch(dashboard, /codexClientLaunching|isCodexClientLaunching/);
+  assert.match(dashboard, /let directLaunchToolIds = new Set<string>\(\)/);
+  assert.match(dashboard, /function isDirectLaunchingTool\(tool: ToolStatus, activeDirectLaunchToolIds: Set<string>\)/);
+  assert.match(dashboard, /return activeDirectLaunchToolIds\.has\(tool\.id\)/);
+  assert.match(
+    dashboard,
+    /function isLaunchingTool\(\s*tool: ToolStatus,\s*activeLaunchingToolId: string \| null,\s*activeDirectLaunchToolIds: Set<string>\s*\)[\s\S]*isDirectLaunchingTool\(tool, activeDirectLaunchToolIds\)/
+  );
+  assert.match(
+    dashboard,
+    /function isToolActionBusy\(\s*tool: ToolStatus,\s*activeLaunchingToolId: string \| null,\s*activeDirectLaunchToolIds: Set<string>\s*\)[\s\S]*isLaunchingTool\(tool, activeLaunchingToolId, activeDirectLaunchToolIds\)/
+  );
+  assert.match(dashboard, /disabled=\{isToolActionBusy\(tool, launchingToolId, directLaunchToolIds\)\}/);
+  assert.match(dashboard, /\{#if isLaunchingTool\(tool, launchingToolId, directLaunchToolIds\)\}/);
+  assert.match(
+    dashboard,
+    /\{isLaunchingTool\(tool, launchingToolId, directLaunchToolIds\) \? \$t\("toolLaunch\.starting"\) : \$t\("toolLaunch\.action"\)\}/
+  );
+  assert.match(dashboardLaunch, /directLaunchToolIds = new Set\(directLaunchToolIds\)\.add\(tool\.id\)/);
+  assert.match(dashboardLaunch, /const launchPromise = tool\.id === "codex-app"[\s\S]*launchManagedCodexClient\(\)[\s\S]*launchClaudeDesktopFromDashboard\(\)/);
+  assert.doesNotMatch(dashboardLaunch, /await launchManagedCodexClient\(\)|await launchClaudeDesktopFromDashboard\(\)/);
+  assert.match(dashboardLaunch, /await launchPromise/);
+  assert.match(dashboard, /const directLaunchFeedbackMs = \d+/);
+  assert.match(dashboardLaunch, /await tick\(\)/);
+  assert.match(dashboardLaunch, /const launchStartedAt = Date\.now\(\)/);
+  assert.match(dashboardLaunch, /const remainingFeedbackMs = Math\.max\(0, directLaunchFeedbackMs - \(Date\.now\(\) - launchStartedAt\)\)/);
+  assert.match(dashboardLaunch, /await new Promise\(\(resolve\) => setTimeout\(resolve, remainingFeedbackMs\)\)/);
+  assert.match(dashboardLaunch, /nextDirectLaunchToolIds\.delete\(tool\.id\)/);
+  assert.match(dashboard, /if \(isManagedDesktopClient\(tool\)\) \{[\s\S]*await launchDesktopClient\(tool\);[\s\S]*return;[\s\S]*\}/);
+  assert.match(
+    dashboard,
+    /function isManagedDesktopClient\(tool: ToolStatus\) \{[\s\S]*tool\.id === "codex-app" \|\| tool\.id === "claude-desktop"/
+  );
+});
 test("Claude Desktop external terminal localization starts the injector", () => {
   const terminalCommand = read("src-tauri/src/commands/install_terminal.rs");
   const startTerminalFunction = terminalCommand.slice(
@@ -563,7 +629,7 @@ test("Claude Desktop isolates Windows App and EXE tab operation state", () => {
   assert.match(route, /installOrUpdateClaudeDesktopKind\(effectiveSelectedKind,\s*"install"\)/);
   assert.match(route, /installOrUpdateClaudeDesktopKind\(effectiveSelectedKind,\s*"update"\)/);
   assert.match(route, /removeClaudeDesktop\(effectiveSelectedKind\)/);
-  assert.match(route, /refreshClaudeDesktop\(false,\s*effectiveSelectedKind\)/);
+  assert.match(route, /refreshClaudeDesktop\(true,\s*effectiveSelectedKind,\s*\{ forceFresh: true \}\)/);
   assert.doesNotMatch(route, /on:click=\{\(\) => setClaudeDesktopSelectedKind\("exe"\)\}/);
   assert.match(route, /kindView\s*=\s*view\.kindViews\[effectiveSelectedKind\]/);
   assert.match(route, /status\s*=\s*kindView\.status/);
@@ -797,7 +863,8 @@ test("Claude Desktop macOS Accessibility grant resumes through the page after ex
   assert.match(store, /consumeClaudeDesktopPendingLaunchAfterRestart/);
   assert.match(route, /consumeClaudeDesktopPendingLaunchAfterRestart/);
   assert.match(route, /initializeClaudeDesktopPage/);
-  assert.match(route, /await ensureClaudeDesktopLoaded\(\);[\s\S]*await resumePendingLaunchAfterRestart\(\);/);
+  assert.match(route, /void initializeClaudeDesktopPage\(\)/);
+  assert.match(route, /async function initializeClaudeDesktopPage\(\) \{[\s\S]*await resumePendingLaunchAfterRestart\(\);[\s\S]*\}/);
   assert.match(route, /setClaudeDesktopPendingLaunchAfterRestart/);
   assert.match(route, /function cancelAccessibilityLaunch\(\)/);
   assert.match(route, /setClaudeDesktopPendingLaunchAfterRestart\(null\)/);

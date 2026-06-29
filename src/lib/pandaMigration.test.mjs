@@ -223,10 +223,13 @@ test("shared button typography stays compact after the Panda migration", () => {
   assert.match(appNav, /gap:\s*"8px"/);
   assert.match(appNavButton, /minHeight:\s*"42px"/);
   assert.match(appNavButton, /padding:\s*"0 12px"/);
+  assert.doesNotMatch(appNavButton, /translateX/);
   assert.match(appNavLabel, /fontSize:\s*"14px"/);
   assert.match(actionButton, /minHeight:\s*"32px"/);
   assert.match(actionButton, /padding:\s*"0 10px"/);
   assert.match(actionButton, /fontSize:\s*"11px"/);
+  assert.match(actionButton, /"&\[data-refresh-button='true'\]": \{[\s\S]*?fontSize:\s*"12px"/);
+  assert.match(actionButton, /"&\[data-refresh-button='true'\]": \{[\s\S]*?"& svg": \{[\s\S]*?width:\s*"15px"/);
   assert.match(actionButton, /compact:\s*\{[\s\S]*?minHeight:\s*"30px"/);
   assert.match(actionButton, /compact:\s*\{[\s\S]*?padding:\s*"0 9px"/);
   assert.match(actionButton, /compact:\s*\{[\s\S]*?fontSize:\s*"10.5px"/);

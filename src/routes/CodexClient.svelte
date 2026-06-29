@@ -206,11 +206,16 @@
     </div>
     <div class={topActionsRecipe()}>
       <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canLaunch || busyAction !== null} on:click={launchCodex}>
-        <AppIcon name="play" size={16} />
-        {$t("codexClient.launch")}
+        {#if busyAction === "launch"}
+          <AppIcon name="loading" size={16} class={spinRecipe()} />
+          {$t("toolLaunch.starting")}
+        {:else}
+          <AppIcon name="play" size={16} />
+          {$t("codexClient.launch")}
+        {/if}
       </button>
-      <button class={actionButtonRecipe()} disabled={kindView.loading || busyAction !== null} on:click={refreshCodex}>
-        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={16} class={kindView.loading ? spinRecipe() : ""} />
+      <button class={actionButtonRecipe()} data-refresh-button="true" disabled={kindView.loading || busyAction !== null} on:click={refreshCodex}>
+        <AppIcon name={kindView.loading ? "loading" : "refresh"} size={15} class={kindView.loading ? spinRecipe() : ""} />
         {$t(kindView.loading ? "common.refreshing" : "common.refresh")}
       </button>
     </div>

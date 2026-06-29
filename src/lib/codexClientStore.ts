@@ -697,7 +697,5 @@ export async function launchManagedCodexClient() {
   const installKind = get(codexClientView).selectedKind;
   await runAction(installKind, "launch", launchCodexClient, async () => {
     patch({ success: { key: "codexClient.launchRequested" } });
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    await refreshCodexClient(false, true, installKind);
   });
 }

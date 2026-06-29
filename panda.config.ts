@@ -146,7 +146,7 @@ export default defineConfig({
             background: "transparent",
             color: "var(--nav-icon)",
             textAlign: "left",
-            transition: "background var(--motion-quick), color var(--motion-quick), transform var(--motion-smooth)",
+            transition: "background var(--motion-quick), color var(--motion-quick)",
             "&::before": {
               position: "absolute",
               inset: "8px 6px 8px auto",
@@ -160,13 +160,11 @@ export default defineConfig({
             },
             _hover: {
               background: "var(--surface-soft)",
-              color: "var(--nav-icon-hover)",
-              transform: "translateX(-3px)"
+              color: "var(--nav-icon-hover)"
             },
             "&[data-active='true']": {
               background: "var(--surface-hover)",
-              color: "var(--nav-icon-hover)",
-              transform: "translateX(-2px)"
+              color: "var(--nav-icon-hover)"
             },
             "&[data-active='true']::before": {
               opacity: 1,
@@ -575,6 +573,14 @@ export default defineConfig({
             "& svg": {
               width: "17px",
               height: "17px"
+            },
+            "&[data-refresh-button='true']": {
+              fontSize: "12px",
+              fontWeight: "800",
+              "& svg": {
+                width: "15px",
+                height: "15px"
+              }
             },
             transition:
               "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick), opacity var(--motion-quick), transform var(--motion-smooth), box-shadow var(--motion-smooth)",
