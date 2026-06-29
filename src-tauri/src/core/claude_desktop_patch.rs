@@ -359,6 +359,7 @@ fn retry_localization_after_background_debugger_request() -> Result<usize, Strin
     retry_inject_localization()
 }
 
+#[cfg(target_os = "windows")]
 fn run_background_localization_retry_loop_for_terminal() -> Result<usize, String> {
     let mut last_error = "Claude Desktop localization did not start.".to_string();
     for attempt in 1..=CLAUDE_ZH_BACKGROUND_DEBUGGER_RETRY_LIMIT {

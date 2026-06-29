@@ -7,6 +7,60 @@ fn npm_tool_plan_is_whitelisted() {
     let plan = build_plan(&definition, None);
     assert_eq!(plan.manager, "npm");
     assert!(plan.command.contains("@anthropic-ai/claude-code"));
+    assert!(plan.command.contains("npm install -g"));
+}
+
+#[test]
+fn npm_global_commands_keep_global_flag() {
+    let action = InstallAction::NpmGlobal("@anthropic-ai/claude-code");
+
+    let install = command_preview(&action);
+    let update = update_command_preview(&action);
+    let uninstall = uninstall_command_preview_for_tool("claude", &action);
+
+    assert!(install.contains("npm install -g @anthropic-ai/claude-code"));
+    assert!(update.contains("npm install -g @anthropic-ai/claude-code@latest"));
+    assert!(uninstall.contains("npm uninstall -g @anthropic-ai/claude-code"));
+}
+
+#[test]
+fn npm_global_actions_repair_node_and_npm_path_first() {
+    let repairs =
+        path_repair_tool_ids_for_action(&InstallAction::NpmGlobal("@anthropic-ai/claude-code"));
+
+    assert_eq!(repairs, vec!["node", "npm"]);
+}
+
+#[test]
+fn path_repair_stage_result_is_prerequisite_stage() {
+    let repair = RepairToolPathResult {
+        success: true,
+        tool_id: "npm".to_string(),
+        tool_name: "npm".to_string(),
+        added_path: Some("/Users/test/.npm-global/bin".to_string()),
+        message: "Added /Users/test/.npm-global/bin to the user PATH.".to_string(),
+        current_status: None,
+        notes: vec!["Refreshed current process PATH.".to_string()],
+    };
+
+    let stage = path_repair_stage_result(
+        "npm",
+        "npm",
+        "Repair PATH for npm".to_string(),
+        &repair,
+        path_repair_stdout(&repair),
+        String::new(),
+    );
+
+    assert!(stage.success);
+    assert_eq!(stage.stage, "prerequisite");
+    assert_eq!(stage.exit_code, Some(0));
+    assert!(stage
+        .stdout_tail
+        .contains("Added /Users/test/.npm-global/bin"));
+    assert!(stage
+        .stdout_tail
+        .contains("Refreshed current process PATH."));
 }
 
 #[test]

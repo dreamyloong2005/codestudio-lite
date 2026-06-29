@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod env_health;
 pub mod gateway;
 pub mod gateway_request_log;
+pub mod npm_global;
 pub mod platform;
 pub mod privacy_filter;
 pub mod process_control;

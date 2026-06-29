@@ -2,6 +2,7 @@ use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path};
 use crate::core::codex_client;
 use crate::core::env_health;
+use crate::core::npm_global;
 use crate::core::platform::{hidden_command_with_args, package, resolve_command};
 use crate::core::process_control;
 use crate::core::profile;
@@ -1433,9 +1434,9 @@ fn winget_package_for_tool(tool_id: &str) -> Option<&'static str> {
 
 fn update_command_for_tool(tool_id: &str) -> Option<String> {
     match tool_id {
-        "codex" => Some("npm install -g @openai/codex@latest".to_string()),
+        "codex" => Some(npm_global_update_command("@openai/codex")),
         "codex-vscode" => Some("code --install-extension openai.chatgpt --force".to_string()),
-        "claude" => Some("npm install -g @anthropic-ai/claude-code@latest".to_string()),
+        "claude" => Some(npm_global_update_command("@anthropic-ai/claude-code")),
         "claude-desktop" if cfg!(target_os = "macos") => {
             Some(
                 "Download and install the latest Claude Desktop official DMG from downloads.claude.ai"
@@ -1446,12 +1447,12 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
         "claude-vscode" => {
             Some("code --install-extension anthropic.claude-code --force".to_string())
         }
-        "gemini" => Some("npm install -g @google/gemini-cli@latest".to_string()),
+        "gemini" => Some(npm_global_update_command("@google/gemini-cli")),
         "gemini-code-assist" => {
             Some("code --install-extension Google.geminicodeassist --force".to_string())
         }
-        "opencode" => Some("npm install -g opencode-ai@latest".to_string()),
-        "openclaw" => Some("npm install -g openclaw@latest".to_string()),
+        "opencode" => Some(npm_global_update_command("opencode-ai")),
+        "openclaw" => Some(npm_global_update_command("openclaw")),
         "hermes" if cfg!(target_os = "macos") => Some(
             "bash -lc 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash'"
                 .to_string(),
@@ -1483,7 +1484,7 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
             "winget upgrade --id Git.Git --exact --accept-source-agreements --accept-package-agreements --disable-interactivity"
                 .to_string(),
         ),
-        "pnpm" => Some("npm install -g pnpm@latest".to_string()),
+        "pnpm" => Some(npm_global_update_command("pnpm")),
         "bun" if cfg!(target_os = "macos") => {
             Some("bash -lc 'curl -fsSL https://bun.sh/install | bash'".to_string())
         }
@@ -1498,15 +1499,30 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
     }
 }
 
+fn npm_global_update_command(package: &str) -> String {
+    let command = format!("npm install -g {package}@latest");
+    if !cfg!(target_os = "macos") {
+        return command;
+    }
+    let prefix = match resolve_command("npm") {
+        Some(npm) => npm_global::user_prefix_override_for(&npm),
+        None => npm_global::user_prefix(),
+    };
+    let Some(prefix) = prefix else {
+        return command;
+    };
+    format!("{} {command}", npm_global::shell_prefix_assignment(&prefix))
+}
+
 fn read_npm_global_outdated() -> HashMap<String, NpmOutdatedPackage> {
     let Some(npm) = resolve_command("npm") else {
         return HashMap::new();
     };
-    let Some(output) = run_command_with_timeout(
-        &npm,
-        &["outdated", "-g", "--json", "--depth=0"],
-        UPDATE_CHECK_TIMEOUT,
-    ) else {
+    let mut command = hidden_command_with_args(&npm, &["outdated", "-g", "--json", "--depth=0"]);
+    if npm_global::configure_command_for_global_packages(&mut command, &npm).is_err() {
+        return HashMap::new();
+    }
+    let Some(output) = run_command_with_timeout(command, UPDATE_CHECK_TIMEOUT) else {
         return HashMap::new();
     };
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1603,7 +1619,8 @@ fn npm_global_package_roots() -> Vec<PathBuf> {
 }
 
 fn npm_global_root_from_command(npm: &str) -> Option<PathBuf> {
-    let output = run_command_with_timeout(npm, &["root", "-g"], Duration::from_millis(1200))?;
+    let command = hidden_command_with_args(npm, &["root", "-g"]);
+    let output = run_command_with_timeout(command, Duration::from_millis(1200))?;
     if !output.status.success() {
         return None;
     }
@@ -1619,11 +1636,11 @@ fn read_winget_outdated() -> HashMap<String, String> {
     let Some(winget) = resolve_command("winget") else {
         return HashMap::new();
     };
-    let Some(output) = run_command_with_timeout(
+    let output_command = hidden_command_with_args(
         &winget,
         &["upgrade", "--source", "winget", "--disable-interactivity"],
-        UPDATE_CHECK_TIMEOUT,
-    ) else {
+    );
+    let Some(output) = run_command_with_timeout(output_command, UPDATE_CHECK_TIMEOUT) else {
         return HashMap::new();
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1649,11 +1666,9 @@ fn read_winget_outdated() -> HashMap<String, String> {
 }
 
 fn run_command_with_timeout(
-    command: &str,
-    args: &[&str],
+    mut command_builder: std::process::Command,
     timeout: Duration,
 ) -> Option<std::process::Output> {
-    let mut command_builder = hidden_command_with_args(command, args);
     let mut child = command_builder.spawn().ok()?;
     let started_at = Instant::now();
 

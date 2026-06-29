@@ -89,6 +89,9 @@ pub fn run() {
             commands::usage_query::test_usage_script,
         ])
         .setup(|app| {
+            // GUI launches on macOS do not source shell profiles, so restore
+            // PATH entries that CodeStudio Lite repaired in earlier sessions.
+            let _ = crate::core::env_health::restore_persisted_path_repairs();
             // Register the system tray icon + menu so closing the main window
             // hides it to the tray instead of quitting the app. The tray's
             // "Quit" entry performs the real shutdown (including the gateway).

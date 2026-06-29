@@ -2,14 +2,16 @@ use crate::core::activity_log;
 use crate::core::app_paths::display_path;
 use crate::core::detector;
 use crate::core::platform::{
-    hidden_command_with_args, repair_candidate_for_command, resolve_command_on_path, run_powershell,
+    hidden_command, hidden_command_with_args, repair_candidate_for_command,
+    resolve_command_on_path, run_powershell,
 };
+use crate::core::storage;
 use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
     ClearEnvironmentVariablesRequest, ClearEnvironmentVariablesResult, EnvironmentVariableConflict,
     PathRepairHint, RepairToolPathRequest, RepairToolPathResult, Severity,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -24,6 +26,13 @@ const CLAUDE_ENV_VARS: &[&str] = &[
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
 ];
+const PATH_REPAIR_DIRS_STATE_KEY: &str = "env_health.path_repair_dirs";
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedPathRepairDirsState {
+    directories: Vec<String>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +54,50 @@ pub fn path_repair_hint(definition: &ToolDefinition) -> Option<PathRepairHint> {
             definition.command
         ),
     })
+}
+
+pub fn repair_tool_path_for_install(tool_id: &str) -> Result<Option<RepairToolPathResult>, String> {
+    let definition = tool_definition(tool_id)
+        .ok_or_else(|| format!("Tool '{tool_id}' is not allowed for PATH repair."))?;
+    if resolve_command_on_path(definition.command).is_some() {
+        return Ok(None);
+    }
+    if repair_candidate_for_command(definition.command).is_none() {
+        return Ok(None);
+    }
+    repair_tool_path(RepairToolPathRequest {
+        tool_id: definition.id.to_string(),
+        confirm: true,
+    })
+    .map(Some)
+}
+
+pub fn restore_persisted_path_repairs() -> Result<usize, String> {
+    let directories = load_persisted_path_repair_dirs()?;
+    let mut restored = 0;
+    let mut notes = Vec::new();
+    for directory in directories {
+        if !directory.is_dir() {
+            continue;
+        }
+        if refresh_process_path(&directory, &mut notes) {
+            restored += 1;
+        }
+        if cfg!(target_os = "macos") {
+            refresh_launchctl_path_macos(&directory, &mut notes);
+        }
+    }
+
+    if restored > 0 {
+        let _ = activity_log::append(
+            Severity::Info,
+            format!("Restored {restored} PATH repair directories for this app session."),
+        );
+    }
+    for note in notes {
+        let _ = activity_log::append(Severity::Warning, note);
+    }
+    Ok(restored)
 }
 
 pub fn repair_tool_path(request: RepairToolPathRequest) -> Result<RepairToolPathResult, String> {
@@ -509,7 +562,8 @@ fn repair_user_path_windows(directory: &Path, notes: &mut Vec<String>) -> Result
         append_user_path_windows(&directory_text)?;
         true
     };
-    refresh_process_path(directory, notes);
+    remember_path_repair_dir(directory, notes);
+    let _ = refresh_process_path(directory, notes);
     Ok(added)
 }
 
@@ -525,7 +579,9 @@ fn repair_user_path_macos(directory: &Path, notes: &mut Vec<String>) -> Result<b
         append_user_path_macos(&directory_text)?;
         true
     };
-    refresh_process_path(directory, notes);
+    remember_path_repair_dir(directory, notes);
+    let _ = refresh_process_path(directory, notes);
+    refresh_launchctl_path_macos(directory, notes);
     Ok(added)
 }
 
@@ -638,20 +694,132 @@ fn macos_shell_profile_path() -> Result<PathBuf, String> {
     Ok(home.join(".zprofile"))
 }
 
-fn refresh_process_path(directory: &Path, notes: &mut Vec<String>) {
+fn remember_path_repair_dir(directory: &Path, notes: &mut Vec<String>) {
+    if let Err(err) = save_persisted_path_repair_dir(directory) {
+        notes.push(format!(
+            "Failed to remember PATH repair for app restart: {err}"
+        ));
+    }
+}
+
+fn load_persisted_path_repair_dirs() -> Result<Vec<PathBuf>, String> {
+    let Some(json) = storage::load_state_json(PATH_REPAIR_DIRS_STATE_KEY)? else {
+        return Ok(Vec::new());
+    };
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let state = serde_json::from_str::<PersistedPathRepairDirsState>(&json)
+        .map_err(|err| format!("Failed to parse persisted PATH repairs: {err}"))?;
+    Ok(dedupe_path_dirs(
+        state.directories.into_iter().map(PathBuf::from),
+    ))
+}
+
+fn save_persisted_path_repair_dir(directory: &Path) -> Result<(), String> {
+    let mut directories = load_persisted_path_repair_dirs()?;
+    directories.push(directory.to_path_buf());
+    let state = PersistedPathRepairDirsState {
+        directories: dedupe_path_dirs(directories)
+            .into_iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+    };
+    let json = serde_json::to_string(&state).map_err(|err| err.to_string())?;
+    storage::save_state_json(PATH_REPAIR_DIRS_STATE_KEY, &json)
+}
+
+fn dedupe_path_dirs(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for path in paths {
+        let key = path_key(&path);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        deduped.push(path);
+    }
+    deduped
+}
+
+fn refresh_process_path(directory: &Path, notes: &mut Vec<String>) -> bool {
     let current = env::var_os("PATH").unwrap_or_default();
     let mut dirs = env::split_paths(&current).collect::<Vec<_>>();
     if dirs
         .iter()
         .any(|existing| path_key(existing) == path_key(directory))
     {
-        return;
+        return false;
     }
     dirs.push(directory.to_path_buf());
     match env::join_paths(dirs) {
-        Ok(joined) => env::set_var("PATH", joined),
-        Err(err) => notes.push(format!("Failed to refresh the current process PATH: {err}")),
+        Ok(joined) => {
+            env::set_var("PATH", joined);
+            true
+        }
+        Err(err) => {
+            notes.push(format!("Failed to refresh the current process PATH: {err}"));
+            false
+        }
     }
+}
+
+fn refresh_launchctl_path_macos(directory: &Path, notes: &mut Vec<String>) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let mut launchctl_dirs = launchctl_path_dirs_macos(notes);
+    if !launchctl_dirs
+        .iter()
+        .any(|existing| path_key(existing) == path_key(directory))
+    {
+        launchctl_dirs.push(directory.to_path_buf());
+    }
+    let path_value = match env::join_paths(launchctl_dirs) {
+        Ok(value) => value.to_string_lossy().to_string(),
+        Err(err) => {
+            notes.push(format!("Failed to build launchctl PATH: {err}"));
+            return;
+        }
+    };
+    let output = hidden_command("launchctl")
+        .args(["setenv", "PATH", path_value.as_str()])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => notes.push(format!(
+            "Failed to refresh the macOS GUI session PATH: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(err) => notes.push(format!("Failed to start launchctl: {err}")),
+    }
+}
+
+fn launchctl_path_dirs_macos(notes: &mut Vec<String>) -> Vec<PathBuf> {
+    let output = hidden_command("launchctl")
+        .args(["getenv", "PATH"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !value.is_empty() {
+                return env::split_paths(&value).collect();
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                notes.push(format!(
+                    "Failed to read the macOS GUI session PATH: {stderr}"
+                ));
+            }
+        }
+        Err(err) => notes.push(format!("Failed to read launchctl PATH: {err}")),
+    }
+
+    env::var_os("PATH")
+        .map(|path| env::split_paths(&path).collect())
+        .unwrap_or_default()
 }
 
 fn find_current_tool_status(tool_id: &str) -> Option<crate::core::types::ToolStatus> {
@@ -737,10 +905,30 @@ fn sh_single_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
     #[test]
     fn claude_env_health_does_not_read_keychain_secrets() {
         let source = include_str!("env_health.rs");
 
         assert!(!source.contains(&format!("{}{}", "load_keychain", "_secret")));
+    }
+
+    #[test]
+    fn persisted_path_repair_dirs_are_deduped_by_path_key() {
+        let dirs = dedupe_path_dirs([
+            PathBuf::from("/Users/test/.npm-global/bin"),
+            PathBuf::from("/Users/test/.npm-global/bin/"),
+            PathBuf::from("/opt/homebrew/bin"),
+        ]);
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/Users/test/.npm-global/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+            ]
+        );
     }
 }

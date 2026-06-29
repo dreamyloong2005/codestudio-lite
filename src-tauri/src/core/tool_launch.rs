@@ -338,30 +338,28 @@ pub fn spawn_external_terminal(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = shell_id;
-        let mut script = String::new();
+        let mut script = String::from("#!/bin/sh\n\n");
         if let Some(directory) = working_directory {
-            script.push_str(&format!(
-                "cd '{}'
-",
-                directory.display()
-            ));
+            script.push_str("cd ");
+            script.push_str(&sh_single_quote(&directory.to_string_lossy()));
+            script.push('\n');
         }
         for (key, value) in env {
-            let escaped = value.replace("'", "'\\''");
-            script.push_str(&format!(
-                "export {key}='{escaped}'
-"
-            ));
+            script.push_str("export ");
+            script.push_str(key);
+            script.push('=');
+            script.push_str(&sh_single_quote(value));
+            script.push('\n');
         }
         script.push_str(command);
         script.push_str(
             "
-exec $SHELL
+exec \"${SHELL:-/bin/sh}\"
 ",
         );
         let dir = std::env::temp_dir();
         let script_path = dir.join(format!("csl-external-{}.sh", std::process::id()));
-        std::fs::write(&script_path, &script)?;
+        write_external_launcher_script(&script_path, &script)?;
         #[cfg(target_os = "macos")]
         {
             std::process::Command::new("open")
@@ -384,6 +382,32 @@ exec $SHELL
         }
         Ok(())
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn write_external_launcher_script(
+    script_path: &std::path::Path,
+    script: &str,
+) -> std::io::Result<()> {
+    std::fs::write(script_path, script)?;
+    set_external_launcher_permissions(script_path)
+}
+
+#[cfg(unix)]
+fn set_external_launcher_permissions(script_path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(script_path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(all(not(unix), not(target_os = "windows")))]
+fn set_external_launcher_permissions(_script_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sh_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -495,5 +519,33 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes() {
+        assert_eq!(sh_single_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_launcher_script_is_owner_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "csl-external-permission-test-{}.sh",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        write_external_launcher_script(&path, "#!/bin/sh\nexit 0\n").expect("write launcher");
+        let mode = std::fs::metadata(&path)
+            .expect("launcher metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(mode, 0o700);
     }
 }

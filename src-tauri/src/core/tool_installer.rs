@@ -2,6 +2,7 @@ use crate::core::activity_log;
 use crate::core::app_paths::app_paths;
 use crate::core::detector;
 use crate::core::env_health;
+use crate::core::npm_global;
 use crate::core::platform::{
     hidden_command, hidden_command_with_args, package, resolve_command, run_powershell,
 };
@@ -200,6 +201,40 @@ pub fn install_tool_with_progress(
                     prerequisite.tool_id
                 )
             })?;
+        if !run_path_repairs_before_action(
+            &tool_id,
+            request.install_kind.as_deref(),
+            &prerequisite_definition,
+            progress,
+            &mut stage_results,
+            &mut notes,
+        )? {
+            let message = stage_results
+                .last()
+                .map(|stage| stage.message.clone())
+                .unwrap_or_else(|| "Prerequisite PATH repair failed.".to_string());
+            let _ = activity_log::append(Severity::Warning, message.clone());
+            return Ok(ToolInstallResult {
+                success: false,
+                tool_id,
+                tool_name: definition.tool.name.to_string(),
+                action: "prerequisite-failed".to_string(),
+                message,
+                command: plan.command,
+                exit_code: stage_results.last().and_then(|stage| stage.exit_code),
+                stdout_tail: stage_results
+                    .last()
+                    .map(|stage| stage.stdout_tail.clone())
+                    .unwrap_or_default(),
+                stderr_tail: stage_results
+                    .last()
+                    .map(|stage| stage.stderr_tail.clone())
+                    .unwrap_or_default(),
+                current_status: current_status(&definition.tool.id).ok(),
+                stage_results,
+                notes,
+            });
+        }
         let command = command_preview(&prerequisite_definition.action);
         let context = InstallProgressContext {
             root_tool_id: &tool_id,
@@ -272,6 +307,69 @@ pub fn install_tool_with_progress(
                 notes,
             });
         }
+    }
+
+    if !run_path_repairs_before_action(
+        &tool_id,
+        request.install_kind.as_deref(),
+        &definition,
+        progress,
+        &mut stage_results,
+        &mut notes,
+    )? {
+        let message = stage_results
+            .last()
+            .map(|stage| stage.message.clone())
+            .unwrap_or_else(|| "PATH repair failed before installation.".to_string());
+        let _ = activity_log::append(Severity::Warning, message.clone());
+        return Ok(ToolInstallResult {
+            success: false,
+            tool_id,
+            tool_name: definition.tool.name.to_string(),
+            action: "path-repair-failed".to_string(),
+            message,
+            command: plan.command,
+            exit_code: stage_results.last().and_then(|stage| stage.exit_code),
+            stdout_tail: stage_results
+                .last()
+                .map(|stage| stage.stdout_tail.clone())
+                .unwrap_or_default(),
+            stderr_tail: stage_results
+                .last()
+                .map(|stage| stage.stderr_tail.clone())
+                .unwrap_or_default(),
+            current_status: current_status(&definition.tool.id).ok(),
+            stage_results,
+            notes,
+        });
+    }
+
+    if let Some(repaired_status) = current_status(&tool_id)
+        .ok()
+        .filter(|status| status.install_state == InstallState::Installed)
+    {
+        let message = format!(
+            "{} was already installed; PATH was repaired and verified.",
+            definition.tool.name
+        );
+        let _ = activity_log::append(Severity::Ok, message.clone());
+        return Ok(ToolInstallResult {
+            success: true,
+            tool_id,
+            tool_name: definition.tool.name.to_string(),
+            action: "path-repaired".to_string(),
+            message,
+            command: plan.command,
+            exit_code: Some(0),
+            stdout_tail: stage_results
+                .last()
+                .map(|stage| stage.stdout_tail.clone())
+                .unwrap_or_default(),
+            stderr_tail: String::new(),
+            current_status: Some(repaired_status),
+            stage_results,
+            notes,
+        });
     }
 
     let command = command_preview(&definition.action);
@@ -425,6 +523,45 @@ pub fn update_tool_with_progress(
         notes.push(note);
     }
 
+    let mut stage_results = Vec::new();
+    if !run_path_repairs_before_action(
+        &tool_id,
+        request
+            .install_kind
+            .as_deref()
+            .or_else(|| before.as_ref().and_then(|s| s.install_kind.as_deref())),
+        &definition,
+        progress,
+        &mut stage_results,
+        &mut notes,
+    )? {
+        let message = stage_results
+            .last()
+            .map(|stage| stage.message.clone())
+            .unwrap_or_else(|| "PATH repair failed before update.".to_string());
+        let _ = activity_log::append(Severity::Warning, message.clone());
+        return Ok(ToolInstallResult {
+            success: false,
+            tool_id,
+            tool_name: definition.tool.name.to_string(),
+            action: "path-repair-failed".to_string(),
+            message,
+            command,
+            exit_code: stage_results.last().and_then(|stage| stage.exit_code),
+            stdout_tail: stage_results
+                .last()
+                .map(|stage| stage.stdout_tail.clone())
+                .unwrap_or_default(),
+            stderr_tail: stage_results
+                .last()
+                .map(|stage| stage.stderr_tail.clone())
+                .unwrap_or_default(),
+            current_status: current_status(&definition.tool.id).ok(),
+            stage_results,
+            notes,
+        });
+    }
+
     let context = InstallProgressContext {
         root_tool_id: &tool_id,
         tool_id: &tool_id,
@@ -473,7 +610,7 @@ pub fn update_tool_with_progress(
     };
     let _ = activity_log::append(level, message.clone());
 
-    let stage_results = vec![ToolInstallStageResult {
+    stage_results.push(ToolInstallStageResult {
         tool_id: tool_id.clone(),
         tool_name: definition.tool.name.to_string(),
         stage: "update".to_string(),
@@ -483,7 +620,7 @@ pub fn update_tool_with_progress(
         stdout_tail: output.stdout_tail.clone(),
         stderr_tail: output.stderr_tail.clone(),
         message: message.clone(),
-    }];
+    });
 
     Ok(ToolInstallResult {
         success,
@@ -809,7 +946,7 @@ fn build_plan(
     }
 
     match &definition.action {
-        InstallAction::NpmGlobal(package) => {
+        InstallAction::NpmGlobal(_) => {
             steps.push(ToolInstallStep {
                 label: "Check npm".to_string(),
                 detail: "Local npm must be available; npm usually ships with Node.js LTS."
@@ -817,7 +954,7 @@ fn build_plan(
             });
             steps.push(ToolInstallStep {
                 label: "Install global package".to_string(),
-                detail: format!("Run npm install -g {package}."),
+                detail: format!("Run {}.", command_preview(&definition.action)),
             });
             steps.push(ToolInstallStep {
                 label: "Verify command".to_string(),
@@ -826,6 +963,7 @@ fn build_plan(
                     definition.tool.command
                 ),
             });
+            append_path_repair_steps(&mut steps, &definition.action);
             if !command_available("npm") {
                 let node_definition = install_definition("node");
                 let node_installed = current_status("node")
@@ -899,6 +1037,7 @@ fn build_plan(
                 );
                 can_install = false;
             }
+            append_path_repair_steps(&mut steps, &definition.action);
         }
         InstallAction::MacosDmgApp {
             label,
@@ -962,6 +1101,7 @@ fn build_plan(
                 );
                 can_install = false;
             }
+            append_path_repair_steps(&mut steps, &definition.action);
         }
         InstallAction::PowerShellScript(label, script) => {
             steps.push(ToolInstallStep {
@@ -992,6 +1132,7 @@ fn build_plan(
                 );
                 can_install = false;
             }
+            append_path_repair_steps(&mut steps, &definition.action);
         }
         InstallAction::ShellScript(label, script) => {
             steps.push(ToolInstallStep {
@@ -1020,6 +1161,7 @@ fn build_plan(
                 );
                 can_install = false;
             }
+            append_path_repair_steps(&mut steps, &definition.action);
         }
         InstallAction::InteractiveShellScript(label, script) => {
             steps.push(ToolInstallStep {
@@ -1051,6 +1193,7 @@ fn build_plan(
                 );
                 can_install = false;
             }
+            append_path_repair_steps(&mut steps, &definition.action);
         }
         InstallAction::VsCodeExtension(extension_id) => {
             steps.push(ToolInstallStep {
@@ -1073,6 +1216,7 @@ fn build_plan(
                 );
                 can_install = false;
             }
+            append_path_repair_steps(&mut steps, &definition.action);
         }
         InstallAction::ProvidedByTool(provider_tool_id) => {
             let provider_definition = install_definition(provider_tool_id);
@@ -1122,6 +1266,7 @@ fn build_plan(
                     ));
                     can_install = false;
                 }
+                append_path_repair_steps(&mut steps, &provider_definition.action);
             } else {
                 blocker = Some(format!(
                     "{} is provided by {provider_tool_id}, but that installer is unavailable.",
@@ -1238,6 +1383,25 @@ fn build_update_plan(
         interactive: false,
     };
 
+    let mut steps = vec![
+        ToolInstallStep {
+            label: "Check installed app".to_string(),
+            detail: format!(
+                "Confirm {} is installed before updating.",
+                definition.tool.name
+            ),
+        },
+        ToolInstallStep {
+            label: "Run update command".to_string(),
+            detail: "Close the target app if needed, then run the update command.".to_string(),
+        },
+        ToolInstallStep {
+            label: "Verify version".to_string(),
+            detail: "Refresh detection after the update command finishes.".to_string(),
+        },
+    ];
+    append_path_repair_steps(&mut steps, &definition.action);
+
     ToolInstallPlan {
         tool_id: definition.tool.id.to_string(),
         tool_name: definition.tool.name.to_string(),
@@ -1250,23 +1414,7 @@ fn build_update_plan(
         can_install,
         already_installed: installed,
         requires_admin: action_requires_admin(&definition.action),
-        steps: vec![
-            ToolInstallStep {
-                label: "Check installed app".to_string(),
-                detail: format!(
-                    "Confirm {} is installed before updating.",
-                    definition.tool.name
-                ),
-            },
-            ToolInstallStep {
-                label: "Run update command".to_string(),
-                detail: "Close the target app if needed, then run the update command.".to_string(),
-            },
-            ToolInstallStep {
-                label: "Verify version".to_string(),
-                detail: "Refresh detection after the update command finishes.".to_string(),
-            },
-        ],
+        steps,
         warnings: Vec::new(),
         blocker,
     }
@@ -1358,6 +1506,192 @@ fn provider_definition_for_action(action: &InstallAction) -> Option<InstallDefin
     }
 }
 
+fn append_path_repair_steps(steps: &mut Vec<ToolInstallStep>, action: &InstallAction) {
+    for tool_id in path_repair_tool_ids_for_action(action) {
+        let Some(definition) = tool_definition(tool_id) else {
+            continue;
+        };
+        let Some(hint) = env_health::path_repair_hint(&definition) else {
+            continue;
+        };
+        steps.push(ToolInstallStep {
+            label: "Repair PATH".to_string(),
+            detail: format!(
+                "Before installation, add {} to PATH so {} can run.",
+                hint.directory, definition.command
+            ),
+        });
+    }
+}
+
+fn run_path_repairs_before_action(
+    root_tool_id: &str,
+    install_kind: Option<&str>,
+    definition: &InstallDefinition,
+    progress: Option<&ToolInstallProgressEmitter>,
+    stage_results: &mut Vec<ToolInstallStageResult>,
+    notes: &mut Vec<String>,
+) -> Result<bool, String> {
+    for repair_tool_id in path_repair_tool_ids_for_action(&definition.action) {
+        let Some(repair_definition) = tool_definition(repair_tool_id) else {
+            continue;
+        };
+        let Some(hint) = env_health::path_repair_hint(&repair_definition) else {
+            continue;
+        };
+        let command = format!("Repair PATH for {}", repair_definition.command);
+        let context = InstallProgressContext {
+            root_tool_id,
+            tool_id: repair_definition.id,
+            tool_name: repair_definition.name,
+            stage: "prerequisite",
+            command: &command,
+            install_kind,
+            progress_phase: Some("path-repair"),
+            progress_message: None,
+            progress_step: None,
+            progress_step_total: None,
+            progress,
+        };
+        emit_install_progress(
+            Some(&context),
+            "stdout",
+            format!(
+                "Repairing PATH for {} by adding {}...\n",
+                repair_definition.name, hint.directory
+            ),
+            None,
+            false,
+        );
+        let repair = env_health::repair_tool_path_for_install(repair_definition.id)?;
+        let Some(repair) = repair else {
+            emit_install_progress(
+                Some(&context),
+                "stdout",
+                format!("{} is already available on PATH.\n", repair_definition.name),
+                None,
+                false,
+            );
+            emit_install_progress(Some(&context), "status", String::new(), Some(0), true);
+            continue;
+        };
+        for note in &repair.notes {
+            push_note_once(notes, note);
+        }
+        let stdout_tail = path_repair_stdout(&repair);
+        let stderr_tail = if repair.success {
+            String::new()
+        } else {
+            repair.message.clone()
+        };
+        emit_install_progress(
+            Some(&context),
+            if repair.success { "stdout" } else { "stderr" },
+            format!("{}\n", repair.message),
+            None,
+            false,
+        );
+        emit_install_progress(
+            Some(&context),
+            "status",
+            String::new(),
+            Some(if repair.success { 0 } else { 1 }),
+            true,
+        );
+        stage_results.push(path_repair_stage_result(
+            repair_definition.id,
+            repair_definition.name,
+            command,
+            &repair,
+            stdout_tail,
+            stderr_tail,
+        ));
+        if !repair.success {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn path_repair_tool_ids_for_action(action: &InstallAction) -> Vec<&'static str> {
+    let mut ids = Vec::new();
+    match action {
+        InstallAction::NpmGlobal(_) => {
+            ids.push("node");
+            ids.push("npm");
+        }
+        InstallAction::Winget(_) => ids.push("winget"),
+        InstallAction::ClaudeDesktopWindowsMsix | InstallAction::PowerShellScript(_, _) => {
+            ids.push("powershell")
+        }
+        InstallAction::ShellScript(_, _) => ids.push("bash"),
+        InstallAction::InteractiveShellScript(_, _) => {
+            if cfg!(target_os = "windows") {
+                ids.push("powershell");
+            } else {
+                ids.push("bash");
+            }
+        }
+        InstallAction::VsCodeExtension(_) => ids.push("code"),
+        InstallAction::ProvidedByTool(provider_tool_id) => {
+            if let Some(provider) = install_definition(provider_tool_id) {
+                ids.extend(path_repair_tool_ids_for_action(&provider.action));
+            }
+        }
+        InstallAction::MacosDmgApp { .. } | InstallAction::CustomUnsupported(_) => {}
+    }
+    dedupe_tool_ids(ids)
+}
+
+fn dedupe_tool_ids(ids: Vec<&'static str>) -> Vec<&'static str> {
+    let mut deduped = Vec::new();
+    for id in ids {
+        if !deduped.contains(&id) {
+            deduped.push(id);
+        }
+    }
+    deduped
+}
+
+fn tool_definition(tool_id: &str) -> Option<ToolDefinition> {
+    ai_tools()
+        .into_iter()
+        .chain(system_tools())
+        .find(|tool| tool.id == tool_id)
+}
+
+fn path_repair_stdout(repair: &RepairToolPathResult) -> String {
+    let mut lines = vec![repair.message.clone()];
+    lines.extend(repair.notes.clone());
+    lines
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn path_repair_stage_result(
+    tool_id: &str,
+    tool_name: &str,
+    command: String,
+    repair: &RepairToolPathResult,
+    stdout_tail: String,
+    stderr_tail: String,
+) -> ToolInstallStageResult {
+    ToolInstallStageResult {
+        tool_id: tool_id.to_string(),
+        tool_name: tool_name.to_string(),
+        stage: "prerequisite".to_string(),
+        command,
+        success: repair.success,
+        exit_code: Some(if repair.success { 0 } else { 1 }),
+        stdout_tail,
+        stderr_tail,
+        message: repair.message.clone(),
+    }
+}
+
 fn action_requires_admin_for_tool(definition: &InstallDefinition) -> bool {
     provider_definition_for_action(&definition.action)
         .as_ref()
@@ -1396,7 +1730,7 @@ fn run_install_action(
 ) -> Result<InstallCommandOutput, String> {
     match action {
         InstallAction::NpmGlobal(package) => {
-            run_action_command("npm", &["install", "-g", package], progress)
+            run_npm_global_command(&["install", "-g", package], progress)
         }
         InstallAction::Winget(package_id) => run_action_command_elevated_on_windows(
             "winget",
@@ -1466,8 +1800,7 @@ fn run_update_action(
     match action {
         InstallAction::NpmGlobal(package) => {
             let package = format!("{package}@latest");
-            run_action_command_owned(
-                "npm",
+            run_npm_global_command_owned(
                 vec!["install".to_string(), "-g".to_string(), package],
                 progress,
             )
@@ -1575,7 +1908,7 @@ fn run_uninstall_action_for_tool(
             run_action_command("code", &["--uninstall-extension", extension_id], progress)
         }
         InstallAction::NpmGlobal(package) => {
-            run_action_command("npm", &["uninstall", "-g", package], progress)
+            run_npm_global_command(&["uninstall", "-g", package], progress)
         }
         InstallAction::PowerShellScript(_, _)
         | InstallAction::ClaudeDesktopWindowsMsix
@@ -2972,6 +3305,27 @@ fn run_action_command(
     run_streaming_command(command, program, progress)
 }
 
+fn run_npm_global_command(
+    args: &[&str],
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    let Some(resolved) = resolve_command("npm") else {
+        return Ok(missing_command_output("npm"));
+    };
+    let mut command = hidden_command_with_args(&resolved, args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    npm_global::configure_command_for_global_packages(&mut command, &resolved)?;
+    run_streaming_command(command, "npm", progress)
+}
+
+fn run_npm_global_command_owned(
+    args: Vec<String>,
+    progress: Option<&InstallProgressContext>,
+) -> Result<InstallCommandOutput, String> {
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_npm_global_command(&args, progress)
+}
+
 fn run_action_command_elevated_on_windows(
     program: &str,
     args: &[&str],
@@ -3022,15 +3376,6 @@ fn windows_elevated_powershell_args(program: &str, args: &[&str]) -> Vec<String>
 
 fn ps_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-fn run_action_command_owned(
-    program: &str,
-    args: Vec<String>,
-    progress: Option<&InstallProgressContext>,
-) -> Result<InstallCommandOutput, String> {
-    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_action_command(program, &args, progress)
 }
 
 fn run_streaming_command(
@@ -3260,7 +3605,7 @@ fn manager_label(action: &InstallAction) -> &'static str {
 
 fn command_preview(action: &InstallAction) -> String {
     match action {
-        InstallAction::NpmGlobal(package) => format!("npm install -g {package}"),
+        InstallAction::NpmGlobal(package) => npm_global_command_preview("install", package),
         InstallAction::Winget(package_id) => {
             format!("winget install --id {package_id} --exact --accept-source-agreements --accept-package-agreements --disable-interactivity")
         }
@@ -3287,13 +3632,30 @@ fn command_preview(action: &InstallAction) -> String {
     }
 }
 
+fn npm_global_command_preview(action: &str, package: &str) -> String {
+    let command = format!("npm {action} -g {package}");
+    if !cfg!(target_os = "macos") {
+        return command;
+    }
+    let prefix = match resolve_command("npm") {
+        Some(npm) => npm_global::user_prefix_override_for(&npm),
+        None => npm_global::user_prefix(),
+    };
+    let Some(prefix) = prefix else {
+        return command;
+    };
+    format!("{} {command}", npm_global::shell_prefix_assignment(&prefix))
+}
+
 fn update_supported(action: &InstallAction) -> bool {
     !matches!(action, InstallAction::CustomUnsupported(_))
 }
 
 fn update_command_preview(action: &InstallAction) -> String {
     match action {
-        InstallAction::NpmGlobal(package) => format!("npm install -g {package}@latest"),
+        InstallAction::NpmGlobal(package) => {
+            npm_global_command_preview("install", &format!("{package}@latest"))
+        }
         InstallAction::Winget(package_id) => {
             format!("winget upgrade --id {package_id} --exact --accept-source-agreements --accept-package-agreements --disable-interactivity")
         }
@@ -3340,7 +3702,7 @@ fn uninstall_supported_for_tool(tool_id: &str, action: &InstallAction) -> bool {
 
 fn update_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> String {
     if tool_id == "npm" {
-        return "npm install -g npm@latest".to_string();
+        return npm_global_command_preview("install", "npm@latest");
     }
     if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
         return CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND.to_string();
@@ -3353,7 +3715,7 @@ fn uninstall_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> 
         return CLAUDE_DESKTOP_WINDOWS_UNINSTALL_COMMAND.to_string();
     }
     match action {
-        InstallAction::NpmGlobal(package) => format!("npm uninstall -g {package}"),
+        InstallAction::NpmGlobal(package) => npm_global_command_preview("uninstall", package),
         InstallAction::Winget(package_id) => {
             format!("winget uninstall --id {package_id} --exact")
         }
