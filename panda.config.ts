@@ -121,10 +121,10 @@ export default defineConfig({
           description: "Application sidebar navigation list.",
           base: {
             display: "grid",
-            gap: "4px",
+            gap: "8px",
             minHeight: 0,
             overflow: "auto",
-            padding: "2px 0",
+            padding: "6px 0",
             "@media (max-width: 900px)": {
               gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
               overflow: "visible"
@@ -138,13 +138,13 @@ export default defineConfig({
             position: "relative",
             display: "flex",
             alignItems: "center",
-            gap: "8px",
+            gap: "12px",
             width: "100%",
-            minHeight: "34px",
+            minHeight: "42px",
             borderRadius: "7px",
-            padding: "0 8px",
+            padding: "0 12px",
             background: "transparent",
-            color: "var(--text-muted)",
+            color: "var(--nav-icon)",
             textAlign: "left",
             transition: "background var(--motion-quick), color var(--motion-quick), transform var(--motion-smooth)",
             "&::before": {
@@ -160,12 +160,12 @@ export default defineConfig({
             },
             _hover: {
               background: "var(--surface-soft)",
-              color: "var(--text)",
+              color: "var(--nav-icon-hover)",
               transform: "translateX(-3px)"
             },
             "&[data-active='true']": {
               background: "var(--surface-hover)",
-              color: "var(--text)",
+              color: "var(--nav-icon-hover)",
               transform: "translateX(-2px)"
             },
             "&[data-active='true']::before": {
@@ -173,11 +173,11 @@ export default defineConfig({
               transform: "scaleY(1)"
             },
             "&[data-active='true'] svg": {
-              color: "var(--accent)"
+              color: "var(--nav-icon-hover)"
             },
             "@media (max-width: 900px)": {
               justifyContent: "center",
-              minHeight: "34px",
+              minHeight: "42px",
               padding: "0 6px"
             },
             "@media (prefers-reduced-motion: reduce)": {
@@ -203,10 +203,18 @@ export default defineConfig({
             minWidth: 0,
             flex: 1,
             overflow: "hidden",
-            fontSize: "12px",
-            fontWeight: "650",
+            color: "var(--nav-text)",
+            fontSize: "14px",
+            fontWeight: "700",
+            lineHeight: "1.2",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            ".cs-app-nav-button:hover &": {
+              color: "var(--nav-text-hover)"
+            },
+            ".cs-app-nav-button[data-active='true'] &": {
+              color: "var(--nav-text-hover)"
+            },
             "@media (max-width: 900px)": {
               display: "none"
             }
@@ -555,14 +563,19 @@ export default defineConfig({
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
-            gap: "7px",
+            gap: "6px",
             minHeight: "32px",
             border: "1px solid transparent",
             borderRadius: "7px",
             padding: "0 10px",
             fontSize: "11px",
             fontWeight: "700",
+            lineHeight: "1.2",
             whiteSpace: "nowrap",
+            "& svg": {
+              width: "17px",
+              height: "17px"
+            },
             transition:
               "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick), opacity var(--motion-quick), transform var(--motion-smooth), box-shadow var(--motion-smooth)",
             _disabled: {
@@ -601,7 +614,7 @@ export default defineConfig({
                 height: "auto",
                 minHeight: "30px",
                 padding: "0 9px",
-                fontSize: "10px",
+                fontSize: "10.5px",
                 lineHeight: "1.25"
               }
             }
@@ -736,8 +749,8 @@ export default defineConfig({
                   height: "18px"
                 },
                 "&[data-tool-icon-tone='gemini'] img, &[data-tool-icon-tone='openclaw'] img": {
-                  width: "22px",
-                  height: "22px",
+                  width: "23px",
+                  height: "23px",
                   borderRadius: "5px"
                 },
                 "&[data-tool-icon-tone='vscode'] img": {
@@ -1046,9 +1059,14 @@ export default defineConfig({
               width: "auto",
               minWidth: 0,
               minHeight: "28px",
-              padding: "0 7px",
-              fontSize: "10px",
-              textAlign: "center"
+              padding: "0 8px",
+              fontSize: "10.5px",
+              lineHeight: "1.2",
+              textAlign: "center",
+              "& svg": {
+                width: "16px",
+                height: "16px"
+              }
             },
             "@media (max-width: 860px)": {
               justifyContent: "flex-start"
@@ -1785,7 +1803,7 @@ export default defineConfig({
               borderRadius: "7px",
               background: "var(--surface-strong)",
               color: "var(--text-soft)",
-              fontSize: "10px",
+              fontSize: "10.5px",
               fontWeight: "800",
               transition: "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick)"
             },
@@ -2218,7 +2236,7 @@ export default defineConfig({
               background: "var(--surface-strong)",
               color: "var(--text-soft)",
               padding: "0 10px",
-              fontSize: "10px",
+              fontSize: "10.5px",
               fontWeight: "800",
               transition:
                 "background var(--motion-quick), border-color var(--motion-quick), color var(--motion-quick)",
@@ -2284,7 +2302,7 @@ export default defineConfig({
             flexWrap: "wrap",
             padding: "0 var(--space-lg) var(--space-lg)",
             "& button": {
-              minHeight: "34px"
+              minHeight: "33px"
             },
             "@media (max-width: 860px)": {
               justifyContent: "flex-start",
@@ -3539,7 +3557,7 @@ export default defineConfig({
             "& small": {
               width: "100%",
               color: "var(--text-muted)",
-              fontSize: "10px",
+              fontSize: "10.5px",
               fontWeight: "700",
               textAlign: "center"
             },
@@ -3572,14 +3590,14 @@ export default defineConfig({
                 animation: "surface-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) backwards",
                 animationDelay: "calc(min(var(--surface-index, 0), 8) * 28ms)",
                 "& [data-tool-icon-variant='choice']": {
-                  width: "34px",
-                  minWidth: "34px",
-                  height: "34px",
-                  minHeight: "34px"
+                  width: "35px",
+                  minWidth: "35px",
+                  height: "35px",
+                  minHeight: "35px"
                 },
                 "& [data-tool-icon-variant='choice'] img": {
-                  width: "22px",
-                  height: "22px"
+                  width: "23px",
+                  height: "23px"
                 },
                 "& > span, & small": {
                   minWidth: 0,

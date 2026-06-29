@@ -16,6 +16,10 @@
   --text: #e9eaec;
   --text-soft: #a4a8b3;
   --text-muted: #7d818c;
+  --nav-text: #eceff4;
+  --nav-text-hover: #f7f8fb;
+  --nav-icon: #c6ccd6;
+  --nav-icon-hover: #eef2f7;
   --accent: #1f8fff;
   --accent-ink: #ffffff;
   --brand-icon-bg: #0b0d10;
@@ -64,6 +68,10 @@
   --text: #111827;
   --text-soft: #374151;
   --text-muted: #6b7280;
+  --nav-text: #101827;
+  --nav-text-hover: #0b1220;
+  --nav-icon: #68717f;
+  --nav-icon-hover: #374151;
   --accent: #0a84ff;
   --accent-ink: #ffffff;
   --brand-icon-bg: #0b0d10;
@@ -105,30 +113,32 @@ body {
   background: var(--bg);
 }
 
-body,
-button,
-input,
-select,
-textarea {
-  font: inherit;
-}
+@layer base {
+  body,
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 
-button {
-  border: 0;
-}
+  button {
+    border: 0;
+  }
 
-button,
-select,
-input[type="checkbox"] {
-  cursor: pointer;
-}
+  button,
+  select,
+  input[type="checkbox"] {
+    cursor: pointer;
+  }
 
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
-  outline-offset: 2px;
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline-offset: 2px;
+  }
 }
 
 ::-webkit-scrollbar {

@@ -207,6 +207,7 @@ test("shared panel components use Panda panel and button recipes", () => {
 
 test("shared button typography stays compact after the Panda migration", () => {
   const pandaConfig = read("panda.config.ts");
+  const appNav = recipeBlock(pandaConfig, "appNavRecipe", "appNavButtonRecipe");
   const appNavButton = recipeBlock(pandaConfig, "appNavButtonRecipe", "appNavLabelRecipe");
   const appNavLabel = recipeBlock(pandaConfig, "appNavLabelRecipe", "appNavUpdateDotRecipe");
   const actionButton = recipeBlock(pandaConfig, "actionButtonRecipe", "iconButtonRecipe");
@@ -219,29 +220,30 @@ test("shared button typography stays compact after the Panda migration", () => {
   const profileUsageTemplateRow = recipeBlock(pandaConfig, "profileUsageTemplateRowRecipe", "profileUsageCodeFieldRecipe");
   const wizardChoiceButton = recipeBlock(pandaConfig, "wizardChoiceButtonRecipe", "wizardModeChoiceRecipe");
 
-  assert.match(appNavButton, /minHeight:\s*"34px"/);
-  assert.match(appNavButton, /padding:\s*"0 8px"/);
-  assert.match(appNavLabel, /fontSize:\s*"12px"/);
+  assert.match(appNav, /gap:\s*"8px"/);
+  assert.match(appNavButton, /minHeight:\s*"42px"/);
+  assert.match(appNavButton, /padding:\s*"0 12px"/);
+  assert.match(appNavLabel, /fontSize:\s*"14px"/);
   assert.match(actionButton, /minHeight:\s*"32px"/);
   assert.match(actionButton, /padding:\s*"0 10px"/);
   assert.match(actionButton, /fontSize:\s*"11px"/);
   assert.match(actionButton, /compact:\s*\{[\s\S]*?minHeight:\s*"30px"/);
   assert.match(actionButton, /compact:\s*\{[\s\S]*?padding:\s*"0 9px"/);
-  assert.match(actionButton, /compact:\s*\{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(actionButton, /compact:\s*\{[\s\S]*?fontSize:\s*"10.5px"/);
   assert.match(iconButton, /width:\s*"32px"/);
   assert.match(iconButton, /minHeight:\s*"32px"/);
   assert.match(iconButton, /compact:\s*\{[\s\S]*?height:\s*"28px"/);
   assert.match(iconButton, /compact:\s*\{[\s\S]*?width:\s*"28px"/);
   assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?minHeight:\s*"28px"/);
-  assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?padding:\s*"0 7px"/);
-  assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?padding:\s*"0 8px"/);
+  assert.match(dashboardCardActions, /"& > button, & \[data-dashboard-overflow-menu\] button": \{[\s\S]*?fontSize:\s*"10.5px"/);
   assert.match(dashboardOverflow, /"& > summary": \{[\s\S]*?width:\s*"32px"/);
   assert.match(dashboardOverflow, /"& > summary": \{[\s\S]*?height:\s*"28px"/);
   assert.match(desktopTabs, /"& button": \{[\s\S]*?minHeight:\s*"34px"/);
   assert.match(desktopTabs, /"& button": \{[\s\S]*?padding:\s*"0 10px"/);
-  assert.match(desktopTabs, /"& button": \{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(desktopTabs, /"& button": \{[\s\S]*?fontSize:\s*"10.5px"/);
   assert.match(gatewaySegmented, /"& button": \{[\s\S]*?minHeight:\s*"30px"/);
-  assert.match(gatewaySegmented, /"& button": \{[\s\S]*?fontSize:\s*"10px"/);
+  assert.match(gatewaySegmented, /"& button": \{[\s\S]*?fontSize:\s*"10.5px"/);
   assert.match(profileToolTabs, /"& > button": \{[\s\S]*?minWidth:\s*"136px"/);
   assert.match(profileToolTabs, /"& > button": \{[\s\S]*?minHeight:\s*"46px"/);
   assert.match(profileToolTabs, /"& > button": \{[\s\S]*?padding:\s*"7px 9px"/);
@@ -485,7 +487,7 @@ test("desktop client recipes keep panel content comfortably inset and controls c
 
   assert.match(actions, /gap:\s*"var\(--space-sm\)"/);
   assert.match(actions, /padding:\s*"0 var\(--space-lg\) var\(--space-lg\)"/);
-  assert.match(actions, /"& button": \{[\s\S]*?minHeight:\s*"34px"/);
+  assert.match(actions, /"& button": \{[\s\S]*?minHeight:\s*"33px"/);
 
   assert.match(progress, /margin:\s*"0 var\(--space-lg\) var\(--space-lg\)"/);
   assert.doesNotMatch(progress, /var\(--space-sm\).*2px/);
