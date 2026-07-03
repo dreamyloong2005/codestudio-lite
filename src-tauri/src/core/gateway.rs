@@ -14,11 +14,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use url::Url;
 use uuid::Uuid;
 
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -458,6 +459,7 @@ struct HttpResponse {
     status: u16,
     reason: &'static str,
     content_type: &'static str,
+    headers: Vec<(&'static str, &'static str)>,
     body: Vec<u8>,
 }
 
@@ -571,12 +573,14 @@ impl RequestLogContext {
                 .and_then(|value| value.as_str())
                 .map(ToString::to_string)
         });
-        let privacy_report = request_body
-            .clone()
-            .map(|mut value| {
-                privacy_filter::filter_json_value(&mut value, config.privacy_filter_mode)
+        let (privacy_filter_hit_count, privacy_filter_action) = request_body
+            .as_ref()
+            .and_then(|value| {
+                gateway_protocol_from_route_path(&target.route_path).map(|protocol| {
+                    gateway_privacy_filter_metadata(protocol, value, config.privacy_filter_mode)
+                })
             })
-            .unwrap_or(privacy_filter::PrivacyFilterReport { hit_count: 0 });
+            .unwrap_or((0, PrivacyFilterAction::None));
 
         Self {
             client: detect_client(request, target.tool_id.as_deref()),
@@ -585,8 +589,8 @@ impl RequestLogContext {
             provider: active.map(|profile| profile.provider),
             model,
             privacy_filter_mode: config.privacy_filter_mode,
-            privacy_filter_hit_count: privacy_report.hit_count,
-            privacy_filter_action: privacy_report.action_for_mode(config.privacy_filter_mode),
+            privacy_filter_hit_count,
+            privacy_filter_action,
         }
     }
 }
@@ -814,6 +818,10 @@ fn parse_content_length(headers: &str) -> usize {
 fn route_request(request: HttpRequest, config: &GatewayConfig) -> RouteResponse {
     let target = GatewayRouteTarget::from_request(&request);
 
+    if request.method == "OPTIONS" {
+        return RouteResponse::Buffered(empty_response(204, "No Content"));
+    }
+
     if request.method == "GET" && target.route_path == "/health" {
         return RouteResponse::Buffered(json_response(
             200,
@@ -830,6 +838,7 @@ fn route_request(request: HttpRequest, config: &GatewayConfig) -> RouteResponse 
     if (target.route_path.starts_with("/v1/") || target.route_path.starts_with("/v1beta/"))
         && config.auth_enabled
         && !authorized(&request, &config.token)
+        && !codex_scoped_request_can_skip_local_auth(&target, config)
     {
         return RouteResponse::Buffered(json_response(
             401,
@@ -854,6 +863,19 @@ fn route_request(request: HttpRequest, config: &GatewayConfig) -> RouteResponse 
         ("POST", "/v1/messages") => {
             messages_response(&request.body, &request.headers, config, &target)
         }
+        ("POST", "/v1/messages/count_tokens") => {
+            count_tokens_response(&request.body, config, &target)
+        }
+        ("POST", "/v1/responses/compact") => unsupported_gateway_route_response(
+            "responses/compact is not supported by the CodeStudio Lite provider gateway.",
+            "codestudio_gateway_route_unsupported",
+        ),
+        ("POST", "/v1/images/generations") | ("POST", "/v1/images/edits") => {
+            unsupported_gateway_route_response(
+                "Image generation and editing endpoints are not supported by the CodeStudio Lite provider gateway.",
+                "codestudio_gateway_route_unsupported",
+            )
+        }
         ("POST", route_path) if gemini_route_from_path(route_path).is_some() => {
             gemini_generate_content_response(&request.body, &request.headers, config, &target)
         }
@@ -876,6 +898,24 @@ fn authorized(request: &HttpRequest, token: &str) -> bool {
         .get("authorization")
         .map(|value| value == &format!("Bearer {token}"))
         .unwrap_or(false)
+}
+
+fn codex_scoped_request_can_skip_local_auth(
+    target: &GatewayRouteTarget,
+    config: &GatewayConfig,
+) -> bool {
+    target.strict_tool
+        && target.tool_id.as_deref() == Some("codex")
+        && gateway_host_is_loopback(&config.host)
+}
+
+fn gateway_host_is_loopback(host: &str) -> bool {
+    let host = host.trim().trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
 }
 
 fn models_response(target: &GatewayRouteTarget) -> HttpResponse {
@@ -1193,6 +1233,86 @@ fn gemini_generate_content_response(
     ))
 }
 
+fn count_tokens_response(
+    body: &[u8],
+    config: &GatewayConfig,
+    target: &GatewayRouteTarget,
+) -> RouteResponse {
+    if let Some(response) = missing_tool_profile_response(target) {
+        return response;
+    }
+
+    let request_body = serde_json::from_slice::<Value>(body).unwrap_or_else(|_| json!({}));
+    let parts = request_parts_from_client(
+        GatewayProtocol::AnthropicMessages,
+        &request_body,
+        CLIENT_MODEL,
+    );
+    let input_tokens = estimate_gateway_input_tokens(&parts, config);
+
+    RouteResponse::Buffered(json_response(
+        200,
+        "OK",
+        json!({
+            "input_tokens": input_tokens
+        }),
+    ))
+}
+
+fn estimate_gateway_input_tokens(parts: &GatewayRequestParts, config: &GatewayConfig) -> u64 {
+    let mut text = String::new();
+    if let Some(system) = parts.system.as_deref() {
+        text.push_str(system);
+        text.push('\n');
+    }
+    for message in &parts.messages {
+        text.push_str(&message.role);
+        text.push('\n');
+        text.push_str(&content_text(&message.content));
+        text.push('\n');
+        for tool_call in &message.tool_calls {
+            text.push_str(&tool_call.name);
+            text.push('\n');
+            text.push_str(&arguments_as_string(&tool_call.arguments));
+            text.push('\n');
+        }
+    }
+    for tool in &parts.tools {
+        text.push_str(&tool.name);
+        text.push('\n');
+        if let Some(description) = tool.description.as_deref() {
+            text.push_str(description);
+            text.push('\n');
+        }
+        if let Some(schema) = tool.schema.as_ref() {
+            text.push_str(&schema.to_string());
+            text.push('\n');
+        }
+    }
+    if let Some(tool_choice) = parts.tool_choice.as_ref() {
+        text.push_str(&tool_choice.to_string());
+    }
+
+    let mut value = Value::String(text);
+    let _ = privacy_filter::filter_json_value(&mut value, config.privacy_filter_mode);
+    let filtered_text = value.as_str().unwrap_or_default();
+    let chars = filtered_text.chars().count() as u64;
+    (chars / 4).max(1)
+}
+
+fn unsupported_gateway_route_response(message: &str, error_type: &str) -> RouteResponse {
+    RouteResponse::Buffered(json_response(
+        501,
+        "Not Implemented",
+        json!({
+            "error": {
+                "message": message,
+                "type": error_type
+            }
+        }),
+    ))
+}
+
 fn missing_tool_profile_response(target: &GatewayRouteTarget) -> Option<RouteResponse> {
     if !target.strict_tool {
         return None;
@@ -1360,7 +1480,8 @@ fn forward_gateway_request(
         Err(err) => return unsupported_protocol_response(err),
     };
 
-    if let Err(response) = apply_gateway_privacy_filter(&mut request_body, config) {
+    if let Err(response) = apply_gateway_privacy_filter(client_protocol, &mut request_body, config)
+    {
         return response;
     }
 
@@ -1460,6 +1581,7 @@ fn forward_gateway_request(
             status: response.status,
             reason: reason_for_status(response.status),
             content_type: response.content_type,
+            headers: Vec::new(),
             body: response.body,
         });
     }
@@ -1504,24 +1626,147 @@ fn forward_gateway_request(
 }
 
 fn apply_gateway_privacy_filter(
+    client_protocol: GatewayProtocol,
     request_body: &mut Value,
     config: &GatewayConfig,
 ) -> Result<privacy_filter::PrivacyFilterReport, RouteResponse> {
-    let report = privacy_filter::filter_json_value(request_body, config.privacy_filter_mode);
-    if matches!(config.privacy_filter_mode, PrivacyFilterMode::Block) && report.hit_count > 0 {
-        return Err(RouteResponse::Buffered(json_response(
-            400,
-            "Bad Request",
-            json!({
-                "error": {
-                    "message": "Request blocked by Local Gateway privacy filter.",
-                    "type": "privacy_filter_blocked",
-                    "hit_count": report.hit_count
-                }
-            }),
-        )));
+    if matches!(config.privacy_filter_mode, PrivacyFilterMode::Block) {
+        let latest_report = latest_gateway_privacy_filter_report(client_protocol, request_body);
+        if latest_report.hit_count > 0 {
+            return Err(RouteResponse::Buffered(json_response(
+                400,
+                "Bad Request",
+                json!({
+                    "error": {
+                        "message": "Request blocked by Local Gateway privacy filter.",
+                        "type": "privacy_filter_blocked",
+                        "hit_count": latest_report.hit_count
+                    }
+                }),
+            )));
+        }
+
+        return Ok(privacy_filter::filter_json_value(
+            request_body,
+            PrivacyFilterMode::Redact,
+        ));
     }
+
+    let report = privacy_filter::filter_json_value(request_body, config.privacy_filter_mode);
     Ok(report)
+}
+
+fn gateway_protocol_from_route_path(route_path: &str) -> Option<GatewayProtocol> {
+    match route_path {
+        "/v1/responses" => Some(GatewayProtocol::OpenAiResponses),
+        "/v1/chat/completions" => Some(GatewayProtocol::OpenAiChatCompletions),
+        "/v1/messages" => Some(GatewayProtocol::AnthropicMessages),
+        path if gemini_route_from_path(path).is_some() => Some(GatewayProtocol::GoogleGemini),
+        _ => None,
+    }
+}
+
+fn gateway_privacy_filter_metadata(
+    client_protocol: GatewayProtocol,
+    request_body: &Value,
+    mode: PrivacyFilterMode,
+) -> (usize, PrivacyFilterAction) {
+    if matches!(mode, PrivacyFilterMode::Off) {
+        return (0, PrivacyFilterAction::None);
+    }
+
+    if matches!(mode, PrivacyFilterMode::Block) {
+        let latest_report = latest_gateway_privacy_filter_report(client_protocol, request_body);
+        if latest_report.hit_count > 0 {
+            return (latest_report.hit_count, PrivacyFilterAction::Blocked);
+        }
+
+        let mut redacted_scope = request_body.clone();
+        let redacted_report =
+            privacy_filter::filter_json_value(&mut redacted_scope, PrivacyFilterMode::Redact);
+        if redacted_report.hit_count > 0 {
+            return (redacted_report.hit_count, PrivacyFilterAction::Redacted);
+        }
+        return (0, PrivacyFilterAction::None);
+    }
+
+    let mut value = request_body.clone();
+    let report = privacy_filter::filter_json_value(&mut value, mode);
+    (report.hit_count, report.action_for_mode(mode))
+}
+
+fn latest_gateway_privacy_filter_report(
+    client_protocol: GatewayProtocol,
+    request_body: &Value,
+) -> privacy_filter::PrivacyFilterReport {
+    let Some(mut scope) = latest_gateway_privacy_scope(client_protocol, request_body) else {
+        let mut value = request_body.clone();
+        return privacy_filter::filter_json_value(&mut value, PrivacyFilterMode::Detect);
+    };
+    privacy_filter::filter_json_value(&mut scope, PrivacyFilterMode::Detect)
+}
+
+fn latest_gateway_privacy_scope(
+    client_protocol: GatewayProtocol,
+    request_body: &Value,
+) -> Option<Value> {
+    match client_protocol {
+        GatewayProtocol::OpenAiResponses => latest_openai_responses_privacy_scope(request_body),
+        GatewayProtocol::OpenAiChatCompletions | GatewayProtocol::AnthropicMessages => request_body
+            .get("messages")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .rev()
+                    .find(|item| gateway_item_has_filterable_text(item))
+            })
+            .cloned()
+            .map(|item| json!({ "messages": [item] })),
+        GatewayProtocol::GoogleGemini => request_body
+            .get("contents")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .rev()
+                    .find(|item| gateway_item_has_filterable_text(item))
+            })
+            .cloned()
+            .map(|item| json!({ "contents": [item] })),
+    }
+}
+
+fn latest_openai_responses_privacy_scope(request_body: &Value) -> Option<Value> {
+    match request_body.get("input") {
+        Some(Value::String(input)) => Some(json!({ "input": input })),
+        Some(Value::Array(items)) => items
+            .iter()
+            .rev()
+            .find(|item| gateway_item_has_filterable_text(item))
+            .cloned()
+            .map(|item| json!({ "input": [item] })),
+        Some(value) => Some(json!({ "input": value })),
+        None => None,
+    }
+}
+
+fn gateway_item_has_filterable_text(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => items.iter().any(gateway_item_has_filterable_text),
+        Value::Object(map) => map.iter().any(|(key, child)| {
+            if key.eq_ignore_ascii_case("role")
+                || key.eq_ignore_ascii_case("type")
+                || key.eq_ignore_ascii_case("id")
+                || key.eq_ignore_ascii_case("name")
+            {
+                return false;
+            }
+            gateway_item_has_filterable_text(child)
+        }),
+        _ => false,
+    }
 }
 
 fn unsupported_protocol_response(message: String) -> RouteResponse {
@@ -3523,12 +3768,18 @@ fn upstream_endpoint(
     model: &str,
     stream: bool,
 ) -> String {
-    let base_url = profile.base_url.trim_end_matches('/');
     match protocol {
-        GatewayProtocol::OpenAiChatCompletions => format!("{base_url}/chat/completions"),
-        GatewayProtocol::OpenAiResponses => format!("{base_url}/responses"),
-        GatewayProtocol::AnthropicMessages => format!("{base_url}/messages"),
+        GatewayProtocol::OpenAiChatCompletions => {
+            upstream_api_endpoint(&profile.base_url, "/v1/chat/completions")
+        }
+        GatewayProtocol::OpenAiResponses => {
+            upstream_api_endpoint(&profile.base_url, "/v1/responses")
+        }
+        GatewayProtocol::AnthropicMessages => {
+            upstream_api_endpoint(&profile.base_url, "/v1/messages")
+        }
         GatewayProtocol::GoogleGemini => {
+            let base_url = profile.base_url.trim_end_matches('/');
             let model = normalize_gemini_model_name(model);
             if stream {
                 format!("{base_url}/models/{model}:streamGenerateContent?alt=sse")
@@ -3537,6 +3788,74 @@ fn upstream_endpoint(
             }
         }
     }
+}
+
+fn upstream_api_endpoint(base_url: &str, path: &str) -> String {
+    let trimmed_base = base_url.trim_end_matches('/');
+    let clean_path = format!("/{}", path.trim().trim_start_matches('/'));
+    let fallback = || format!("{trimmed_base}{clean_path}");
+    let Ok(mut parsed) = Url::parse(trimmed_base) else {
+        return fallback();
+    };
+    if parsed.scheme().is_empty() || parsed.host_str().is_none() {
+        return fallback();
+    }
+
+    let base_path = parsed.path().trim_end_matches('/').to_string();
+    let endpoint_path = upstream_endpoint_path_without_v1(&clean_path);
+    let clean_suffix = clean_path.trim_end_matches('/');
+    if base_path.ends_with(clean_suffix) {
+        parsed.set_path(&base_path);
+    } else if endpoint_path
+        .as_deref()
+        .is_some_and(|endpoint| base_path.ends_with(endpoint.trim_end_matches('/')))
+    {
+        parsed.set_path(&base_path);
+    } else if let Some(endpoint) = endpoint_path
+        .as_deref()
+        .filter(|_| upstream_base_path_has_version_segment(&base_path))
+    {
+        parsed.set_path(&format!("{base_path}{endpoint}"));
+    } else {
+        parsed.set_path(&format!("{base_path}{clean_path}"));
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+fn upstream_endpoint_path_without_v1(path: &str) -> Option<String> {
+    let clean_path = format!("/{}", path.trim().trim_start_matches('/'));
+    clean_path
+        .strip_prefix("/v1/")
+        .map(|path| format!("/{path}"))
+}
+
+fn upstream_base_path_has_version_segment(base_path: &str) -> bool {
+    base_path
+        .trim_matches('/')
+        .split('/')
+        .any(upstream_path_segment_is_version)
+}
+
+fn upstream_path_segment_is_version(segment: &str) -> bool {
+    let segment = segment.trim();
+    let mut chars = segment.chars();
+    if !matches!(chars.next(), Some('v' | 'V')) {
+        return false;
+    }
+
+    let mut has_digit = false;
+    for ch in chars {
+        if ch.is_ascii_digit() {
+            has_digit = true;
+            continue;
+        }
+        if !has_digit || !(ch.is_ascii_alphabetic() || matches!(ch, '-' | '_' | '.')) {
+            return false;
+        }
+    }
+    has_digit
 }
 
 fn upstream_headers(protocol: GatewayProtocol, api_key: &str) -> String {
@@ -3797,6 +4116,7 @@ fn forward_upstream_json_with_headers(
                 status,
                 reason,
                 content_type,
+                headers: Vec::new(),
                 body: response.body,
             })
         }
@@ -3854,7 +4174,18 @@ fn json_response(status: u16, reason: &'static str, value: serde_json::Value) ->
         status,
         reason,
         content_type: "application/json",
+        headers: Vec::new(),
         body: serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec()),
+    }
+}
+
+fn empty_response(status: u16, reason: &'static str) -> HttpResponse {
+    HttpResponse {
+        status,
+        reason,
+        content_type: "text/plain",
+        headers: Vec::new(),
+        body: Vec::new(),
     }
 }
 
@@ -3872,13 +4203,14 @@ fn stream_converted_gateway_response(
     let mut raw_passthrough = false;
     let mut buffered_non_sse = false;
     let mut non_sse_body = Vec::new();
+    let mut client_response_started = false;
     let mut parser = SseBuffer::default();
     let mut full_text = String::new();
     let mut full_tool_calls = Vec::new();
     let mut stream_usage = GatewayUsage::default();
     let stream_state = ClientStreamState::new(client_protocol, model);
 
-    upstream_http::post_json_stream_with_headers(
+    let upstream_result = upstream_http::post_json_stream_with_headers(
         endpoint,
         headers,
         request_body,
@@ -3888,12 +4220,14 @@ fn stream_converted_gateway_response(
                 status = meta.status;
                 if meta.status >= 400 {
                     raw_passthrough = true;
+                    client_response_started = true;
                     return write_stream_headers(client_stream, meta.status, meta.content_type);
                 }
                 if meta.content_type != "text/event-stream" {
                     buffered_non_sse = true;
                     return Ok(());
                 }
+                client_response_started = true;
                 write_stream_headers(client_stream, meta.status, "text/event-stream")?;
                 write_client_stream_start(client_stream, &stream_state)
             }
@@ -3922,15 +4256,29 @@ fn stream_converted_gateway_response(
                 Ok(())
             }
         },
-    )?;
+    );
+
+    if let Err(err) = upstream_result {
+        if !client_response_started {
+            return write_upstream_stream_error_response(client_stream, &err);
+        }
+        return Err(err);
+    }
 
     if raw_passthrough {
         return Ok(status);
     }
 
     if buffered_non_sse {
-        let value = serde_json::from_slice::<Value>(&non_sse_body)
-            .map_err(|err| format!("Upstream non-SSE stream response was not valid JSON: {err}"))?;
+        let value = match serde_json::from_slice::<Value>(&non_sse_body) {
+            Ok(value) => value,
+            Err(err) => {
+                return write_upstream_stream_error_response(
+                    client_stream,
+                    &format!("Upstream non-SSE stream response was not valid JSON: {err}"),
+                );
+            }
+        };
         let response = assistant_response_from_protocol(upstream_protocol, &value);
         let text = content_text(&response.content);
         write_stream_headers(client_stream, status, "text/event-stream")?;
@@ -4877,7 +5225,8 @@ fn stream_upstream_json_with_headers(
     client_stream: &mut TcpStream,
 ) -> Result<u16, String> {
     let mut status = 200;
-    upstream_http::post_json_stream_with_headers(
+    let mut client_response_started = false;
+    let upstream_result = upstream_http::post_json_stream_with_headers(
         endpoint,
         headers,
         request_body,
@@ -4885,6 +5234,7 @@ fn stream_upstream_json_with_headers(
         |event| match event {
             upstream_http::UpstreamStreamEvent::Headers(meta) => {
                 status = meta.status;
+                client_response_started = true;
                 write_stream_headers(client_stream, meta.status, meta.content_type)
             }
             upstream_http::UpstreamStreamEvent::Chunk(chunk) => client_stream
@@ -4892,9 +5242,32 @@ fn stream_upstream_json_with_headers(
                 .and_then(|_| client_stream.flush())
                 .map_err(|err| err.to_string()),
         },
-    )?;
+    );
+
+    if let Err(err) = upstream_result {
+        if !client_response_started {
+            return write_upstream_stream_error_response(client_stream, &err);
+        }
+        return Err(err);
+    }
 
     Ok(status)
+}
+
+fn write_upstream_stream_error_response(stream: &mut TcpStream, err: &str) -> Result<u16, String> {
+    write_http_response(
+        stream,
+        json_response(
+            502,
+            "Bad Gateway",
+            json!({
+                "error": {
+                    "message": format!("Upstream request failed: {err}"),
+                    "type": "codestudio_upstream_request_error"
+                }
+            }),
+        ),
+    )
 }
 
 fn write_route_response(stream: &mut TcpStream, response: RouteResponse) -> Result<u16, String> {
@@ -4906,13 +5279,21 @@ fn write_route_response(stream: &mut TcpStream, response: RouteResponse) -> Resu
 
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<u16, String> {
     let status = response.status;
-    let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.status,
         response.reason,
         response.content_type,
         response.body.len()
     );
+    append_cors_headers(&mut head);
+    for (name, value) in response.headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
     stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.write_all(&response.body))
@@ -4927,16 +5308,24 @@ fn write_stream_headers(
     status: u16,
     content_type: &'static str,
 ) -> Result<(), String> {
-    let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n",
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n",
         status,
         reason_for_status(status),
         content_type
     );
+    append_cors_headers(&mut head);
+    head.push_str("\r\n");
     stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.flush())
         .map_err(|err| err.to_string())
+}
+
+fn append_cors_headers(head: &mut String) {
+    head.push_str("Access-Control-Allow-Origin: *\r\n");
+    head.push_str("Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n");
+    head.push_str("Access-Control-Allow-Headers: *\r\n");
 }
 
 #[cfg(test)]
@@ -4992,6 +5381,15 @@ mod tests {
         }
     }
 
+    fn options(path: &str) -> HttpRequest {
+        HttpRequest {
+            method: "OPTIONS".to_string(),
+            path: path.to_string(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+        }
+    }
+
     fn response_body_json(response: RouteResponse) -> Value {
         match response {
             RouteResponse::Buffered(response) => {
@@ -4999,6 +5397,31 @@ mod tests {
             }
             RouteResponse::Stream(_) => panic!("expected buffered response"),
         }
+    }
+
+    fn assert_not_skeleton_route_not_found(response: RouteResponse, route: &str) -> u16 {
+        let status = response.status();
+        if status != 404 {
+            return status;
+        }
+
+        let body = response_body_json(response);
+        assert_ne!(
+            body["error"]["type"].as_str(),
+            Some("codestudio_route_not_found"),
+            "{route} should not fall through to the local route fallback"
+        );
+        status
+    }
+
+    fn connected_stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose an address");
+        let client = TcpStream::connect(address).expect("test client should connect");
+        let (server, _) = listener.accept().expect("test server should accept");
+        (server, client)
     }
 
     fn test_profile(protocol: &str) -> ProfileDraft {
@@ -5020,6 +5443,13 @@ mod tests {
             last_test_status: None,
             usage_enabled: false,
             sort_order: 0,
+        }
+    }
+
+    fn test_profile_with_base_url(protocol: &str, base_url: &str) -> ProfileDraft {
+        ProfileDraft {
+            base_url: base_url.to_string(),
+            ..test_profile(protocol)
         }
     }
 
@@ -5400,6 +5830,30 @@ mod tests {
     }
 
     #[test]
+    fn stream_upstream_pre_header_error_returns_502_instead_of_disconnect() {
+        let (mut server, mut client) = connected_stream_pair();
+        let status = stream_upstream_json_with_headers(
+            "not-a-url",
+            "",
+            &json!({ "stream": true }),
+            1,
+            &mut server,
+        )
+        .expect("pre-header upstream failures should be serialized as a gateway response");
+        drop(server);
+
+        let mut raw_response = String::new();
+        client
+            .read_to_string(&mut raw_response)
+            .expect("client should read fallback response");
+
+        assert_eq!(status, 502);
+        assert!(raw_response.starts_with("HTTP/1.1 502 Bad Gateway"));
+        assert!(raw_response.contains("codestudio_upstream_request_error"));
+        assert!(raw_response.contains("Upstream request failed"));
+    }
+
+    #[test]
     fn converted_gateway_request_uses_safe_passthrough_headers() {
         let request_body = json!({
             "model": "codestudio-default",
@@ -5452,7 +5906,11 @@ mod tests {
             }]
         });
         let config = test_config_with_privacy_filter(false, PrivacyFilterMode::Redact);
-        let result = apply_gateway_privacy_filter(&mut request_body, &config);
+        let result = apply_gateway_privacy_filter(
+            GatewayProtocol::OpenAiChatCompletions,
+            &mut request_body,
+            &config,
+        );
 
         assert!(result.is_ok());
         let parts = request_parts_from_client(
@@ -5475,7 +5933,11 @@ mod tests {
             "input": "My email is alice@example.com"
         });
         let config = test_config_with_privacy_filter(false, PrivacyFilterMode::Block);
-        let result = apply_gateway_privacy_filter(&mut request_body, &config);
+        let result = apply_gateway_privacy_filter(
+            GatewayProtocol::OpenAiResponses,
+            &mut request_body,
+            &config,
+        );
 
         assert!(result.is_err());
         let response = result.err().unwrap();
@@ -5485,6 +5947,50 @@ mod tests {
             body["error"]["type"].as_str(),
             Some("privacy_filter_blocked")
         );
+    }
+
+    #[test]
+    fn privacy_filter_block_mode_allows_clean_latest_input_after_sensitive_history() {
+        let mut request_body = json!({
+            "model": "gpt",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "My API key is sk-11111" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "I cannot see it." }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "1" }]
+                }
+            ]
+        });
+        let config = test_config_with_privacy_filter(false, PrivacyFilterMode::Block);
+        let result = apply_gateway_privacy_filter(
+            GatewayProtocol::OpenAiResponses,
+            &mut request_body,
+            &config,
+        );
+
+        assert!(
+            result.is_ok(),
+            "clean latest input should not be blocked by sensitive history"
+        );
+        let history_text = request_body["input"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let latest_text = request_body["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(history_text.contains("[密钥]"));
+        assert!(!history_text.contains("sk-11111"));
+        assert_eq!(latest_text, "1");
     }
 
     #[test]
@@ -5532,7 +6038,11 @@ mod tests {
         ];
 
         for request_body in &mut requests {
-            let report = match apply_gateway_privacy_filter(request_body, &config) {
+            let report = match apply_gateway_privacy_filter(
+                GatewayProtocol::OpenAiResponses,
+                request_body,
+                &config,
+            ) {
                 Ok(report) => report,
                 Err(_) => panic!("detect mode should not block"),
             };
@@ -5652,7 +6162,102 @@ mod tests {
     fn responses_route_is_implemented_for_codex_wire_api() {
         let config = test_config(true);
         let response = route_request(post("/v1/responses", Some(&config.token)), &config);
-        assert_ne!(response.status(), 404);
+        assert_not_skeleton_route_not_found(response, "/v1/responses");
+    }
+
+    #[test]
+    fn options_request_returns_cors_preflight_response_without_auth() {
+        let response = route_request(options("/v1/responses"), &test_config(true));
+        assert_eq!(response.status(), 204);
+        match response {
+            RouteResponse::Buffered(response) => {
+                assert_eq!(response.content_type, "text/plain");
+            }
+            RouteResponse::Stream(_) => panic!("expected buffered response"),
+        }
+    }
+
+    #[test]
+    fn extra_gateway_routes_return_specific_api_errors_instead_of_skeleton_404() {
+        let config = test_config(true);
+        let routes = [
+            "/v1/responses/compact",
+            "/v1/messages/count_tokens",
+            "/v1/images/generations",
+            "/v1/images/edits",
+        ];
+
+        for route in routes {
+            let response = route_request(post(route, Some(&config.token)), &config);
+            assert_not_skeleton_route_not_found(response, route);
+        }
+    }
+
+    #[test]
+    fn count_tokens_route_returns_anthropic_token_count_shape() {
+        let config = test_config(true);
+        let response = route_request(
+            post("/v1/messages/count_tokens", Some(&config.token)),
+            &config,
+        );
+        assert_eq!(response.status(), 200);
+        let body = response_body_json(response);
+
+        assert!(body["input_tokens"].as_u64().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn upstream_endpoint_preserves_openai_and_provider_version_roots() {
+        let cases = [
+            (
+                "https://api.example.com",
+                GatewayProtocol::OpenAiChatCompletions,
+                "https://api.example.com/v1/chat/completions",
+            ),
+            (
+                "https://api.example.com/v1/",
+                GatewayProtocol::OpenAiChatCompletions,
+                "https://api.example.com/v1/chat/completions",
+            ),
+            (
+                "https://api.example.com/v1/chat/completions",
+                GatewayProtocol::OpenAiChatCompletions,
+                "https://api.example.com/v1/chat/completions",
+            ),
+            (
+                "https://open.bigmodel.cn/api/coding/paas/v4",
+                GatewayProtocol::OpenAiChatCompletions,
+                "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+            ),
+            (
+                "https://open.bigmodel.cn/api/coding/paas/v4",
+                GatewayProtocol::OpenAiResponses,
+                "https://open.bigmodel.cn/api/coding/paas/v4/responses",
+            ),
+            (
+                "https://api.anthropic.com",
+                GatewayProtocol::AnthropicMessages,
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                "https://api.anthropic.com/v1/messages",
+                GatewayProtocol::AnthropicMessages,
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                "https://api.example.com/v1?ignored=1",
+                GatewayProtocol::OpenAiChatCompletions,
+                "https://api.example.com/v1/chat/completions",
+            ),
+        ];
+
+        for (base_url, protocol, expected) in cases {
+            let profile = test_profile_with_base_url("unused", base_url);
+            assert_eq!(
+                upstream_endpoint(protocol, &profile, "test-model", false),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -5667,11 +6272,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_scoped_route_accepts_request_without_local_token() {
+        let config = test_config(true);
+        let response = route_request(post("/tools/codex/v1/responses", None), &config);
+        assert_ne!(response.status(), 401);
+    }
+
+    #[test]
+    fn unscoped_route_rejects_request_without_local_token() {
+        let config = test_config(true);
+        let response = route_request(post("/v1/responses", None), &config);
+        assert_eq!(response.status(), 401);
+    }
+
+    #[test]
+    fn non_codex_scoped_route_rejects_request_without_local_token() {
+        let config = test_config(true);
+        let response = route_request(post("/tools/claude/v1/messages", None), &config);
+        assert_eq!(response.status(), 401);
+    }
+
+    #[test]
+    fn codex_scoped_route_requires_local_token_when_host_is_not_loopback() {
+        let config = GatewayConfig {
+            host: "0.0.0.0".to_string(),
+            ..test_config(true)
+        };
+        let response = route_request(post("/tools/codex/v1/responses", None), &config);
+        assert_eq!(response.status(), 401);
+    }
+
+    #[test]
     fn messages_route_is_implemented_for_anthropic_clients() {
         let config = test_config(true);
         let response = route_request(post("/v1/messages", Some(&config.token)), &config);
-        assert_ne!(response.status(), 404);
-        assert_ne!(response.status(), 401);
+        let status = assert_not_skeleton_route_not_found(response, "/v1/messages");
+        assert_ne!(status, 401);
     }
 
     #[test]

@@ -356,13 +356,11 @@ export interface AppSettings {
   redactSecrets: boolean;
   confirmInstallCommands: boolean;
   confirmConfigWrites: boolean;
-  preserveCodexOfficialAuth: boolean;
 }
 
 export interface UpdateAppSettingsRequest {
   theme?: AppSettings["theme"] | null;
   language?: Locale | null;
-  preserveCodexOfficialAuth?: boolean | null;
 }
 
 export interface ProfileDraft {

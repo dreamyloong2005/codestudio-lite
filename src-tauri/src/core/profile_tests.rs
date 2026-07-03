@@ -13,7 +13,6 @@ fn test_app_config() -> AppConfig {
             redact_secrets: true,
             confirm_install_commands: true,
             confirm_config_writes: true,
-            preserve_codex_official_auth: true,
         },
     }
 }
@@ -218,12 +217,15 @@ model = "gpt-5.5"
 name = "CodeStudio OpenRouter"
 base_url = "https://openrouter.ai/api/v1"
 wire_api = "responses"
-requires_openai_auth = false
-experimental_bearer_token = "sk-router"
+requires_openai_auth = true
 "#,
     )
     .expect("config should parse");
-    let detected = detect_codex_native_profile(&value).expect("custom profile should import");
+    let auth = serde_json::json!({
+        "OPENAI_API_KEY": "sk-router"
+    });
+    let detected = detect_codex_native_profile_with_auth(&value, Some(&auth))
+        .expect("custom profile should import");
 
     assert_eq!(detected.app, "codex");
     assert_eq!(
@@ -368,7 +370,6 @@ name = "CodeStudio openrouter"
 base_url = "https://openrouter.ai/api/v1"
 wire_api = "responses"
 requires_openai_auth = false
-experimental_bearer_token = "sk-config-token"
 "#,
     )
     .expect("config should parse");
@@ -403,14 +404,13 @@ fn codex_direct_config_rewrites_legacy_inline_provider_to_custom_table() {
     profile.model = "gpt-5.5".to_string();
     profile.base_url = "https://api.apikey.fun/v1".to_string();
 
-    let config = codex_direct_config_content_with_api_key(
+    let config = codex_direct_config_content(
             r#"
         model_provider = "custom"
-        model_providers = { custom = { name = "APIKEY.FUN", wire_api = "responses", base_url = "https://api.apikey.fun/v1", requires_openai_auth = false, experimental_bearer_token = "sk-1" } , openai = { name = "OpenAI", wire_api = "responses", requires_openai_auth = true } }
+        model_providers = { custom = { name = "APIKEY.FUN", wire_api = "responses", base_url = "https://api.apikey.fun/v1", requires_openai_auth = false } , openai = { name = "OpenAI", wire_api = "responses", requires_openai_auth = true } }
 model_reasoning_effort = "xhigh"
 "#,
             &profile,
-            "sk-new",
         )
         .expect("config should render");
     let value: toml::Value = toml::from_str(&config).expect("config should parse");
@@ -448,7 +448,7 @@ fn codex_gateway_config_uses_custom_provider_table() {
     let config = codex_gateway_config_content(
             r#"
 model_provider = "codestudio-local"
-model_providers = { codestudio-local = { name = "CodeStudio Lite Local Gateway", wire_api = "responses", base_url = "http://127.0.0.1:43112/tools/codex/v1", requires_openai_auth = true, experimental_bearer_token = "codestudio-local-old" } }
+model_providers = { codestudio-local = { name = "CodeStudio Lite Local Gateway", wire_api = "responses", base_url = "http://127.0.0.1:43112/tools/codex/v1", requires_openai_auth = false } }
 "#,
             &profile,
         )
@@ -470,7 +470,7 @@ model_providers = { codestudio-local = { name = "CodeStudio Lite Local Gateway",
     assert_eq!(
         toml_lookup(&value, "model_providers.custom.requires_openai_auth")
             .and_then(|item| item.as_bool()),
-        Some(true)
+        Some(false)
     );
     assert_eq!(
         toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
@@ -489,9 +489,8 @@ fn codex_direct_config_without_model_does_not_write_legacy_default_model() {
     profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
     profile.model = String::new();
 
-    let config =
-        codex_direct_config_content_with_api_key("model = \"old-model\"\n", &profile, "sk-new")
-            .expect("config should render");
+    let config = codex_direct_config_content("model = \"old-model\"\n", &profile)
+        .expect("config should render");
     let value: toml::Value = toml::from_str(&config).expect("config should parse");
 
     assert!(read_toml_string(&value, "model").is_none());
@@ -603,7 +602,6 @@ model = "codestudio-default"
 [model_providers.codestudio-local]
 base_url = "http://127.0.0.1:43112/tools/codex/v1"
 wire_api = "responses"
-experimental_bearer_token = "codestudio-local-token"
 "#,
     )
     .expect("config should parse");
@@ -731,7 +729,7 @@ model:
 }
 
 #[test]
-fn codex_native_config_uses_relay_injection_with_official_auth() {
+fn codex_native_config_uses_relay_injection_without_official_auth() {
     let profile = test_profile("codex", ProviderApplyMode::Gateway);
     let config = codex_gateway_config_content("", &profile).expect("config should render");
     let value: toml::Value = toml::from_str(&config).expect("config should parse");
@@ -747,7 +745,7 @@ fn codex_native_config_uses_relay_injection_with_official_auth() {
     assert_eq!(
         toml_lookup(&value, "model_providers.custom.requires_openai_auth")
             .and_then(|item| item.as_bool()),
-        Some(true)
+        Some(false)
     );
     assert_eq!(
         toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
@@ -763,14 +761,11 @@ fn codex_official_config_does_not_write_openai_provider_override() {
         .expect("codex official profile");
     let config = codex_official_config_content(
         r#"
-experimental_bearer_token = "legacy-top-level"
-
 [auth]
 api_key = "legacy-auth-key"
 
 [model_providers.openai]
 base_url = "https://example.invalid/v1"
-experimental_bearer_token = "legacy-provider-key"
 "#,
         &profile,
     )
@@ -782,7 +777,6 @@ experimental_bearer_token = "legacy-provider-key"
         Some("openai")
     );
     assert!(toml_lookup(&value, "model_providers.openai").is_none());
-    assert!(toml_lookup(&value, "experimental_bearer_token").is_none());
     assert!(toml_lookup(&value, "auth.api_key").is_none());
     assert!(!config.contains("[model_providers.openai]"));
     assert!(!config.contains("model_providers = { openai"));
@@ -839,10 +833,8 @@ fn codex_auth_status_infers_api_key_cache_without_exposing_values() {
 }
 
 #[test]
-fn codex_preserved_auth_repair_removes_legacy_key_locations() {
+fn codex_preserved_auth_repair_removes_legacy_openai_key_locations() {
     let mut document = r#"
-experimental_bearer_token = "top-level-key"
-
 [auth]
 OPENAI_API_KEY = "auth-key"
 api_key = "auth-key-legacy"
@@ -850,9 +842,6 @@ api_key = "auth-key-legacy"
 [env]
 OPENAI_API_KEY = "env-key"
 OTHER = "keep"
-
-[model_providers.custom]
-experimental_bearer_token = "provider-key"
 "#
     .parse::<toml_edit::DocumentMut>()
     .expect("config should parse");
@@ -860,18 +849,12 @@ experimental_bearer_token = "provider-key"
     repair_codex_preserved_auth_config(&mut document);
     let value: toml::Value = toml::from_str(&document.to_string()).expect("config toml");
 
-    assert!(toml_lookup(&value, "experimental_bearer_token").is_none());
     assert!(toml_lookup(&value, "auth.OPENAI_API_KEY").is_none());
     assert!(toml_lookup(&value, "auth.api_key").is_none());
     assert!(toml_lookup(&value, "env.OPENAI_API_KEY").is_none());
     assert_eq!(
         toml_lookup(&value, "env.OTHER").and_then(|item| item.as_str()),
         Some("keep")
-    );
-    assert_eq!(
-        toml_lookup(&value, "model_providers.custom.experimental_bearer_token")
-            .and_then(|item| item.as_str()),
-        Some("provider-key")
     );
 }
 

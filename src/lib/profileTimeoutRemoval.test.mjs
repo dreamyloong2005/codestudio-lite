@@ -58,6 +58,16 @@ test("profiles table and preview content do not persist profile-level timeout", 
   assert.equal(api.includes("Network provider checks are not sent yet. Timeout is set"), false);
 });
 
+test("base URL inputs do not auto-prefix https", () => {
+  const setupWizard = source("src/routes/SetupWizard.svelte");
+  const profiles = source("src/routes/Profiles.svelte");
+
+  for (const route of [setupWizard, profiles]) {
+    assert.equal(route.includes("shouldAutoPrefixBaseUrlInput"), false);
+    assert.equal(route.includes("`https://${trimmed}`"), false);
+  }
+});
+
 test("mock Codex official preview does not write an OpenAI provider override", () => {
   const api = source("src/lib/api.ts");
   const officialBranch = between(
@@ -68,9 +78,18 @@ test("mock Codex official preview does not write an OpenAI provider override", (
 
   assert.equal(officialBranch.includes("model_providers.openai.wire_api"), false);
   assert.equal(officialBranch.includes("model_providers.openai.requires_openai_auth"), false);
-  assert.equal(
-    officialBranch.includes("model_providers.openai.experimental_bearer_token"),
-    false
-  );
   assert.equal(officialBranch.includes('key: "model_providers.openai"'), true);
+});
+
+test("mock Codex gateway preview disables OpenAI auth", () => {
+  const api = source("src/lib/api.ts");
+  const gatewayBranch = between(
+    api,
+    "const gatewayBaseUrl = mockGatewayBaseUrlForTool(profile.app);",
+    "function withMockNativeContent"
+  );
+
+  assert.equal(gatewayBranch.includes('key: "model_providers.custom.requires_openai_auth"'), true);
+  assert.equal(gatewayBranch.includes('after: "false"'), true);
+  assert.equal(gatewayBranch.includes('after: "true"'), false);
 });

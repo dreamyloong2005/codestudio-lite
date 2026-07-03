@@ -108,8 +108,11 @@
   }
 
   function privacyActionLabel(entry: GatewayRequestLogEntry) {
+    if (entry.privacyFilterMode === "off") {
+      return $t("gateway.privacyAction.off");
+    }
     if (entry.privacyFilterHitCount <= 0 || entry.privacyFilterAction === "none") {
-      return $t("gateway.privacyAction.none");
+      return $t("gateway.privacyAction.noPrivacyHit");
     }
     return $t(`gateway.privacyAction.${entry.privacyFilterAction}` as Parameters<typeof $t>[0], {
       count: entry.privacyFilterHitCount

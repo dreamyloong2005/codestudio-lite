@@ -15,7 +15,6 @@
     deleteProfileDraft,
     deleteUsageScript,
     duplicateProfileDraft,
-    loadAppSettings,
     loadUsageScriptState,
     previewProfileApply,
     queryProfileUsage,
@@ -166,8 +165,6 @@
   let profileIoError: string | null = null;
   let profileIoMessage: string | null = null;
   let syncClaudeVsCodePlugin = false;
-  let preserveCodexOfficialAuth = true;
-  let codexAuthConflictConfirmed = false;
   let pendingUsageProfile: ProfileDraft | null = null;
   let usageState: UsageScriptState | null = null;
   let usageForm: UsageForm = emptyUsageForm();
@@ -292,14 +289,6 @@
   );
   $: selectedModeSupported = selectedModePreview?.supported ?? false;
   $: applyEnvConflicts = applyResult?.envConflicts ?? applyPreview?.envConflicts ?? [];
-  $: pendingApplyDisplacesCodexOAuth = Boolean(
-    pendingApply &&
-    canonicalProfileToolId(pendingApply.app) === "codex" &&
-    pendingApply.mode === "config" &&
-    !providerIsOfficial(pendingApply.provider) &&
-    !preserveCodexOfficialAuth &&
-    (summary?.codexAuth.available || activeCodexConfigProfileIsOfficial(summary))
-  );
   $: canSyncClaudeVsCodePlugin =
     Boolean(pendingApply) &&
     canonicalProfileToolId(pendingApply?.app ?? "") === "claude" &&
@@ -358,13 +347,11 @@
     applyError = null;
     selectedApplyMode = profile.mode;
     syncClaudeVsCodePlugin = false;
-    codexAuthConflictConfirmed = false;
     applyingId = actionKey(profile.id, profile.mode);
 
     try {
       applyPreview = await previewProfileApply({ profileId: profile.id });
       selectedApplyMode = profile.mode;
-      preserveCodexOfficialAuth = await loadCodexAuthPreservationSetting();
     } catch (err) {
       applyError = errorLabel(err instanceof Error ? err.message : String(err));
     } finally {
@@ -830,11 +817,6 @@
       return;
     }
 
-    if (pendingApplyDisplacesCodexOAuth && !codexAuthConflictConfirmed) {
-      codexAuthConflictConfirmed = true;
-      return;
-    }
-
     const syncClaudeVsCode = canSyncClaudeVsCodePlugin && syncClaudeVsCodePlugin;
     applyingId = actionKey(profileId, selectedApplyMode, restartAfterApply, syncClaudeVsCode);
     applyError = null;
@@ -945,7 +927,6 @@
     selectedApplyMode = "gateway";
     pendingApplyMode = "gateway";
     syncClaudeVsCodePlugin = false;
-    codexAuthConflictConfirmed = false;
   }
 
   function syncSelectedProfileTool(groups: ProfileGroup[]) {
@@ -1627,27 +1608,6 @@
     return true;
   }
 
-  async function loadCodexAuthPreservationSetting() {
-    try {
-      const settings = await loadAppSettings();
-      return settings.preserveCodexOfficialAuth;
-    } catch {
-      return true;
-    }
-  }
-
-  function activeCodexConfigProfileIsOfficial(profileSummary: ProfileSummary | null) {
-    const activeProfileId =
-      profileSummary?.activeProfilesByMode.config.codex ??
-      profileSummary?.activeProfilesByMode.config["codex-app"] ??
-      null;
-    if (!activeProfileId) {
-      return false;
-    }
-    const activeProfile = profileSummary?.drafts.find((profile) => profile.id === activeProfileId);
-    return activeProfile?.provider.trim() === "official";
-  }
-
   function protocolOptionsFor(toolId: string, mode: ProviderApplyMode): readonly ProtocolOption[] {
     if (mode === "gateway") {
       return protocolOptions;
@@ -1693,32 +1653,14 @@
   }
 
   function normalizeBaseUrl(value: string) {
-    const trimmed = value.trim();
-    if (/^https?:/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
-      return trimmed;
-    }
-    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
-      return trimmed;
-    }
-    return `https://${trimmed}`;
-  }
-
-  function shouldAutoPrefixBaseUrlInput(value: string) {
-    const trimmed = value.trim();
-    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
-      return false;
-    }
-    if (/^[a-z][a-z\d+\-.]*:\/?$/i.test(trimmed)) {
-      return false;
-    }
-    return trimmed.includes(".") || trimmed.includes(":") || trimmed.toLowerCase() === "localhost";
+    return value.trim();
   }
 
   function handleEditBaseUrlInput(event: Event) {
     const value = (event.currentTarget as HTMLInputElement).value;
     editForm = {
       ...editForm,
-      baseUrl: shouldAutoPrefixBaseUrlInput(value) ? normalizeBaseUrl(value) : value
+      baseUrl: value
     };
   }
 
@@ -1726,7 +1668,7 @@
     const value = (event.currentTarget as HTMLInputElement).value;
     usageForm = {
       ...usageForm,
-      baseUrl: shouldAutoPrefixBaseUrlInput(value) ? normalizeBaseUrl(value) : value
+      baseUrl: value
     };
   }
 
@@ -1754,7 +1696,7 @@
       return "wizard.error.baseUrlWhitespace";
     }
     if (!/^https?:\/\//i.test(trimmed)) {
-      return "wizard.error.baseUrlScheme";
+        return "wizard.error.baseUrlScheme";
     }
     try {
       const parsed = new URL(trimmed);
@@ -2371,18 +2313,6 @@
             </section>
           {/if}
 
-          {#if pendingApplyDisplacesCodexOAuth}
-            <section class={profileDiffPanelRecipe({ tone: "warning" })}>
-              <div class={profileDiffHeadingRecipe()}>
-                <div>
-                  <strong>{$t("profiles.codexOAuthConflictTitle")}</strong>
-                  <span>{$t("profiles.codexOAuthApiDisplacesOAuth")}</span>
-                </div>
-                <StatusPill status={codexAuthConflictConfirmed ? "ok" : "warning"} label={codexAuthConflictConfirmed ? $t("profiles.codexOAuthConflictConfirmed") : $t("profiles.codexOAuthConflictNeedsConfirm")} />
-              </div>
-            </section>
-          {/if}
-
           {#if selectedModePreview?.blockedReason || canSyncClaudeVsCodePlugin}
           <section class={profileDiffPanelRecipe()}>
             {#if selectedModePreview?.blockedReason}
@@ -2462,7 +2392,7 @@
                   {$t("common.loading")}
                 {:else}
                   <AppIcon name="apply" size={16} />
-                  {$t(pendingApplyDisplacesCodexOAuth && !codexAuthConflictConfirmed ? "profiles.confirmAndApplyRestart" : "profiles.applyAndRestart")}
+                  {$t("profiles.applyAndRestart")}
                 {/if}
               </button>
             {/if}
@@ -2476,7 +2406,7 @@
                 {$t("common.loading")}
               {:else}
                 <AppIcon name="apply" size={16} />
-                {$t(pendingApplyDisplacesCodexOAuth && !codexAuthConflictConfirmed ? "profiles.confirmAndApply" : selectedApplyMode === "gateway" ? "profiles.applyGatewayMode" : "profiles.applyConfigMode")}
+                {$t(selectedApplyMode === "gateway" ? "profiles.applyGatewayMode" : "profiles.applyConfigMode")}
               {/if}
             </button>
           {/if}

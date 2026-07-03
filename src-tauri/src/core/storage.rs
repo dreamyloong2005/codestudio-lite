@@ -21,7 +21,6 @@ pub struct StoredAppConfig {
     pub redact_secrets: bool,
     pub confirm_install_commands: bool,
     pub confirm_config_writes: bool,
-    pub preserve_codex_official_auth: bool,
 }
 
 pub fn ensure_initialized() -> Result<(), String> {
@@ -47,8 +46,6 @@ pub fn load_app_config() -> Result<StoredAppConfig, String> {
         confirm_install_commands: setting_bool(&conn, "security.confirm_install_commands")?
             .unwrap_or(true),
         confirm_config_writes: setting_bool(&conn, "security.confirm_config_writes")?
-            .unwrap_or(true),
-        preserve_codex_official_auth: setting_bool(&conn, "security.preserve_codex_official_auth")?
             .unwrap_or(true),
     })
 }
@@ -84,11 +81,6 @@ pub fn save_app_config(config: &StoredAppConfig) -> Result<(), String> {
         &tx,
         "security.confirm_config_writes",
         bool_value(config.confirm_config_writes),
-    )?;
-    save_setting(
-        &tx,
-        "security.preserve_codex_official_auth",
-        bool_value(config.preserve_codex_official_auth),
     )?;
     replace_active_profiles_with_conn(&tx, &config.active_profiles_by_mode)?;
     tx.commit().map_err(|err| err.to_string())

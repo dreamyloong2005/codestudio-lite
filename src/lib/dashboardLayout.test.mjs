@@ -188,6 +188,21 @@ test("dashboard refresh button follows external detection refresh state", () => 
   assert.match(svelte, /onRefresh\(\{ quiet: false, scheduleFollowup: true, showRefreshIndicator: true \}\)/);
 });
 
+test("dashboard foreground refresh waits for update checks while background refresh stays fast", () => {
+  const app = read("src/App.svelte");
+
+  assert.match(app, /const waitForUpdates = options\.waitForUpdates \?\? showRefreshIndicator/);
+  assert.match(app, /detectEnvironment\(\{ waitForUpdates \}\)/);
+  assert.match(
+    app,
+    /refreshDashboard\(\{ quiet: true, scheduleFollowup: true, showRefreshIndicator: false, waitForUpdates: false \}\)/
+  );
+  assert.match(
+    app,
+    /refreshDashboard\(\{ quiet: true, scheduleFollowup: true, showRefreshIndicator: true, waitForUpdates: true \}\)/
+  );
+});
+
 test("dashboard refresh reuses unchanged detection snapshots to avoid end-of-refresh jank", () => {
   const app = read("src/App.svelte");
 

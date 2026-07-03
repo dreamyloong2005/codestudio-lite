@@ -151,13 +151,18 @@
     backgroundDetectionTimers = [
       window.setTimeout(() => {
         if (route === "dashboard") {
-          void refreshDashboard({ quiet: true, scheduleFollowup: true });
+          void refreshDashboard({ quiet: true, scheduleFollowup: true, showRefreshIndicator: false, waitForUpdates: false });
         }
       }, dashboardRefreshDelayMs())
     ];
   }
 
-  type RefreshDashboardOptions = { quiet?: boolean; scheduleFollowup?: boolean; showRefreshIndicator?: boolean };
+  type RefreshDashboardOptions = {
+    quiet?: boolean;
+    scheduleFollowup?: boolean;
+    showRefreshIndicator?: boolean;
+    waitForUpdates?: boolean;
+  };
 
   function detectionSnapshotUiPayload(value: DetectionSnapshot) {
     const { generatedAt, source, ...stableSnapshot } = value;
@@ -207,6 +212,7 @@
     const quiet = options.quiet ?? false;
     const scheduleFollowup = options.scheduleFollowup ?? true;
     const showRefreshIndicator = options.showRefreshIndicator ?? route === "dashboard";
+    const waitForUpdates = options.waitForUpdates ?? showRefreshIndicator;
     if (scheduleFollowup) {
       clearBackgroundDetection();
     }
@@ -223,7 +229,7 @@
     try {
       const [nextProfileSummary, nextSnapshot, nextGatewayStatus] = await Promise.all([
         ensureAppDirs(),
-        detectEnvironment(),
+        detectEnvironment({ waitForUpdates }),
         loadGatewayStatus()
       ]);
       if (runId !== dashboardRefreshRunId) {
@@ -292,7 +298,8 @@
     await refreshDashboard({
       quiet: snapshot !== null,
       scheduleFollowup: true,
-      showRefreshIndicator
+      showRefreshIndicator,
+      waitForUpdates: showRefreshIndicator
     });
   }
 
@@ -343,7 +350,7 @@
     // Profile changes only need the lightweight summary/gateway refresh in the
     // foreground. The heavier environment scan stays in the background.
     await refreshProfileAndGatewayOnly();
-    void refreshDashboard({ quiet: true, scheduleFollowup: false });
+    void refreshDashboard({ quiet: true, scheduleFollowup: false, showRefreshIndicator: false, waitForUpdates: false });
   }
 
   async function refreshCurrentRouteAfterSwitch(currentRoute: Route) {
@@ -357,7 +364,7 @@
         await refreshProfileAndGatewayOnly();
         startBackgroundDetection();
       } else {
-        await refreshDashboard({ quiet: true, scheduleFollowup: true, showRefreshIndicator: true });
+        await refreshDashboard({ quiet: true, scheduleFollowup: true, showRefreshIndicator: true, waitForUpdates: true });
       }
     } else if (currentRoute === "codexClient") {
       await ensureCodexClientLoaded();

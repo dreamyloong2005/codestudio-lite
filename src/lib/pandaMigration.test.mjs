@@ -918,7 +918,6 @@ test("Settings route surfaces use Panda recipes", () => {
   assert.match(route, /import \{ cx \} from "\.\.\/\.\.\/styled-system\/css";/);
   assert.match(route, /settingsListRecipe/);
   assert.match(route, /settingsRowRecipe/);
-  assert.match(route, /settingsRowValueRecipe/);
   assert.match(route, /settingsAboutPanelRecipe/);
   assert.match(route, /settingsAboutContentRecipe/);
   assert.match(route, /settingsAboutSummaryRecipe/);

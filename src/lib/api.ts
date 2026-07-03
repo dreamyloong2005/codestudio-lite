@@ -109,9 +109,13 @@ export async function ensureAppDirs(): Promise<ProfileSummary> {
   return mockProfiles();
 }
 
-export async function detectEnvironment(): Promise<DetectionSnapshot> {
+type DetectEnvironmentOptions = {
+  waitForUpdates?: boolean;
+};
+
+export async function detectEnvironment(options: DetectEnvironmentOptions = {}): Promise<DetectionSnapshot> {
   if (isTauri()) {
-    return invoke("detect_environment");
+    return invoke("detect_environment", { request: options });
   }
   const snapshot = mockDetection();
   writeMockDetectionCache(snapshot);
@@ -706,9 +710,7 @@ export async function updateAppSettings(request: UpdateAppSettingsRequest): Prom
   mockSettings = {
     ...mockSettings,
     theme: request.theme ?? mockSettings.theme,
-    language: request.language ?? mockSettings.language,
-    preserveCodexOfficialAuth:
-      request.preserveCodexOfficialAuth ?? mockSettings.preserveCodexOfficialAuth
+    language: request.language ?? mockSettings.language
   };
   mockActivity = [
     {
@@ -1673,8 +1675,7 @@ let mockSettings: AppSettings = {
   backupBeforeWrite: true,
   redactSecrets: true,
   confirmInstallCommands: true,
-  confirmConfigWrites: true,
-  preserveCodexOfficialAuth: true
+  confirmConfigWrites: true
 };
 
 let mockGatewayRunning = false;
@@ -3246,13 +3247,6 @@ function mockNativeConfigPreview(
         before: null,
         after: "false",
         detail: "Disables Codex official OpenAI auth for this custom upstream entry."
-      },
-      {
-        key: `model_providers.${providerId}.experimental_bearer_token`,
-        action: "add",
-        before: null,
-        after: profile.authRef ? "keychain:****" : "(missing keychain secret)",
-        detail: "Stores the selected Provider API key from the system keychain."
       }
     ];
     if (profile.model) {
@@ -3280,7 +3274,6 @@ function mockNativeConfigPreview(
       changes: directChanges,
       warnings: [
         "Config profiles write Codex's provider entry directly to the selected upstream Provider.",
-        "The preview masks the Provider API key. The actual key is loaded from the system keychain during apply.",
         "Changing Codex config usually requires restarting Codex or opening a new Codex session."
       ]
     });
@@ -3319,21 +3312,13 @@ function mockNativeConfigPreview(
         key: "model_providers.custom.requires_openai_auth",
         action: "add",
         before: null,
-        after: "true",
-        detail: "Keeps the official Codex login path available while routing model requests through the Local Gateway."
-      },
-      {
-        key: "model_providers.custom.experimental_bearer_token",
-        action: "add",
-        before: null,
-        after: "codestudio-local-****7f3a2c",
-        detail: "Stores only the local CodeStudio token, not the real upstream Provider API key."
+        after: "false",
+        detail: "Disables Codex official OpenAI auth for the Local Gateway provider entry."
       }
     ],
     warnings: [
       "Gateway profiles are a one-time relay injection target, not a direct Provider switch.",
       "Switching profiles later changes only the Gateway active profile for this tool.",
-      "The preview masks the local CodeStudio token. Real Provider API keys are never written to Codex config.",
       "Codex official login is still required for the desktop app; the Local Gateway only takes over model requests.",
       "If Codex is already running, restart Codex or open a new Codex session after bootstrap so it reloads config.toml."
     ]
@@ -4498,10 +4483,31 @@ function mockModePreviews(
 
 function validateBaseUrlCheck(baseUrl: string): TestProfileConnectionResult["checks"][number] {
   const trimmed = baseUrl.trim();
+  if (!/^https?:\/\//i.test(trimmed)) {
+    return {
+      id: "base-url",
+      label: "Base URL",
+      status: "error",
+      detail: "Base URL must start with http:// or https://"
+    };
+  }
   try {
     const parsed = new URL(trimmed);
-    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.host) {
-      throw new Error("invalid");
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return {
+        id: "base-url",
+        label: "Base URL",
+        status: "error",
+        detail: "Base URL must start with http:// or https://"
+      };
+    }
+    if (!parsed.hostname) {
+      return {
+        id: "base-url",
+        label: "Base URL",
+        status: "error",
+        detail: "Base URL must include a host."
+      };
     }
     return {
       id: "base-url",
@@ -4514,7 +4520,7 @@ function validateBaseUrlCheck(baseUrl: string): TestProfileConnectionResult["che
       id: "base-url",
       label: "Base URL",
       status: "error",
-      detail: "Base URL must start with http:// or https:// and include a host."
+      detail: "Base URL is not a valid URL."
     };
   }
 }

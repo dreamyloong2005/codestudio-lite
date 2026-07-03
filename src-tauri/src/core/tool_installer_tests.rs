@@ -131,6 +131,16 @@ fn official_script_actions_render_expected_commands() {
 }
 
 #[test]
+fn hermes_update_uses_cli_update_command_not_installer_script() {
+    let definition = install_definition("hermes").expect("definition");
+
+    assert_eq!(
+        update_command_preview_for_tool("hermes", &definition.action),
+        "hermes update"
+    );
+}
+
+#[test]
 fn claude_desktop_macos_uses_official_dmg_not_homebrew_cask() {
     let source = include_str!("tool_installer.rs");
     let registry = include_str!("tool_registry.rs");

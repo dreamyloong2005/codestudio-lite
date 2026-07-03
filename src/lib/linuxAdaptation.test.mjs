@@ -37,6 +37,5 @@ test("Linux install routes use native shell-friendly installers", () => {
   assert.match(installer, /InstallAction::ShellScript/);
   assert.match(installer, /"Hermes official install script"/);
   assert.match(installer, /"curl -fsSL https:\/\/hermes-agent\.nousresearch\.com\/install\.sh \| bash"/);
-  assert.match(detector, /"hermes" if cfg!\(target_os = "linux"\)/);
-  assert.match(detector, /"bash -lc 'curl -fsSL https:\/\/hermes-agent\.nousresearch\.com\/install\.sh \| bash'"/);
+  assert.match(detector, /"hermes" => Some\("hermes update"\.to_string\(\)\)/);
 });

@@ -102,8 +102,6 @@ struct SecurityConfig {
     redact_secrets: bool,
     confirm_install_commands: bool,
     confirm_config_writes: bool,
-    #[serde(default = "default_true")]
-    preserve_codex_official_auth: bool,
 }
 
 struct ProfileWritePlan {
@@ -202,10 +200,6 @@ const BUILTIN_OFFICIAL_PROFILES: [(&str, &str, &str); 8] = [
     ),
 ];
 
-fn default_true() -> bool {
-    true
-}
-
 pub fn ensure_app_dirs() -> Result<(), String> {
     let paths = app_paths().map_err(|err| err.to_string())?;
     ensure_dirs(&paths).map_err(|err| err.to_string())?;
@@ -284,16 +278,13 @@ pub fn update_app_settings(request: UpdateAppSettingsRequest) -> Result<AppSetti
         config.ui.language = normalize_language(&language)?;
         config.ui.language_set_by_user = true;
     }
-    if let Some(preserve_codex_official_auth) = request.preserve_codex_official_auth {
-        config.security.preserve_codex_official_auth = preserve_codex_official_auth;
-    }
 
     write_app_config(&config)?;
     activity_log::append(
         Severity::Info,
         format!(
-            "Updated application settings: language={}, theme={}, preserve_codex_official_auth={}.",
-            config.ui.language, config.ui.theme, config.security.preserve_codex_official_auth
+            "Updated application settings: language={}, theme={}.",
+            config.ui.language, config.ui.theme
         ),
     )?;
 
@@ -986,11 +977,7 @@ fn native_config_content_for_preview(
                 if provider_is_official(&profile.provider) {
                     codex_official_config_content(current, profile)
                 } else {
-                    codex_direct_config_content_with_api_key(
-                        current,
-                        profile,
-                        secret_preview(profile),
-                    )
+                    codex_direct_config_content(current, profile)
                 }
             }
             "claude" => {
@@ -2748,15 +2735,6 @@ fn detect_codex_native_profile_with_auth(
     if looks_like_local_gateway_url(base_url) {
         return None;
     }
-    let config_api_key = toml_lookup(
-        value,
-        &format!("model_providers.{provider_id}.experimental_bearer_token"),
-    )
-    .and_then(|item| item.as_str())
-    .map(str::trim)
-    .filter(|item| !item.is_empty())
-    .filter(|item| !looks_like_local_gateway_token(item))
-    .map(ToString::to_string);
     let requires_openai_auth = toml_lookup(
         value,
         &format!("model_providers.{provider_id}.requires_openai_auth"),
@@ -2766,7 +2744,7 @@ fn detect_codex_native_profile_with_auth(
     let auth_api_key = auth
         .filter(|_| requires_openai_auth)
         .and_then(codex_auth_api_key_from_value);
-    let api_key = config_api_key.or(auth_api_key)?;
+    let api_key = auth_api_key?;
     let wire_api = toml_lookup(value, &format!("model_providers.{provider_id}.wire_api"))
         .and_then(|item| item.as_str())
         .unwrap_or("responses");
@@ -3107,7 +3085,7 @@ fn read_json_string_from_file(path: &Path, keys: &[&str]) -> Option<String> {
 
 fn codex_direct_config_matches_profile(
     value: &toml::Value,
-    auth: Option<&serde_json::Value>,
+    _auth: Option<&serde_json::Value>,
     profile: &ProfileDraft,
 ) -> bool {
     if !is_codex_family_app(&profile.app) || profile.mode != ProviderApplyMode::Config {
@@ -3129,25 +3107,6 @@ fn codex_direct_config_matches_profile(
     let Ok(wire_api) = codex_wire_api_for_protocol(&profile.protocol) else {
         return false;
     };
-    let config_token_matches = toml_lookup(
-        value,
-        &format!("model_providers.{provider_id}.experimental_bearer_token"),
-    )
-    .and_then(|item| item.as_str())
-    .map(|token| profile_config_token_is_present(profile, token))
-    .unwrap_or(false);
-    let requires_openai_auth = toml_lookup(
-        value,
-        &format!("model_providers.{provider_id}.requires_openai_auth"),
-    )
-    .and_then(|item| item.as_bool())
-        == Some(true);
-    let auth_token_matches = auth
-        .filter(|_| requires_openai_auth)
-        .and_then(codex_auth_api_key_from_value)
-        .map(|token| profile_config_token_is_present(profile, &token))
-        .unwrap_or(false);
-    let token_matches = config_token_matches || auth_token_matches;
 
     read_toml_string(value, "model_provider").as_deref() == Some(provider_id.as_str())
         && model_matches
@@ -3163,7 +3122,6 @@ fn codex_direct_config_matches_profile(
         )
         .and_then(|item| item.as_bool())
         .is_some()
-        && token_matches
 }
 
 fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileDraft) -> bool {
@@ -3176,16 +3134,12 @@ fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileD
     } else {
         read_toml_string(value, "model").as_deref() == Some(profile.model.trim())
     };
-    let token_is_absent = toml_lookup(value, "model_providers.openai.experimental_bearer_token")
-        .and_then(|item| item.as_str())
-        .map(|token| token.trim().is_empty())
-        .unwrap_or(true);
     let base_url_is_absent = toml_lookup(value, "model_providers.openai.base_url")
         .and_then(|item| item.as_str())
         .map(|base_url| base_url.trim().is_empty())
         .unwrap_or(true);
 
-    provider_matches && model_matches && token_is_absent && base_url_is_absent
+    provider_matches && model_matches && base_url_is_absent
 }
 
 fn codex_active_provider_id_for_profile(
@@ -3798,7 +3752,6 @@ fn read_app_config() -> Result<AppConfig, String> {
             redact_secrets: stored.redact_secrets,
             confirm_install_commands: stored.confirm_install_commands,
             confirm_config_writes: stored.confirm_config_writes,
-            preserve_codex_official_auth: stored.preserve_codex_official_auth,
         },
     })
 }
@@ -3813,7 +3766,6 @@ fn write_app_config(config: &AppConfig) -> Result<(), String> {
         redact_secrets: config.security.redact_secrets,
         confirm_install_commands: config.security.confirm_install_commands,
         confirm_config_writes: config.security.confirm_config_writes,
-        preserve_codex_official_auth: config.security.preserve_codex_official_auth,
     })
 }
 
@@ -3825,7 +3777,6 @@ fn settings_from_config(config: &AppConfig) -> AppSettings {
         redact_secrets: config.security.redact_secrets,
         confirm_install_commands: config.security.confirm_install_commands,
         confirm_config_writes: config.security.confirm_config_writes,
-        preserve_codex_official_auth: config.security.preserve_codex_official_auth,
     }
 }
 
@@ -4327,18 +4278,15 @@ fn normalize_provider_token(value: &str) -> Result<String, String> {
 
 fn validate_base_url(value: &str) -> Result<String, String> {
     let trimmed = normalize_required("Base URL", value)?;
-    let Some((scheme, rest)) = trimmed.split_once("://") else {
-        return Err("Base URL must start with http:// or https://".to_string());
-    };
-    if !matches!(scheme, "http" | "https") {
-        return Err("Base URL must start with http:// or https://".to_string());
-    }
     if trimmed.chars().any(char::is_whitespace) {
         return Err("Base URL cannot contain whitespace".to_string());
     }
-
-    let host = rest.split('/').next().unwrap_or_default();
-    if host.is_empty() || host.starts_with('.') {
+    let parsed = url::Url::parse(&trimmed)
+        .map_err(|_| "Base URL must start with http:// or https://".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Base URL must start with http:// or https://".to_string());
+    }
+    if parsed.host_str().unwrap_or_default().is_empty() {
         return Err("Base URL must include a host".to_string());
     }
 
@@ -5188,12 +5136,8 @@ fn codex_gateway_config_content(current: &str, profile: &ProfileDraft) -> Result
     document["model_providers"][&provider_id]["name"] = toml_edit::value(provider_name);
     document["model_providers"][&provider_id]["wire_api"] = toml_edit::value("responses");
     document["model_providers"][&provider_id]["base_url"] = toml_edit::value(client.base_url);
-    document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(true);
-    document["model_providers"][&provider_id]["experimental_bearer_token"] =
-        toml_edit::value(client.token);
-    if codex_official_auth_preservation_enabled() {
-        repair_codex_preserved_auth_config(&mut document);
-    }
+    document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(false);
+    repair_codex_preserved_auth_config(&mut document);
 
     let updated = document.to_string();
     toml::from_str::<toml::Value>(&updated)
@@ -5202,18 +5146,6 @@ fn codex_gateway_config_content(current: &str, profile: &ProfileDraft) -> Result
 }
 
 fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<String, String> {
-    if provider_is_official(&profile.provider) {
-        return codex_official_config_content(current, profile);
-    }
-    let api_key = load_provider_api_key_for_direct_config(profile)?;
-    codex_direct_config_content_with_api_key(current, profile, &api_key)
-}
-
-fn codex_direct_config_content_with_api_key(
-    current: &str,
-    profile: &ProfileDraft,
-    api_key: &str,
-) -> Result<String, String> {
     if provider_is_official(&profile.provider) {
         return codex_official_config_content(current, profile);
     }
@@ -5240,22 +5172,12 @@ fn codex_direct_config_content_with_api_key(
     document["model_providers"][&provider_id]["base_url"] =
         toml_edit::value(profile.base_url.trim().to_string());
     document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(false);
-    document["model_providers"][&provider_id]["experimental_bearer_token"] =
-        toml_edit::value(api_key.to_string());
-    if codex_official_auth_preservation_enabled() {
-        repair_codex_preserved_auth_config(&mut document);
-    }
+    repair_codex_preserved_auth_config(&mut document);
 
     let updated = document.to_string();
     toml::from_str::<toml::Value>(&updated)
         .map_err(|err| format!("Generated Codex config is invalid: {err}"))?;
     Ok(updated)
-}
-
-fn codex_official_auth_preservation_enabled() -> bool {
-    read_app_config()
-        .map(|config| config.security.preserve_codex_official_auth)
-        .unwrap_or(true)
 }
 
 fn normalize_codex_model_providers_table(document: &mut toml_edit::DocumentMut) {
@@ -5315,7 +5237,6 @@ fn remove_empty_codex_model_providers_table(document: &mut toml_edit::DocumentMu
 }
 
 fn repair_codex_preserved_auth_config(document: &mut toml_edit::DocumentMut) {
-    document.as_table_mut().remove("experimental_bearer_token");
     remove_codex_legacy_key_from_table(document, "auth", &["OPENAI_API_KEY", "api_key"]);
     remove_codex_legacy_key_from_table(document, "env", &["OPENAI_API_KEY"]);
 }
@@ -6281,13 +6202,7 @@ fn verify_codex_native_config(path: &Path, profile: &ProfileDraft) -> Result<boo
                 &format!("model_providers.{provider_id}.requires_openai_auth"),
             )
             .and_then(|item| item.as_bool())
-                == Some(true)
-            && toml_lookup(
-                &value,
-                &format!("model_providers.{provider_id}.experimental_bearer_token"),
-            )
-            .and_then(|item| item.as_str())
-                == Some(client.token.as_str()),
+                == Some(false),
     )
 }
 
@@ -6331,14 +6246,7 @@ fn verify_codex_direct_config(path: &Path, profile: &ProfileDraft) -> Result<boo
                 &format!("model_providers.{provider_id}.requires_openai_auth"),
             )
             .and_then(|item| item.as_bool())
-                == Some(false)
-            && toml_lookup(
-                &value,
-                &format!("model_providers.{provider_id}.experimental_bearer_token"),
-            )
-            .and_then(|item| item.as_str())
-            .map(|token| !token.trim().is_empty())
-                == Some(true),
+                == Some(false),
     )
 }
 
@@ -7219,9 +7127,7 @@ fn build_native_config_preview(
                         "Sets Codex to the selected official model.",
                     ));
                 }
-                if codex_official_auth_preservation_enabled() {
-                    changes.extend(codex_preserved_auth_repair_diff_lines(&value));
-                }
+                changes.extend(codex_preserved_auth_repair_diff_lines(&value));
                 changes
             } else {
                 let provider_id = codex_provider_id_for_profile(profile);
@@ -7258,16 +7164,8 @@ fn build_native_config_preview(
                         "false",
                         "Disables Codex official OpenAI auth for this custom upstream entry.",
                     ),
-                    diff_line(
-                        &value,
-                        &format!("model_providers.{provider_id}.experimental_bearer_token"),
-                        secret_preview(profile),
-                        "Stores the selected Provider API key from the system keychain.",
-                    ),
                 ];
-                if codex_official_auth_preservation_enabled() {
-                    changes.extend(codex_preserved_auth_repair_diff_lines(&value));
-                }
+                changes.extend(codex_preserved_auth_repair_diff_lines(&value));
                 if profile.model.trim().is_empty() {
                     changes.push(diff_remove_line(
                         &value,
@@ -7322,19 +7220,11 @@ fn build_native_config_preview(
                 diff_line(
                     &value,
                     &format!("model_providers.{provider_id}.requires_openai_auth"),
-                    "true",
-                    "Keeps the official Codex login path available while routing model requests through the Local Gateway.",
-                ),
-                diff_line(
-                    &value,
-                    &format!("model_providers.{provider_id}.experimental_bearer_token"),
-                    &client.token_preview,
-                    "Stores only the local CodeStudio token, not the real upstream Provider API key.",
+                    "false",
+                    "Disables Codex official OpenAI auth for the Local Gateway provider entry.",
                 ),
             ];
-            if codex_official_auth_preservation_enabled() {
-                changes.extend(codex_preserved_auth_repair_diff_lines(&value));
-            }
+            changes.extend(codex_preserved_auth_repair_diff_lines(&value));
             changes
         }
     };
@@ -8521,11 +8411,6 @@ fn diff_remove_line(root: &toml::Value, dotted_key: &str, detail: &str) -> Nativ
 
 fn codex_preserved_auth_repair_diff_lines(root: &toml::Value) -> Vec<NativeConfigDiffLine> {
     vec![
-        diff_remove_line(
-            root,
-            "experimental_bearer_token",
-            "Keeps Codex API tokens scoped to the active provider so auth.json can preserve the official login.",
-        ),
         diff_remove_line(
             root,
             "auth.OPENAI_API_KEY",

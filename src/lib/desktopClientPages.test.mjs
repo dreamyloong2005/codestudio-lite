@@ -50,7 +50,7 @@ test("route switches refresh the active CodeStudio Lite page", () => {
   assert.match(app, /route !== lastRouteRefreshRoute[\s\S]*refreshCurrentRouteAfterSwitch\(route\)/);
   assert.match(
     app,
-    /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: true, showRefreshIndicator: true \}\)/
+    /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: true, showRefreshIndicator: true, waitForUpdates: true \}\)/
   );
   assert.match(app, /currentRoute === "codexClient"[\s\S]*ensureCodexClientLoaded\(\)/);
   assert.match(app, /currentRoute === "claudeDesktop"[\s\S]*ensureClaudeDesktopLoaded\(\)/);

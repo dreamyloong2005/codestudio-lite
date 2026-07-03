@@ -39,6 +39,7 @@ const NPM_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const WINGET_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CODEX_CLIENT_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
+const FOREGROUND_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(6000);
 const CLAUDE_DESKTOP_INSTALL_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CLAUDE_DESKTOP_LATEST_WINDOWS_URL: &str =
@@ -62,7 +63,36 @@ pub fn load_cached_detection() -> Option<DetectionSnapshot> {
     storage::load_detection_cache().ok().flatten()
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DetectionOptions {
+    pub wait_for_updates: bool,
+}
+
+impl DetectionOptions {
+    fn update_wait_budget(self, default_budget: Duration) -> Duration {
+        if self.wait_for_updates {
+            FOREGROUND_UPDATE_WAIT_BUDGET
+        } else {
+            default_budget
+        }
+    }
+}
+
+impl Default for DetectionOptions {
+    fn default() -> Self {
+        Self {
+            wait_for_updates: false,
+        }
+    }
+}
+
 pub fn detect_environment() -> Result<DetectionSnapshot, String> {
+    detect_environment_with_options(DetectionOptions::default())
+}
+
+pub fn detect_environment_with_options(
+    options: DetectionOptions,
+) -> Result<DetectionSnapshot, String> {
     profile::ensure_app_dirs()?;
     let paths = app_paths().map_err(|err| err.to_string())?;
     let mut tools = detect_tools(ai_tools_for_environment(resolve_command("code").is_some()));
@@ -70,7 +100,7 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
         tools.push(codex_client::tool_status());
     }
     let mut system = detect_tools(system_tools());
-    annotate_update_status(&mut tools, &mut system);
+    annotate_update_status(&mut tools, &mut system, options);
     let profile_summary = profile::load_profile_summary()?;
     let active_profile = profile_summary.active_profile.clone();
     let active_profile_name = profile_summary.active_profile_name.clone();
@@ -168,7 +198,9 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
 /// fast scan's near-zero wait budget.
 pub fn detect_environment_fresh() -> Result<DetectionSnapshot, String> {
     invalidate_install_cache();
-    let mut snapshot = detect_environment()?;
+    let mut snapshot = detect_environment_with_options(DetectionOptions {
+        wait_for_updates: true,
+    })?;
     surface_claude_desktop_latest(&mut snapshot, Duration::from_millis(3000));
     surface_codex_client_latest(&mut snapshot, Duration::from_millis(3000));
     // detect_environment already stored the fast snapshot; re-store so the
@@ -378,6 +410,8 @@ fn detect_tool(definition: &ToolDefinition) -> ToolStatus {
         }
         _ => Some("Command not found".to_string()),
     };
+    let hermes_update_available = definition.id == "hermes"
+        && matches!(version_check.as_ref(), Some(VersionCheck::Found(version)) if hermes_version_reports_update_available(version));
 
     ToolStatus {
         id: definition.id.to_string(),
@@ -386,8 +420,8 @@ fn detect_tool(definition: &ToolDefinition) -> ToolStatus {
         command: definition.command.to_string(),
         path_repair: env_health::path_repair_hint(definition),
         version,
-        latest_version: None,
-        update_available: false,
+        latest_version: hermes_update_available.then(|| "latest".to_string()),
+        update_available: hermes_update_available,
         update_command: update_command_for_tool(definition.id),
         install_state,
         config_state,
@@ -1097,11 +1131,20 @@ static WINGET_UPDATE_CACHE: OnceLock<Mutex<WingetUpdateCache>> = OnceLock::new()
 static CLAUDE_DESKTOP_UPDATE_CACHE: OnceLock<Mutex<ClaudeDesktopUpdateCache>> = OnceLock::new();
 static CLAUDE_DESKTOP_INSTALL_CACHE: OnceLock<Mutex<ClaudeDesktopInstallCache>> = OnceLock::new();
 
-fn annotate_update_status(tools: &mut [ToolStatus], system: &mut [ToolStatus]) {
-    let npm_outdated = cached_npm_global_outdated(NPM_UPDATE_WAIT_BUDGET);
-    let winget_outdated = cached_winget_outdated(WINGET_UPDATE_WAIT_BUDGET);
-    let claude_desktop_latest = cached_claude_desktop_latest(CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET);
-    let codex_client_latest = codex_client::latest_version_cached(CODEX_CLIENT_UPDATE_WAIT_BUDGET);
+fn annotate_update_status(
+    tools: &mut [ToolStatus],
+    system: &mut [ToolStatus],
+    options: DetectionOptions,
+) {
+    let npm_outdated =
+        cached_npm_global_outdated(options.update_wait_budget(NPM_UPDATE_WAIT_BUDGET));
+    let winget_outdated =
+        cached_winget_outdated(options.update_wait_budget(WINGET_UPDATE_WAIT_BUDGET));
+    let claude_desktop_latest =
+        cached_claude_desktop_latest(options.update_wait_budget(CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET));
+    let codex_client_latest = codex_client::latest_version_cached(
+        options.update_wait_budget(CODEX_CLIENT_UPDATE_WAIT_BUDGET),
+    );
     for tool in tools.iter_mut().chain(system.iter_mut()) {
         tool.update_command = update_command_for_tool(&tool.id);
         // Surface the latest Claude Desktop version even when it is not
@@ -1128,6 +1171,21 @@ fn annotate_update_status(tools: &mut [ToolStatus], system: &mut [ToolStatus]) {
             }
         }
 
+        if tool.install_state != InstallState::Installed {
+            continue;
+        }
+    }
+
+    apply_package_update_status(tools, system, &npm_outdated, &winget_outdated);
+}
+
+fn apply_package_update_status(
+    tools: &mut [ToolStatus],
+    system: &mut [ToolStatus],
+    npm_outdated: &HashMap<String, NpmOutdatedPackage>,
+    winget_outdated: &HashMap<String, String>,
+) {
+    for tool in tools.iter_mut().chain(system.iter_mut()) {
         if tool.install_state != InstallState::Installed {
             continue;
         }
@@ -1250,6 +1308,12 @@ fn apply_latest_version(tool: &mut ToolStatus, latest: &str) {
         .as_deref()
         .map(|current| compare_versions(current, latest) == Ordering::Less)
         .unwrap_or(true);
+}
+
+fn hermes_version_reports_update_available(version: &str) -> bool {
+    version
+        .lines()
+        .any(|line| line.to_ascii_lowercase().contains("update available"))
 }
 
 fn normalized_version_label(value: &str) -> Option<String> {
@@ -1453,18 +1517,7 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
         }
         "opencode" => Some(npm_global_update_command("opencode-ai")),
         "openclaw" => Some(npm_global_update_command("openclaw")),
-        "hermes" if cfg!(target_os = "macos") => Some(
-            "bash -lc 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash'"
-                .to_string(),
-        ),
-        "hermes" if cfg!(target_os = "linux") => Some(
-            "bash -lc 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash'"
-                .to_string(),
-        ),
-        "hermes" => Some(
-            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\""
-                .to_string(),
-        ),
+        "hermes" => Some("hermes update".to_string()),
         "node" if cfg!(target_os = "macos") => Some(
             r#"bash -lc 'set -e; tmp="$(mktemp -d)"; trap '"'"'rm -rf "$tmp"'"'"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"'"'"lts":"[^"]*"'"'"' | sed -E '"'"'s/.*"version":"([^"]+)".*/\1/'"'"')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /'"#.to_string(),
         ),
@@ -2201,6 +2254,67 @@ mod tests {
         assert_eq!(tools[0].latest_version.as_deref(), Some("0.10.0"));
         // Not installed: latest is surfaced for display, update_available stays off.
         assert!(!tools[0].update_available);
+    }
+
+    fn installed_tool(id: &str, version: &str) -> ToolStatus {
+        ToolStatus {
+            id: id.to_string(),
+            name: id.to_string(),
+            category: ToolCategory::AiTool,
+            command: id.to_string(),
+            path_repair: None,
+            version: Some(version.to_string()),
+            latest_version: None,
+            update_available: false,
+            update_command: None,
+            install_state: InstallState::Installed,
+            config_state: ConfigState::Configured,
+            config_path: None,
+            install_path: None,
+            install_command: None,
+            details: None,
+            install_kind: None,
+            running: false,
+        }
+    }
+
+    #[test]
+    fn npm_outdated_marks_codex_cli_and_claude_code_updates() {
+        let mut tools = vec![
+            installed_tool("codex", "0.142.2"),
+            installed_tool("claude", "2.1.195"),
+        ];
+        let npm_outdated = HashMap::from([
+            (
+                "@openai/codex".to_string(),
+                NpmOutdatedPackage {
+                    latest: "0.142.5".to_string(),
+                },
+            ),
+            (
+                "@anthropic-ai/claude-code".to_string(),
+                NpmOutdatedPackage {
+                    latest: "2.1.199".to_string(),
+                },
+            ),
+        ]);
+
+        apply_package_update_status(&mut tools, &mut [], &npm_outdated, &HashMap::new());
+
+        assert_eq!(tools[0].latest_version.as_deref(), Some("0.142.5"));
+        assert!(tools[0].update_available);
+        assert_eq!(tools[1].latest_version.as_deref(), Some("2.1.199"));
+        assert!(tools[1].update_available);
+    }
+
+    #[test]
+    fn hermes_version_output_marks_update_available() {
+        assert!(hermes_version_reports_update_available(
+            "Hermes Agent v0.16.0\nUpdate available: 2161 commits behind -- run 'hermes update'"
+        ));
+        assert!(!hermes_version_reports_update_available(
+            "Hermes Agent v0.16.0"
+        ));
     }
 
     #[test]

@@ -28,7 +28,6 @@
     settingsAboutUpdateRecipe,
     settingsListRecipe,
     settingsRowRecipe,
-    settingsRowValueRecipe,
     settingsUpdatePillRecipe,
     spinRecipe,
     topStripRecipe
@@ -36,10 +35,8 @@
 
   type UpdateStatusTone = "warn" | "bad" | "info" | "good";
 
-  let settings: AppSettings | null = null;
   let language: Locale = "en-US";
   let theme: AppSettings["theme"] = "system";
-  let preserveCodexOfficialAuth = true;
   let saving = false;
   let error: string | null = null;
   let settingsEditRevision = 0;
@@ -55,13 +52,12 @@
   async function loadSettings() {
     const loadRevision = settingsEditRevision;
     try {
-      settings = await loadAppSettings();
+      const settings = await loadAppSettings();
       if (loadRevision !== settingsEditRevision) {
         return;
       }
       language = settings.language;
       theme = settings.theme;
-      preserveCodexOfficialAuth = settings.preserveCodexOfficialAuth;
       setLocale(language);
       applyTheme(theme);
     } catch (err) {
@@ -83,21 +79,13 @@
     await saveSettings({ theme: nextTheme });
   }
 
-  async function changePreserveCodexOfficialAuth(nextValue: boolean) {
-    settingsEditRevision += 1;
-    preserveCodexOfficialAuth = nextValue;
-    await saveSettings({ preserveCodexOfficialAuth: nextValue });
-  }
-
   async function saveSettings(request: {
     language?: Locale;
     theme?: AppSettings["theme"];
-    preserveCodexOfficialAuth?: boolean;
   }) {
     saving = true;
     try {
-      settings = await updateAppSettings(request);
-      preserveCodexOfficialAuth = settings.preserveCodexOfficialAuth;
+      await updateAppSettings(request);
     } catch {
       // Settings auto-save is best-effort; keep the UI quiet on rare write failures.
     } finally {
@@ -162,17 +150,6 @@
         <option value="light">{$t("settings.theme.light")}</option>
         <option value="dark">{$t("settings.theme.dark")}</option>
       </select>
-    </label>
-    <label class={settingsRowRecipe()}>
-      <span><AppIcon name="key" size={18} /> {$t("settings.codexAuthPreservation")}</span>
-      <span class={settingsRowValueRecipe()}>
-        <input
-          type="checkbox"
-          bind:checked={preserveCodexOfficialAuth}
-          disabled={saving || settings === null}
-          on:change={(event) => changePreserveCodexOfficialAuth(event.currentTarget.checked)}
-        />
-      </span>
     </label>
   </section>
 

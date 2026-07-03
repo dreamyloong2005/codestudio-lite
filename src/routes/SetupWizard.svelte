@@ -643,30 +643,12 @@
   }
 
   function normalizeBaseUrl(value: string) {
-    const trimmed = value.trim();
-    if (/^https?:/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
-      return trimmed;
-    }
-    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
-      return trimmed;
-    }
-    return `https://${trimmed}`;
-  }
-
-  function shouldAutoPrefixBaseUrlInput(value: string) {
-    const trimmed = value.trim();
-    if (!trimmed || /^[a-z][a-z\d+\-.]*:\/\//i.test(trimmed)) {
-      return false;
-    }
-    if (/^[a-z][a-z\d+\-.]*:\/?$/i.test(trimmed)) {
-      return false;
-    }
-    return trimmed.includes(".") || trimmed.includes(":") || trimmed.toLowerCase() === "localhost";
+    return value.trim();
   }
 
   function handleBaseUrlInput(event: Event) {
     const value = (event.currentTarget as HTMLInputElement).value;
-    baseUrl = shouldAutoPrefixBaseUrlInput(value) ? normalizeBaseUrl(value) : value;
+    baseUrl = value;
   }
 
   function normalizeBaseUrlInput() {
@@ -683,7 +665,7 @@
       return "wizard.error.baseUrlWhitespace";
     }
     if (!/^https?:\/\//i.test(trimmed)) {
-      return "wizard.error.baseUrlScheme";
+        return "wizard.error.baseUrlScheme";
     }
     try {
       const parsed = new URL(trimmed);

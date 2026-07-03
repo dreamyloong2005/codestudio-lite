@@ -480,7 +480,6 @@ pub struct AppSettings {
     pub redact_secrets: bool,
     pub confirm_install_commands: bool,
     pub confirm_config_writes: bool,
-    pub preserve_codex_official_auth: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,8 +489,6 @@ pub struct UpdateAppSettingsRequest {
     pub theme: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
-    #[serde(default)]
-    pub preserve_codex_official_auth: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

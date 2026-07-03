@@ -1,11 +1,24 @@
 use crate::core::platform::package;
 use crate::core::types::{ClaudeDesktopInstallKinds, CodexClientInstallKinds, DetectionSnapshot};
 use crate::core::{codex_client, detector};
+use serde::Deserialize;
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectEnvironmentRequest {
+    wait_for_updates: Option<bool>,
+}
 
 #[tauri::command]
-pub async fn detect_environment() -> Result<DetectionSnapshot, String> {
+pub async fn detect_environment(
+    request: Option<DetectEnvironmentRequest>,
+) -> Result<DetectionSnapshot, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        detector::detect_environment().map_err(|err| err.to_string())
+        let request = request.unwrap_or_default();
+        detector::detect_environment_with_options(detector::DetectionOptions {
+            wait_for_updates: request.wait_for_updates.unwrap_or(false),
+        })
+        .map_err(|err| err.to_string())
     })
     .await
     .map_err(|err| err.to_string())?

@@ -1876,6 +1876,9 @@ fn run_update_action_for_tool(
     if tool_id == "npm" {
         return run_update_action(&InstallAction::NpmGlobal("npm"), progress);
     }
+    if tool_id == "hermes" {
+        return run_action_command("hermes", &["update"], progress);
+    }
     if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
         return run_update_action(action, progress);
     }
@@ -3706,6 +3709,9 @@ fn update_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> Str
     }
     if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
         return CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND.to_string();
+    }
+    if tool_id == "hermes" {
+        return "hermes update".to_string();
     }
     update_command_preview(action)
 }

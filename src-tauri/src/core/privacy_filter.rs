@@ -334,6 +334,7 @@ fn collect_secret_spans(text: &str, spans: &mut Vec<Span>) {
     for regex in [
         openai_secret_regex(),
         assignment_secret_regex(),
+        natural_language_secret_regex(),
         bearer_secret_regex(),
     ] {
         for item in regex.find_iter(text) {
@@ -477,6 +478,16 @@ fn assignment_secret_regex() -> &'static Regex {
     })
 }
 
+fn natural_language_secret_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b(?:api[\s_-]?key|token|secret|password|passwd|access[\s_-]?token)\b\s*(?:is|was|are|[:=])\s*["']?(?:sk-[A-Za-z0-9_\-]{3,}|[A-Za-z0-9_\-./+=]{12,})["']?"#,
+        )
+        .expect("natural language secret regex")
+    })
+}
+
 fn bearer_secret_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
@@ -572,5 +583,20 @@ mod tests {
 
         assert_eq!(report.hit_count, 1);
         assert_eq!(value["input"].as_str(), Some("Contact bob@example.com"));
+    }
+
+    #[test]
+    fn redacts_natural_language_api_key_without_redacting_plain_fake_key_words() {
+        let mut value = json!({
+            "input": "My API key is sk-11111, the key is fake."
+        });
+
+        let report = filter_json_value(&mut value, PrivacyFilterMode::Redact);
+        let input = value["input"].as_str().unwrap();
+
+        assert_eq!(report.hit_count, 1);
+        assert!(input.contains("[密钥]"));
+        assert!(input.contains("the key is fake"));
+        assert!(!input.contains("sk-11111"));
     }
 }
