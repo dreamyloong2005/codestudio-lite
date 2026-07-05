@@ -17,6 +17,7 @@ test("launchpad and API profile navigation copy is localized consistently", () =
   assert.match(zhCN, /"common\.createConfig": "新建配置"/);
   assert.match(zhCN, /"profiles\.loading": "正在加载配置\.\.\."/);
   assert.match(zhCN, /"profiles\.preview\.credentialDetail": "CodeStudio Lite 的配置元数据不会明文保存 API Key；配置可能会把所选 Provider Key 写入目标客户端原生配置。"/);
+  assert.match(zhCN, /"wizard\.preview\.profileRowDetail": "保存上游 API：\{protocol\} \/ Provider：\{provider\}，不会保存 API 密钥明文。"/);
   assert.doesNotMatch(zhCN, /"[^"]*": "[^"]*(仪表盘|新建档案|配置档案)[^"]*"/);
 
   assert.match(enUS, /"app\.nav\.dashboard": "Launchpad"/);
@@ -52,6 +53,7 @@ test("launchpad and API profile navigation copy is localized consistently", () =
   assert.match(zhTW, /"profiles\.loading": "正在載入設定\.\.\."/);
   assert.match(zhTW, /"profiles\.iconImageOnly": "只能匯入圖片檔案。"/);
   assert.match(zhTW, /"profiles\.preview\.credentialDetail": "CodeStudio Lite 的設定元數據不會明文儲存 API Key；設定可能會把所選 Provider Key 寫入目標用戶端原生設定。"/);
+  assert.match(zhTW, /"wizard\.preview\.profileRowDetail": "儲存上游 API：\{protocol\} \/ Provider：\{provider\}，不會儲存 API 金鑰明文。"/);
   assert.doesNotMatch(zhTW, /"[^"]*": "[^"]*(儀表盤|新建檔案)[^"]*"/);
 });
 

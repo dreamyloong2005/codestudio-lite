@@ -13,3 +13,24 @@ test("Claude Desktop exposes Anthropic Messages protocol in config profile mode"
     assert.match(source, /if \(mode === "gateway"\) \{\s*return protocolOptions;\s*\}/);
   }
 });
+
+test("gateway profile protocol field is presented as the upstream API", () => {
+  const setupWizard = read("src/routes/SetupWizard.svelte");
+  const profiles = read("src/routes/Profiles.svelte");
+  const zhCN = read("src/lib/locales/zh-CN.ts");
+  const zhTW = read("src/lib/locales/zh-TW.ts");
+  const enUS = read("src/lib/locales/en-US.ts");
+
+  assert.match(
+    setupWizard,
+    /\$t\(profileMode === "gateway" \? "wizard\.upstreamApi" : "wizard\.protocol"\)/
+  );
+  assert.match(
+    profiles,
+    /\$t\(editForm\.mode === "gateway" \? "wizard\.upstreamApi" : "wizard\.protocol"\)/
+  );
+
+  assert.match(zhCN, /"wizard\.upstreamApi": "上游 API"/);
+  assert.match(zhTW, /"wizard\.upstreamApi": "上游 API"/);
+  assert.match(enUS, /"wizard\.upstreamApi": "Upstream API"/);
+});

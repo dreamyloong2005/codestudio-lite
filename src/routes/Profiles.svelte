@@ -2170,7 +2170,7 @@
             <input bind:value={editForm.provider} disabled={editingId !== null} />
           </label>
         <label>
-          {$t("wizard.protocol")}
+          {$t(editForm.mode === "gateway" ? "wizard.upstreamApi" : "wizard.protocol")}
           <select bind:value={editForm.protocol} disabled={editingId !== null}>
             {#each availableEditProtocolOptions as option}
               <option value={option.id}>{$t(option.labelKey)}</option>

@@ -837,7 +837,7 @@
         </label>
         {#if !codexOAuthConfig}
           <label>
-            {$t("wizard.protocol")}
+            {$t(profileMode === "gateway" ? "wizard.upstreamApi" : "wizard.protocol")}
             <select bind:value={protocol}>
               {#each availableProtocolOptions as option}
                 <option value={option.id}>{$t(option.labelKey)}</option>
