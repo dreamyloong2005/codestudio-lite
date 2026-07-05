@@ -1011,6 +1011,7 @@ export async function updateCodexClientSettings(
     keepUserDataOnUninstall: request.keepUserDataOnUninstall ?? mockCodexClientSettings.keepUserDataOnUninstall,
     syncHistoryOnLaunch: request.syncHistoryOnLaunch ?? mockCodexClientSettings.syncHistoryOnLaunch,
     patchForcePluginUnlock: request.patchForcePluginUnlock ?? mockCodexClientSettings.patchForcePluginUnlock,
+    computerUseGuardOnLaunch: request.computerUseGuardOnLaunch ?? mockCodexClientSettings.computerUseGuardOnLaunch,
     signedOnly: true
   };
   return mockCodexClientSettings;
@@ -1694,7 +1695,8 @@ let mockCodexClientSettings: CodexClientSettings = {
   installRoot: "C:\\Users\\you\\AppData\\Local\\Programs\\Codex",
   keepUserDataOnUninstall: true,
   syncHistoryOnLaunch: false,
-  patchForcePluginUnlock: false
+  patchForcePluginUnlock: false,
+  computerUseGuardOnLaunch: false
 };
 
 let mockCodexClientInstalled: CodexClientState["installed"] = null;

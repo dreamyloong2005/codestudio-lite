@@ -643,6 +643,8 @@ export const enUS: Record<TranslationKey, string> = {
   "codexClient.launchOptionsTitle": "Launch Options",
   "codexClient.syncHistoryOnLaunch": "Sync historical sessions",
   "codexClient.patchForcePluginUnlock": "Force-unlock plugins",
+  "codexClient.computerUseGuardOnLaunch": "Enable Windows Computer Use Guard",
+  "codexClient.computerUseGuardOnLaunchHint": "Preserve the official Computer Use plugin, marketplace, and notify config during launch.",
   "codexClient.statusTitle": "Install Status",
   "codexClient.notInstalled": "Codex desktop was not detected.",
   "codexClient.currentVersion": "Current version",

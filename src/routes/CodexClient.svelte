@@ -277,6 +277,19 @@
             <strong>{$t("codexClient.patchForcePluginUnlock")}</strong>
           </span>
         </label>
+        {#if isWindows}
+          <label class={nativeToggleRecipe()} data-native-toggle>
+            <input
+              type="checkbox"
+              checked={settingsDraft.computerUseGuardOnLaunch}
+              on:change={(event) => updateCodexClientDraft({ computerUseGuardOnLaunch: event.currentTarget.checked })}
+            />
+            <span>
+              <strong>{$t("codexClient.computerUseGuardOnLaunch")}</strong>
+              <small>{$t("codexClient.computerUseGuardOnLaunchHint")}</small>
+            </span>
+          </label>
+        {/if}
       </div>
     {/if}
   </section>

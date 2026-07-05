@@ -120,7 +120,8 @@ function defaultCodexClientSettings(): CodexClientSettings {
     installRoot: "",
     keepUserDataOnUninstall: true,
     syncHistoryOnLaunch: false,
-    patchForcePluginUnlock: false
+    patchForcePluginUnlock: false,
+    computerUseGuardOnLaunch: false
   };
 }
 
@@ -203,7 +204,8 @@ function settingsKey(settings: CodexClientSettings) {
     installRoot: settings.installRoot,
     keepUserDataOnUninstall: settings.keepUserDataOnUninstall,
     syncHistoryOnLaunch: settings.syncHistoryOnLaunch,
-    patchForcePluginUnlock: settings.patchForcePluginUnlock
+    patchForcePluginUnlock: settings.patchForcePluginUnlock,
+    computerUseGuardOnLaunch: settings.computerUseGuardOnLaunch
   });
 }
 
@@ -230,7 +232,10 @@ function mergeScannedSettings(
       : stateSettings.syncHistoryOnLaunch,
     patchForcePluginUnlock: preserveLaunchOptions && draft
       ? draft.patchForcePluginUnlock
-      : stateSettings.patchForcePluginUnlock
+      : stateSettings.patchForcePluginUnlock,
+    computerUseGuardOnLaunch: preserveLaunchOptions && draft
+      ? draft.computerUseGuardOnLaunch
+      : stateSettings.computerUseGuardOnLaunch
   };
 }
 

@@ -706,6 +706,7 @@ export interface CodexClientSettings {
   keepUserDataOnUninstall: boolean;
   syncHistoryOnLaunch: boolean;
   patchForcePluginUnlock: boolean;
+  computerUseGuardOnLaunch: boolean;
 }
 
 export interface UpdateCodexClientSettingsRequest {
@@ -718,6 +719,7 @@ export interface UpdateCodexClientSettingsRequest {
   keepUserDataOnUninstall?: boolean | null;
   syncHistoryOnLaunch?: boolean | null;
   patchForcePluginUnlock?: boolean | null;
+  computerUseGuardOnLaunch?: boolean | null;
 }
 
 export interface PlanCodexClientUpdateRequest {

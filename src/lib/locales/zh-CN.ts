@@ -641,6 +641,8 @@ export const zhCN = {
   "codexClient.launchOptionsTitle": "启动选项",
   "codexClient.syncHistoryOnLaunch": "同步历史会话",
   "codexClient.patchForcePluginUnlock": "强制解锁插件",
+  "codexClient.computerUseGuardOnLaunch": "启用 Windows Computer Use Guard",
+  "codexClient.computerUseGuardOnLaunchHint": "启动时保留官方 Computer Use 所需的插件、市场和通知配置。",
   "codexClient.statusTitle": "安装状态",
   "codexClient.notInstalled": "未检测到 Codex 桌面端。",
   "codexClient.currentVersion": "当前版本",

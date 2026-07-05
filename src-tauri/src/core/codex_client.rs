@@ -1,6 +1,7 @@
 use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path, ensure_dirs};
 use crate::core::codex_provider_sync;
+use crate::core::computer_use_guard;
 use crate::core::platform::{hidden_command, package, run_powershell};
 use crate::core::process_control;
 use crate::core::storage;
@@ -61,6 +62,8 @@ pub struct CodexClientSettings {
     pub sync_history_on_launch: bool,
     #[serde(default)]
     pub patch_force_plugin_unlock: bool,
+    #[serde(default)]
+    pub computer_use_guard_on_launch: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +87,8 @@ pub struct UpdateCodexClientSettingsRequest {
     pub sync_history_on_launch: Option<bool>,
     #[serde(default)]
     pub patch_force_plugin_unlock: Option<bool>,
+    #[serde(default)]
+    pub computer_use_guard_on_launch: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +331,7 @@ impl Default for CodexClientSettings {
             keep_user_data_on_uninstall: true,
             sync_history_on_launch: false,
             patch_force_plugin_unlock: false,
+            computer_use_guard_on_launch: false,
         }
     }
 }
@@ -842,11 +848,13 @@ pub fn launch() -> Result<(), String> {
     terminate_codex_process_for_restart(None, &mut notes)?;
     let settings = load_settings()?;
     sync_history_if_enabled(&settings)?;
+    ensure_computer_use_guard_if_enabled(&settings)?;
     let installed =
         detect_installed(&settings).ok_or_else(|| "Codex was not detected.".to_string())?;
     let debug_port = select_debug_port()?;
     let args = codex_patch_launch_args(debug_port);
     launch_installed_codex(&installed, &args)?;
+    start_computer_use_guard_watchdog_if_enabled(&settings);
     if settings.patch_force_plugin_unlock {
         spawn_plugin_unlock_injection(debug_port);
     }
@@ -907,6 +915,9 @@ pub fn update_settings(
     }
     if let Some(unlock) = request.patch_force_plugin_unlock {
         settings.patch_force_plugin_unlock = unlock;
+    }
+    if let Some(enabled) = request.computer_use_guard_on_launch {
+        settings.computer_use_guard_on_launch = enabled;
     }
     settings.signed_only = true;
     save_settings(&settings)?;
@@ -2706,6 +2717,112 @@ fn sync_history_if_enabled(settings: &CodexClientSettings) -> Result<(), String>
         ),
     );
     Ok(())
+}
+
+const COMPUTER_USE_GUARD_POST_LAUNCH_SECONDS: &[u64] = &[1, 3, 7, 15, 30, 60];
+const COMPUTER_USE_GUARD_STABLE_ATTEMPTS: usize = 3;
+
+fn ensure_computer_use_guard_if_enabled(settings: &CodexClientSettings) -> Result<(), String> {
+    if !settings.computer_use_guard_on_launch {
+        return Ok(());
+    }
+    let home = codex_home_dir()?;
+    let artifacts = computer_use_guard::resolve_computer_use_guard_artifacts(&home)?;
+    let result = computer_use_guard::ensure_computer_use_config_with_artifacts(&home, &artifacts)?;
+    let _ = activity_log::append(
+        Severity::Info,
+        if result.changed {
+            "Prepared Codex Computer Use Guard launch configuration."
+        } else {
+            "Codex Computer Use Guard launch configuration is already ready."
+        },
+    );
+    Ok(())
+}
+
+fn start_computer_use_guard_watchdog_if_enabled(settings: &CodexClientSettings) {
+    if !settings.computer_use_guard_on_launch || !cfg!(target_os = "windows") {
+        return;
+    }
+    let Ok(home) = codex_home_dir() else {
+        return;
+    };
+    thread::spawn(move || run_post_launch_computer_use_guard(home));
+}
+
+fn codex_home_dir() -> Result<PathBuf, String> {
+    app_paths()
+        .map(|paths| paths.home_dir.join(".codex"))
+        .map_err(|err| format!("Could not locate the Codex home directory: {err}"))
+}
+
+fn post_launch_guard_artifacts_ready(artifacts: &computer_use_guard::GuardArtifacts) -> bool {
+    artifacts.notify_exe.is_some()
+        && artifacts.marketplace_path.is_some()
+        && (!artifacts.runtime_exports_needed || artifacts.sky_package_json.is_some())
+}
+
+fn should_stop_post_launch_computer_use_guard(
+    stable_unchanged_attempts: usize,
+    artifacts: &computer_use_guard::GuardArtifacts,
+) -> bool {
+    stable_unchanged_attempts >= COMPUTER_USE_GUARD_STABLE_ATTEMPTS
+        && post_launch_guard_artifacts_ready(artifacts)
+}
+
+fn run_post_launch_computer_use_guard(home: PathBuf) {
+    let mut previous_delay = 0_u64;
+    let mut stable_unchanged_attempts = 0_usize;
+    for (index, delay) in COMPUTER_USE_GUARD_POST_LAUNCH_SECONDS
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        let wait_seconds = delay.saturating_sub(previous_delay);
+        previous_delay = delay;
+        if wait_seconds > 0 {
+            thread::sleep(Duration::from_secs(wait_seconds));
+        }
+        let attempt = index + 1;
+        let artifacts = match computer_use_guard::resolve_computer_use_guard_artifacts(&home) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                stable_unchanged_attempts = 0;
+                let _ = activity_log::append(
+                    Severity::Warning,
+                    format!(
+                        "Codex Computer Use Guard retry {attempt} could not resolve artifacts: {error}"
+                    ),
+                );
+                continue;
+            }
+        };
+        let artifacts_ready = post_launch_guard_artifacts_ready(&artifacts);
+        match computer_use_guard::ensure_computer_use_config_with_artifacts(&home, &artifacts) {
+            Ok(result) => {
+                if !result.changed && artifacts_ready {
+                    stable_unchanged_attempts += 1;
+                } else {
+                    stable_unchanged_attempts = 0;
+                }
+                if should_stop_post_launch_computer_use_guard(stable_unchanged_attempts, &artifacts)
+                {
+                    let _ = activity_log::append(
+                        Severity::Info,
+                        "Codex Computer Use Guard stopped after stable post-launch checks.",
+                    );
+                    return;
+                }
+            }
+            Err(error) => {
+                stable_unchanged_attempts = 0;
+                let _ = activity_log::append(
+                    Severity::Warning,
+                    format!("Codex Computer Use Guard retry {attempt} failed: {error}"),
+                );
+            }
+        }
+    }
 }
 
 fn codex_patch_launch_args(debug_port: u16) -> Vec<String> {

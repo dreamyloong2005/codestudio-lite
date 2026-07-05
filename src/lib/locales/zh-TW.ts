@@ -643,6 +643,8 @@ export const zhTW = {
   "codexClient.launchOptionsTitle": "啟動選項",
   "codexClient.syncHistoryOnLaunch": "同步歷史工作階段",
   "codexClient.patchForcePluginUnlock": "強制解鎖外掛",
+  "codexClient.computerUseGuardOnLaunch": "啟用 Windows Computer Use Guard",
+  "codexClient.computerUseGuardOnLaunchHint": "啟動時保留官方 Computer Use 所需的外掛、市集和通知設定。",
   "codexClient.statusTitle": "安裝狀態",
   "codexClient.notInstalled": "未偵測到 Codex 桌面端。",
   "codexClient.currentVersion": "目前版本",
