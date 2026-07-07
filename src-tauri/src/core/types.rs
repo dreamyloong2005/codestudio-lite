@@ -491,6 +491,17 @@ pub struct UpdateAppSettingsRequest {
     pub language: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileModelMapping {
+    pub alias: String,
+    pub model: String,
+    #[serde(default)]
+    pub supports_1m: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDraft {
@@ -508,6 +519,8 @@ pub struct ProfileDraft {
     pub provider: String,
     pub protocol: String,
     pub model: String,
+    #[serde(default)]
+    pub model_mappings: Vec<ProfileModelMapping>,
     pub base_url: String,
     #[serde(default)]
     pub auth_ref: Option<String>,
@@ -643,6 +656,8 @@ pub struct SaveProfileDraftRequest {
     #[serde(default)]
     pub protocol: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub model_mappings: Option<Vec<ProfileModelMapping>>,
     pub base_url: String,
     pub secret_provided: bool,
     #[serde(default)]
@@ -664,6 +679,8 @@ pub struct UpdateProfileDraftRequest {
     #[serde(default)]
     pub protocol: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub model_mappings: Option<Vec<ProfileModelMapping>>,
     pub base_url: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -704,6 +721,8 @@ pub struct PreviewProfileWriteRequest {
     #[serde(default)]
     pub protocol: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub model_mappings: Option<Vec<ProfileModelMapping>>,
     pub base_url: String,
     pub secret_provided: bool,
     #[serde(default)]
@@ -882,6 +901,44 @@ pub struct TestProfileConnectionResult {
     pub generated_at: String,
     pub status: Severity,
     pub checks: Vec<ProfileConnectionCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListProfileModelsRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub app: String,
+    #[serde(default)]
+    pub mode: Option<ProviderApplyMode>,
+    pub provider: String,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileModelOption {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub owned_by: Option<String>,
+    #[serde(default)]
+    pub supports_1m: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListProfileModelsResult {
+    pub generated_at: String,
+    pub provider: String,
+    pub protocol: String,
+    pub base_url: String,
+    pub models: Vec<ProfileModelOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

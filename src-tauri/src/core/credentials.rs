@@ -41,7 +41,37 @@ fn split_keychain_target(target: &str) -> Result<(&str, &str), String> {
     Ok((service, account))
 }
 
-#[cfg(windows)]
+#[cfg(test)]
+mod platform {
+    use super::split_keychain_target;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+    pub fn store(target: &str, secret: &str) -> Result<(), String> {
+        split_keychain_target(target)?;
+        STORE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| "Test keychain store is poisoned.".to_string())?
+            .insert(target.to_string(), secret.to_string());
+        Ok(())
+    }
+
+    pub fn load(target: &str) -> Result<String, String> {
+        split_keychain_target(target)?;
+        STORE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| "Test keychain store is poisoned.".to_string())?
+            .get(target)
+            .cloned()
+            .ok_or_else(|| "Provider API key is not stored in the test keychain yet.".to_string())
+    }
+}
+
+#[cfg(all(windows, not(test)))]
 mod platform {
     use std::mem::size_of;
     use std::ptr::null_mut;
@@ -154,7 +184,7 @@ mod platform {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 mod platform {
     use super::split_keychain_target;
     use std::ffi::{c_char, c_void};
@@ -353,7 +383,7 @@ mod platform {
     }
 }
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(all(not(windows), not(target_os = "macos"), not(test)))]
 mod platform {
     pub fn store(_target: &str, _secret: &str) -> Result<(), String> {
         Err("System keychain is not implemented on this platform yet.".to_string())

@@ -1,10 +1,11 @@
 use crate::core::types::{
     ApplyProfileRequest, ApplyProfileResult, ClearEnvironmentVariablesRequest,
     ClearEnvironmentVariablesResult, DeleteProfileDraftRequest, DuplicateProfileDraftRequest,
-    PreviewProfileApplyRequest, PreviewProfileApplyResult, PreviewProfileWriteRequest,
-    PreviewProfileWriteResult, ProfileDraft, ProfileSummary, ReorderProfileDraftsRequest,
-    SaveProfileDraftRequest, StartCodexOAuthLoginResult, SwitchActiveProfileRequest,
-    TestProfileConnectionRequest, TestProfileConnectionResult, UpdateProfileDraftRequest,
+    ListProfileModelsRequest, ListProfileModelsResult, PreviewProfileApplyRequest,
+    PreviewProfileApplyResult, PreviewProfileWriteRequest, PreviewProfileWriteResult, ProfileDraft,
+    ProfileSummary, ReorderProfileDraftsRequest, SaveProfileDraftRequest,
+    StartCodexOAuthLoginResult, SwitchActiveProfileRequest, TestProfileConnectionRequest,
+    TestProfileConnectionResult, UpdateProfileDraftRequest,
 };
 use crate::core::{env_health, profile};
 
@@ -71,6 +72,13 @@ pub fn test_profile_connection(
     request: TestProfileConnectionRequest,
 ) -> Result<TestProfileConnectionResult, String> {
     profile::test_profile_connection(request).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn list_profile_models(
+    request: ListProfileModelsRequest,
+) -> Result<ListProfileModelsResult, String> {
+    profile::list_profile_models(request).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

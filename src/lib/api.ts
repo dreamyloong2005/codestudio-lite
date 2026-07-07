@@ -36,12 +36,15 @@ import type {
   InstallTerminalInputRequest,
   InstallTerminalOutput,
   InstallTerminalResizeRequest,
+  ListProfileModelsRequest,
+  ListProfileModelsResult,
   NativeConfigDiffLine,
   PreviewProfileApplyRequest,
   PreviewProfileApplyResult,
   PreviewProfileWriteRequest,
   PreviewProfileWriteResult,
   ProfileDraft,
+  ProfileModelMapping,
   ProviderApplyMode,
   RepairToolPathRequest,
   RepairToolPathResult,
@@ -1010,7 +1013,11 @@ export async function updateCodexClientSettings(
     installRoot: request.installRoot ?? mockCodexClientSettings.installRoot,
     keepUserDataOnUninstall: request.keepUserDataOnUninstall ?? mockCodexClientSettings.keepUserDataOnUninstall,
     syncHistoryOnLaunch: request.syncHistoryOnLaunch ?? mockCodexClientSettings.syncHistoryOnLaunch,
-    patchForcePluginUnlock: request.patchForcePluginUnlock ?? mockCodexClientSettings.patchForcePluginUnlock,
+    pluginMarketplaceUnlockOnLaunch: request.pluginMarketplaceUnlockOnLaunch ?? mockCodexClientSettings.pluginMarketplaceUnlockOnLaunch,
+    pluginAutoExpandOnLaunch: request.pluginAutoExpandOnLaunch ?? mockCodexClientSettings.pluginAutoExpandOnLaunch,
+    modelWhitelistUnlockOnLaunch: request.modelWhitelistUnlockOnLaunch ?? mockCodexClientSettings.modelWhitelistUnlockOnLaunch,
+    serviceTierControlsOnLaunch: request.serviceTierControlsOnLaunch ?? mockCodexClientSettings.serviceTierControlsOnLaunch,
+    officialRemotePluginCacheOnLaunch: request.officialRemotePluginCacheOnLaunch ?? mockCodexClientSettings.officialRemotePluginCacheOnLaunch,
     computerUseGuardOnLaunch: request.computerUseGuardOnLaunch ?? mockCodexClientSettings.computerUseGuardOnLaunch,
     signedOnly: true
   };
@@ -1118,6 +1125,28 @@ export async function testProfileConnection(
   };
 }
 
+export async function listProfileModels(
+  request: ListProfileModelsRequest
+): Promise<ListProfileModelsResult> {
+  if (isTauri()) {
+    return invoke("list_profile_models", { request });
+  }
+
+  const protocol = normalizeMockProtocol(request.protocol);
+  validateBaseUrlForProviderOrThrow(request.provider, request.baseUrl);
+  if (providerRequiresApiKey(request.provider) && !request.apiKey?.trim() && !request.profileId) {
+    throw new Error("Provider API key is required to fetch models.");
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    provider: request.provider.trim(),
+    protocol,
+    baseUrl: request.baseUrl.trim(),
+    models: mockProfileModels(protocol)
+  };
+}
+
 export async function saveProfileDraft(request: SaveProfileDraftRequest): Promise<ProfileDraft> {
   if (isTauri()) {
     return invoke("save_profile_draft", { request });
@@ -1146,6 +1175,7 @@ export async function saveProfileDraft(request: SaveProfileDraftRequest): Promis
     provider: request.provider,
     protocol,
     model: request.model.trim(),
+    modelMappings: normalizeMockProfileModelMappings(app, request.modelMappings),
     baseUrl: request.baseUrl.trim(),
     authRef: providerIsOfficial(request.provider) ? null : request.secretProvided ? `keychain:codestudio-lite/${profileId}/api_key` : null,
     createdAt: now,
@@ -1217,6 +1247,7 @@ export async function updateProfileDraft(request: UpdateProfileDraftRequest): Pr
     provider: request.provider.trim(),
     protocol,
     model: request.model.trim(),
+    modelMappings: normalizeMockProfileModelMappings(app, request.modelMappings ?? existing.modelMappings),
     baseUrl: request.baseUrl.trim(),
     authRef: providerIsOfficial(request.provider) ? null : hasNewSecret ? existing.authRef ?? `keychain:codestudio-lite/${existing.id}/api_key` : existing.authRef,
     updatedAt: new Date().toISOString(),
@@ -1446,6 +1477,7 @@ export async function previewProfileWrite(
     provider: request.provider.trim(),
     protocol,
     model: request.model.trim(),
+    modelMappings: normalizeMockProfileModelMappings(app, request.modelMappings),
     baseUrl: request.baseUrl.trim(),
     authRef: providerIsOfficial(request.provider) ? null : request.secretProvided ? `keychain:codestudio-lite/${profileId}/api_key` : null,
     timestamp: generatedAt,
@@ -1695,7 +1727,11 @@ let mockCodexClientSettings: CodexClientSettings = {
   installRoot: "C:\\Users\\you\\AppData\\Local\\Programs\\Codex",
   keepUserDataOnUninstall: true,
   syncHistoryOnLaunch: false,
-  patchForcePluginUnlock: false,
+  pluginMarketplaceUnlockOnLaunch: true,
+  pluginAutoExpandOnLaunch: true,
+  modelWhitelistUnlockOnLaunch: true,
+  serviceTierControlsOnLaunch: false,
+  officialRemotePluginCacheOnLaunch: true,
   computerUseGuardOnLaunch: false
 };
 
@@ -1852,6 +1888,7 @@ function builtinOfficialProfiles(): ProfileDraft[] {
     provider: "official",
     protocol,
     model: "",
+    modelMappings: [],
     baseUrl: "",
     authRef: null,
     createdAt: null,
@@ -1882,6 +1919,40 @@ function normalizeMockProfileIcon(value?: string | null): string | null {
 function normalizeMockProfileRemark(value?: string | null): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeMockProfileModelMappings(
+  app: string,
+  mappings?: ProfileModelMapping[] | null
+): ProfileModelMapping[] {
+  if (canonicalProfileApp(app) !== "claude") {
+    return [];
+  }
+  const normalized: ProfileModelMapping[] = [];
+  const aliases = new Set<string>();
+  for (const mapping of mappings ?? []) {
+    const alias = mapping.alias.trim();
+    const model = mapping.model.trim();
+    const description = mapping.description?.trim() || null;
+    if (!alias && !model && !description) {
+      continue;
+    }
+    if (!alias || !model) {
+      throw new Error("Claude Code model mappings require both alias and target model.");
+    }
+    const aliasKey = alias.toLowerCase();
+    if (aliases.has(aliasKey)) {
+      throw new Error(`Claude Code model mapping alias '${alias}' is duplicated.`);
+    }
+    aliases.add(aliasKey);
+    normalized.push({
+      alias,
+      model,
+      supports1m: Boolean(mapping.supports1m),
+      description
+    });
+  }
+  return normalized;
 }
 
 function mockAllProfiles(): ProfileDraft[] {
@@ -3206,11 +3277,18 @@ function mockNativeConfigPreview(
             detail: profile.model ? "Sets Codex to the selected official model." : "Official provider can use Codex's own model default."
           },
           {
-            key: "model_providers.openai",
+            key: "model_providers.openai.base_url",
             action: "remove",
-            before: "table[3]",
+            before: "https://example.invalid/v1",
             after: null,
-            detail: "Removes an OpenAI provider override because Codex's official provider cannot be overridden."
+            detail: "Removes any custom OpenAI base URL override for the official provider."
+          },
+          {
+            key: "model_providers.openai.requires_openai_auth",
+            action: "add",
+            before: null,
+            after: "true",
+            detail: "Uses Codex OAuth/OpenAI auth for the official provider."
           }
         ],
         warnings: [
@@ -3247,8 +3325,8 @@ function mockNativeConfigPreview(
         key: `model_providers.${providerId}.requires_openai_auth`,
         action: "add",
         before: null,
-        after: "false",
-        detail: "Disables Codex official OpenAI auth for this custom upstream entry."
+        after: "true",
+        detail: "Uses Codex OAuth/OpenAI auth for this direct upstream entry."
       }
     ];
     if (profile.model) {
@@ -4588,6 +4666,27 @@ function mockProtocolLabel(value?: string | null): string {
   return "OpenAI Chat Completions";
 }
 
+function mockProfileModels(protocol: string): ListProfileModelsResult["models"] {
+  if (protocol === PROTOCOL_ANTHROPIC_MESSAGES) {
+    return [
+      { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", ownedBy: "anthropic", supports1m: true },
+      { id: "claude-opus-4-8", name: "Claude Opus 4.8", ownedBy: "anthropic", supports1m: true },
+      { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", ownedBy: "anthropic", supports1m: true }
+    ];
+  }
+  if (protocol === PROTOCOL_GOOGLE_GEMINI) {
+    return [
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", ownedBy: "google", supports1m: true },
+      { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", ownedBy: "google", supports1m: true }
+    ];
+  }
+  return [
+    { id: "gpt-5", name: "GPT-5", ownedBy: "openai", supports1m: false },
+    { id: "gpt-5-mini", name: "GPT-5 mini", ownedBy: "openai", supports1m: false },
+    { id: "gpt-4.1", name: "GPT-4.1", ownedBy: "openai", supports1m: false }
+  ];
+}
+
 function mockProfileSqlPreviewContent(input: {
   id: string;
   name: string;
@@ -4598,6 +4697,7 @@ function mockProfileSqlPreviewContent(input: {
   provider: string;
   protocol: string;
   model: string;
+  modelMappings: ProfileModelMapping[];
   baseUrl: string;
   authRef: string | null;
   timestamp: string;
@@ -4616,6 +4716,7 @@ function mockProfileSqlPreviewContent(input: {
         provider: input.provider,
         protocol: input.protocol,
         model: input.model,
+        model_mappings: input.modelMappings,
         base_url: input.baseUrl,
         auth_ref: input.authRef,
         created_at: input.timestamp,

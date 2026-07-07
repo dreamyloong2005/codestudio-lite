@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cubicOut } from "svelte/easing";
   import { fade, fly } from "svelte/transition";
-  import { detectEnvironment, openExternalUrl, previewProfileWrite, saveProfileDraft, startCodexOAuthLogin } from "../lib/api";
+  import { detectEnvironment, listProfileModels, openExternalUrl, previewProfileWrite, saveProfileDraft, startCodexOAuthLogin } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
   import AppIcon from "../components/AppIcon.svelte";
   import SecretInput from "../components/SecretInput.svelte";
@@ -34,11 +34,14 @@
     wizardWritePreviewMetaRecipe,
     wizardWritePreviewRowRecipe
   } from "../../styled-system/recipes";
+  import { css } from "../../styled-system/css";
   import type {
     DetectionSnapshot,
     InstallState,
     PreviewProfileWriteResult,
     ProfileWritePreviewItem,
+    ProfileModelMapping,
+    ProfileModelOption,
     ProviderApplyMode,
     SaveProfileDraftRequest,
     WizardPrefill
@@ -47,6 +50,84 @@
   const CODEX_AUTH_URL = "https://developers.openai.com/codex/auth";
   const wizardStepEnter = { y: 14, duration: 240, opacity: 0, easing: cubicOut };
   const wizardStepExit = { duration: 110 };
+  const modelPickerClass = css({
+    display: "grid",
+    gap: "6px",
+    color: "var(--text-soft)",
+    fontSize: "13px",
+    fontWeight: 800,
+    minWidth: 0
+  });
+  const modelPickerRowClass = css({
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto",
+    alignItems: "center",
+    gap: "8px",
+    minWidth: 0,
+    "& button": {
+      height: "38px"
+    },
+    "@media (max-width: 860px)": {
+      gridTemplateColumns: "1fr",
+      alignItems: "stretch"
+    }
+  });
+  const modelPickerStatusClass = css({
+    color: "var(--text-muted)",
+    fontSize: "12px",
+    fontWeight: 700,
+    lineHeight: 1.35,
+    overflowWrap: "anywhere"
+  });
+  const modelMappingPanelClass = css({
+    display: "grid",
+    gap: "10px",
+    gridColumn: "1 / -1",
+    padding: "12px",
+    border: "1px solid var(--border)",
+    borderRadius: "8px",
+    background: "var(--surface-muted)",
+    minWidth: 0
+  });
+  const modelMappingHeaderClass = css({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "10px",
+    minWidth: 0,
+    "& strong": {
+      color: "var(--text)",
+      fontSize: "13px",
+      fontWeight: 800
+    }
+  });
+  const modelMappingRowsClass = css({
+    display: "grid",
+    gap: "8px",
+    minWidth: 0
+  });
+  const modelMappingRowClass = css({
+    display: "grid",
+    gridTemplateColumns: "minmax(120px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) auto auto",
+    gap: "8px",
+    alignItems: "end",
+    minWidth: 0,
+    "& label": {
+      minWidth: 0
+    },
+    "@media (max-width: 980px)": {
+      gridTemplateColumns: "1fr"
+    }
+  });
+  const modelMappingToggleClass = css({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "8px",
+    color: "var(--text-soft)",
+    fontSize: "13px",
+    fontWeight: 800,
+    minHeight: "38px"
+  });
 
   export let onProfileSaved: (mode: ProviderApplyMode) => void | Promise<void> = () => {};
   export let prefill: WizardPrefill | null = null;
@@ -59,6 +140,13 @@
     protocol: string;
     baseUrl: string;
     model: string;
+  };
+
+  type ProfileModelMappingForm = {
+    alias: string;
+    model: string;
+    supports1m: boolean;
+    description: string;
   };
 
   const protocolOptions = [
@@ -163,6 +251,11 @@
   let apiKey = "";
   let baseUrl = "";
   let model = "";
+  let modelMappings: ProfileModelMappingForm[] = [];
+  let modelOptions: ProfileModelOption[] = [];
+  let modelLoading = false;
+  let modelError: string | null = null;
+  let modelLoadedKey = "";
   let saving = false;
   let saveError: string | null = null;
   let savedProfileName: string | null = null;
@@ -199,6 +292,7 @@
   $: activeProvider = codexOAuthConfig ? "official" : provider;
   $: activeProtocol = codexOAuthConfig ? "openai-responses" : protocol;
   $: activeModel = codexOAuthConfig ? "" : model;
+  $: activeModelMappings = codexOAuthConfig ? [] : modelMappingsForRequest(selectedTool, modelMappings);
   $: activeBaseUrl = codexOAuthConfig ? "" : baseUrl;
   $: activeApiKey = codexOAuthConfig ? "" : apiKey;
   $: activeSecretProvided = !codexOAuthConfig && apiKey.trim().length > 0;
@@ -210,6 +304,25 @@
   ) {
     protocol = availableProtocolOptions[0].id;
   }
+  $: supportsModelMappings = !codexOAuthConfig && profileSupportsModelMappings(selectedTool);
+  $: if (!supportsModelMappings && modelMappings.length > 0) {
+    modelMappings = [];
+  }
+  $: modelMappingsValid = !supportsModelMappings || profileModelMappingsAreValid(modelMappings);
+  $: modelListId = `wizard-model-options-${domSafeId(selectedTool)}`;
+  $: modelRequestKey = profileModelRequestKey({
+    app: selectedTool,
+    mode: profileMode,
+    provider: activeProvider,
+    protocol: activeProtocol,
+    baseUrl: activeBaseUrl,
+    apiKey: activeApiKey
+  });
+  $: if (modelLoadedKey && modelLoadedKey !== modelRequestKey) {
+    modelOptions = [];
+    modelError = null;
+    modelLoadedKey = "";
+  }
   $: previewRequestKey = [
     profileName.trim(),
     profileRemark.trim(),
@@ -218,6 +331,7 @@
     activeProvider.trim(),
     activeProtocol.trim(),
     activeModel.trim(),
+    JSON.stringify(activeModelMappings),
     activeBaseUrl.trim(),
     activeSecretProvided ? "secret" : "no-secret",
     codexOAuthConfig ? "codex-oauth" : "api"
@@ -236,8 +350,25 @@
     isProtocolAllowedForToolMode(selectedTool, profileMode, activeProtocol) &&
     (!providerNeedsBaseUrl(activeProvider) || baseUrlErrorKey === null) &&
     (!providerRequiresApiKey(activeProvider) || activeSecretProvided) &&
+    modelMappingsValid &&
     (!codexOAuthConfig || codexOAuthAuthorized) &&
     !saving;
+  $: canFetchModels =
+    !codexOAuthConfig &&
+    !providerIsOfficial(activeProvider) &&
+    activeProvider.trim().length > 0 &&
+    isProtocolAllowedForToolMode(selectedTool, profileMode, activeProtocol) &&
+    (!providerNeedsBaseUrl(activeProvider) || baseUrlErrorKey === null) &&
+    (!providerRequiresApiKey(activeProvider) || activeSecretProvided) &&
+    !modelLoading;
+  $: modelFetchDisabled = codexOAuthConfig || providerIsOfficial(activeProvider) || saving || modelLoading;
+  $: modelStatus = modelLoading
+    ? $t("profiles.fetchingModels")
+    : modelError
+      ? modelError
+      : modelOptions.length > 0
+        ? $t("profiles.modelListLoaded", { count: modelOptions.length })
+        : null;
   $: canContinue =
     currentStep === 0
       ? selectedToolInstalled
@@ -247,6 +378,7 @@
           isProtocolAllowedForToolMode(selectedTool, profileMode, activeProtocol) &&
           (!providerNeedsBaseUrl(activeProvider) || baseUrlErrorKey === null) &&
           (!providerRequiresApiKey(activeProvider) || activeSecretProvided) &&
+          modelMappingsValid &&
           (!codexOAuthConfig || codexOAuthAuthorized)
         : true;
 
@@ -259,6 +391,7 @@
     if (nextMode !== "config") {
       codexOAuthConfig = false;
     }
+    resetModelOptions();
     writePreview = null;
     writePreviewKey = null;
     previewError = null;
@@ -269,6 +402,7 @@
     saveError = null;
     savedProfileName = null;
     previewError = null;
+    resetModelOptions();
     writePreview = null;
     writePreviewKey = null;
   }
@@ -287,9 +421,11 @@
     apiKey = "";
     baseUrl = defaults?.baseUrl ?? "";
     model = defaults?.model ?? "";
+    modelMappings = [];
     codexOAuthConfig = false;
     codexAuthError = null;
     codexAuthMessage = null;
+    resetModelOptions();
     resetDraftState();
   }
 
@@ -299,6 +435,7 @@
       apiKey = "";
       baseUrl = "";
       model = "";
+      modelMappings = [];
       protocol = "openai-responses";
     } else {
       provider = "compatible";
@@ -307,6 +444,7 @@
     writePreviewKey = null;
     previewError = null;
     saveError = null;
+    resetModelOptions();
   }
 
   function selectedToolLabel(toolId: string) {
@@ -356,11 +494,124 @@
   }
 
   function providerRequiresApiKey(providerId: string) {
-    return providerId.trim() !== "official";
+    return !providerIsOfficial(providerId);
   }
 
   function providerNeedsBaseUrl(providerId: string) {
-    return providerId.trim() !== "official";
+    return !providerIsOfficial(providerId);
+  }
+
+  function providerIsOfficial(providerId: string) {
+    return providerId.trim() === "official";
+  }
+
+  function profileSupportsModelMappings(toolId: string) {
+    return canonicalProfileToolId(toolId) === "claude";
+  }
+
+  function resetModelOptions() {
+    modelOptions = [];
+    modelLoading = false;
+    modelError = null;
+    modelLoadedKey = "";
+  }
+
+  function emptyProfileModelMappingForm(): ProfileModelMappingForm {
+    return {
+      alias: "",
+      model: "",
+      supports1m: false,
+      description: ""
+    };
+  }
+
+  function modelMappingsForRequest(
+    toolId: string,
+    mappings: ProfileModelMappingForm[]
+  ): ProfileModelMapping[] {
+    if (!profileSupportsModelMappings(toolId)) {
+      return [];
+    }
+    return mappings
+      .map((mapping) => ({
+        alias: mapping.alias.trim(),
+        model: mapping.model.trim(),
+        supports1m: Boolean(mapping.supports1m),
+        description: mapping.description.trim() || null
+      }))
+      .filter((mapping) => mapping.alias || mapping.model || mapping.description);
+  }
+
+  function profileModelMappingsAreValid(mappings: ProfileModelMappingForm[]) {
+    const aliases = new Set<string>();
+    for (const mapping of mappings) {
+      const alias = mapping.alias.trim();
+      const model = mapping.model.trim();
+      const description = mapping.description.trim();
+      if (!alias && !model && !description) {
+        continue;
+      }
+      if (!alias || !model) {
+        return false;
+      }
+      const aliasKey = alias.toLowerCase();
+      if (aliases.has(aliasKey)) {
+        return false;
+      }
+      aliases.add(aliasKey);
+    }
+    return true;
+  }
+
+  function addModelMapping() {
+    modelMappings = [...modelMappings, emptyProfileModelMappingForm()];
+  }
+
+  function updateModelMapping(index: number, patch: Partial<ProfileModelMappingForm>) {
+    modelMappings = modelMappings.map((mapping, itemIndex) =>
+      itemIndex === index ? { ...mapping, ...patch } : mapping
+    );
+  }
+
+  function updateModelMappingModel(index: number, value: string) {
+    const option = modelOptions.find((item) => item.id === value.trim());
+    const current = modelMappings[index];
+    updateModelMapping(index, {
+      model: value,
+      supports1m: option?.supports1m ?? current?.supports1m ?? false,
+      description: current?.description || option?.name || ""
+    });
+  }
+
+  function removeModelMapping(index: number) {
+    modelMappings = modelMappings.filter((_, itemIndex) => itemIndex !== index);
+  }
+
+  function domSafeId(value: string) {
+    return value.replace(/[^a-zA-Z0-9_-]+/g, "-") || "model";
+  }
+
+  function profileModelRequestKey(input: {
+    app: string;
+    mode: ProviderApplyMode;
+    provider: string;
+    protocol: string;
+    baseUrl: string;
+    apiKey: string;
+  }) {
+    return [
+      input.app.trim(),
+      input.mode,
+      input.provider.trim(),
+      input.protocol.trim(),
+      normalizeBaseUrl(input.baseUrl),
+      input.apiKey.trim() ? "inline-key" : "no-key"
+    ].join("|");
+  }
+
+  function modelOptionLabel(option: ProfileModelOption) {
+    const label = option.name && option.name !== option.id ? `${option.id} - ${option.name}` : option.id;
+    return option.supports1m ? `${label} (1M)` : label;
   }
 
   function buildProfileDraftRequest(): SaveProfileDraftRequest {
@@ -373,6 +624,7 @@
       provider: activeProvider,
       protocol: activeProtocol,
       model: activeModel,
+      modelMappings: activeModelMappings,
       baseUrl: normalizeBaseUrl(activeBaseUrl),
       secretProvided: activeSecretProvided,
       apiKey: activeApiKey
@@ -397,6 +649,39 @@
       saveError = errorLabel(err instanceof Error ? err.message : String(err));
     } finally {
       saving = false;
+    }
+  }
+
+  async function refreshModels() {
+    if (!canFetchModels) {
+      modelError = $t("profiles.modelListNeedsConfig");
+      return;
+    }
+
+    modelLoading = true;
+    modelError = null;
+    const requestKey = modelRequestKey;
+
+    try {
+      const result = await listProfileModels({
+        app: selectedTool,
+        mode: profileMode,
+        provider: activeProvider,
+        protocol: activeProtocol,
+        baseUrl: normalizeBaseUrl(activeBaseUrl),
+        apiKey: activeApiKey
+      });
+      modelOptions = result.models;
+      modelLoadedKey = requestKey;
+      if (result.models.length === 0) {
+        modelError = $t("profiles.modelListEmpty");
+      }
+    } catch (err) {
+      modelOptions = [];
+      modelLoadedKey = "";
+      modelError = errorLabel(err instanceof Error ? err.message : String(err));
+    } finally {
+      modelLoading = false;
     }
   }
 
@@ -606,6 +891,13 @@
     if (message === "Provider API key is required for non-official providers.") {
       return $t("wizard.check.credentialMissing");
     }
+    if (message === "Claude Code model mappings require both alias and target model.") {
+      return $t("profiles.modelMappingsInvalid");
+    }
+    const duplicateMappingMatch = message.match(/Claude Code model mapping alias '([^']+)' is duplicated\./);
+    if (duplicateMappingMatch) {
+      return $t("profiles.modelMappingsDuplicate", { alias: duplicateMappingMatch[1] });
+    }
     if (message === "Official profiles are built in and cannot be saved as custom profiles.") {
       return $t("profiles.officialCustomSaveBlocked");
     }
@@ -692,6 +984,9 @@
     }
     if (codexOAuthConfig && !codexOAuthAuthorized) {
       return $t("wizard.codexOAuth.authorizationRequired");
+    }
+    if (!modelMappingsValid) {
+      return $t("profiles.modelMappingsInvalid");
     }
     return $t("wizard.applyRequired");
   }
@@ -855,10 +1150,93 @@
               <small class={wizardFieldErrorRecipe()}>{$t(visibleBaseUrlErrorKey)}</small>
             {/if}
           </label>
-          <label>
-            {$t("wizard.modelOptional")}
-            <input bind:value={model} />
-          </label>
+          <div class={modelPickerClass}>
+            <label for={`${modelListId}-input`}>{$t("wizard.modelOptional")}</label>
+            <div class={modelPickerRowClass}>
+              <input
+                id={`${modelListId}-input`}
+                bind:value={model}
+                list={modelOptions.length > 0 ? modelListId : undefined}
+              />
+              <button
+                class={actionButtonRecipe()}
+                type="button"
+                data-refresh-button="true"
+                disabled={modelFetchDisabled}
+                title={$t("profiles.fetchModels")}
+                on:click={refreshModels}
+              >
+                <AppIcon name={modelLoading ? "loading" : "refresh"} class={modelLoading ? spinRecipe() : ""} size={15} />
+                {modelLoading ? $t("profiles.fetchingModels") : $t("profiles.fetchModels")}
+              </button>
+            </div>
+            {#if modelOptions.length > 0}
+              <datalist id={modelListId}>
+                {#each modelOptions as option}
+                  <option value={option.id} label={modelOptionLabel(option)}></option>
+                {/each}
+              </datalist>
+            {/if}
+            {#if modelStatus}
+              <small class={modelPickerStatusClass}>{modelStatus}</small>
+            {/if}
+          </div>
+          {#if supportsModelMappings}
+            <section class={modelMappingPanelClass}>
+              <div class={modelMappingHeaderClass}>
+                <strong>{$t("profiles.modelMappingsTitle")}</strong>
+                <button class={actionButtonRecipe()} type="button" on:click={addModelMapping}>
+                  <AppIcon name="add" size={15} />
+                  {$t("profiles.modelMappingAdd")}
+                </button>
+              </div>
+              {#if modelMappings.length > 0}
+                <div class={modelMappingRowsClass}>
+                  {#each modelMappings as mapping, index}
+                    <div class={modelMappingRowClass}>
+                      <label>
+                        {$t("profiles.modelMappingAlias")}
+                        <input
+                          value={mapping.alias}
+                          on:input={(event) => updateModelMapping(index, { alias: event.currentTarget.value })}
+                        />
+                      </label>
+                      <label>
+                        {$t("profiles.modelMappingTarget")}
+                        <input
+                          value={mapping.model}
+                          list={modelOptions.length > 0 ? modelListId : undefined}
+                          on:input={(event) => updateModelMappingModel(index, event.currentTarget.value)}
+                        />
+                      </label>
+                      <label>
+                        {$t("profiles.modelMappingDescription")}
+                        <input
+                          value={mapping.description}
+                          on:input={(event) => updateModelMapping(index, { description: event.currentTarget.value })}
+                        />
+                      </label>
+                      <label class={modelMappingToggleClass}>
+                        <input
+                          type="checkbox"
+                          checked={mapping.supports1m}
+                          on:change={(event) => updateModelMapping(index, { supports1m: event.currentTarget.checked })}
+                        />
+                        {$t("profiles.modelMappingSupports1m")}
+                      </label>
+                      <button class={actionButtonRecipe()} type="button" on:click={() => removeModelMapping(index)}>
+                        <AppIcon name="delete" size={15} />
+                        {$t("profiles.modelMappingRemove")}
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+                {#if !modelMappingsValid}
+                  <small class={wizardFieldErrorRecipe()}>{$t("profiles.modelMappingsInvalid")}</small>
+                {/if}
+              {/if}
+            </section>
+          {/if}
         {/if}
       </div>
       {#if codexOAuthConfig}

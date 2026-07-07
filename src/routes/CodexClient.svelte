@@ -270,11 +270,52 @@
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
-            checked={settingsDraft.patchForcePluginUnlock}
-            on:change={(event) => updateCodexClientDraft({ patchForcePluginUnlock: event.currentTarget.checked })}
+            checked={settingsDraft.pluginMarketplaceUnlockOnLaunch}
+            on:change={(event) => updateCodexClientDraft({ pluginMarketplaceUnlockOnLaunch: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.patchForcePluginUnlock")}</strong>
+            <strong>{$t("codexClient.pluginMarketplaceUnlockOnLaunch")}</strong>
+          </span>
+        </label>
+        <label class={nativeToggleRecipe()} data-native-toggle>
+          <input
+            type="checkbox"
+            checked={settingsDraft.officialRemotePluginCacheOnLaunch}
+            on:change={(event) => updateCodexClientDraft({ officialRemotePluginCacheOnLaunch: event.currentTarget.checked })}
+          />
+          <span>
+            <strong>{$t("codexClient.officialRemotePluginCacheOnLaunch")}</strong>
+            <small>{$t("codexClient.officialRemotePluginCacheOnLaunchHint")}</small>
+          </span>
+        </label>
+        <label class={nativeToggleRecipe()} data-native-toggle>
+          <input
+            type="checkbox"
+            checked={settingsDraft.pluginAutoExpandOnLaunch}
+            on:change={(event) => updateCodexClientDraft({ pluginAutoExpandOnLaunch: event.currentTarget.checked })}
+          />
+          <span>
+            <strong>{$t("codexClient.pluginAutoExpandOnLaunch")}</strong>
+          </span>
+        </label>
+        <label class={nativeToggleRecipe()} data-native-toggle>
+          <input
+            type="checkbox"
+            checked={settingsDraft.modelWhitelistUnlockOnLaunch}
+            on:change={(event) => updateCodexClientDraft({ modelWhitelistUnlockOnLaunch: event.currentTarget.checked })}
+          />
+          <span>
+            <strong>{$t("codexClient.modelWhitelistUnlockOnLaunch")}</strong>
+          </span>
+        </label>
+        <label class={nativeToggleRecipe()} data-native-toggle>
+          <input
+            type="checkbox"
+            checked={settingsDraft.serviceTierControlsOnLaunch}
+            on:change={(event) => updateCodexClientDraft({ serviceTierControlsOnLaunch: event.currentTarget.checked })}
+          />
+          <span>
+            <strong>{$t("codexClient.serviceTierControlsOnLaunch")}</strong>
           </span>
         </label>
         {#if isWindows}

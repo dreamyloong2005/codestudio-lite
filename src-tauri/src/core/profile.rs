@@ -14,15 +14,17 @@ use crate::core::tool_registry;
 use crate::core::types::{
     ActiveProfilesByMode, AppSettings, ApplyProfileRequest, ApplyProfileResult, CodexAuthMethod,
     CodexAuthStatus, CodexAuthStorage, ConfigState, DeleteProfileDraftRequest,
-    DuplicateProfileDraftRequest, InstallState, NativeConfigDiffLine, NativeConfigPreview,
-    PreviewProfileApplyRequest, PreviewProfileApplyResult, PreviewProfileWriteRequest,
-    PreviewProfileWriteResult, ProfileApplyPreviewItem, ProfileConnectionCheck, ProfileDraft,
-    ProfileSummary, ProfileWritePreviewItem, ProviderApplyMode, ProviderApplyModePreview,
-    ReorderProfileDraftsRequest, SaveProfileDraftRequest, Severity, StartCodexOAuthLoginResult,
-    SwitchActiveProfileRequest, TestProfileConnectionRequest, TestProfileConnectionResult,
-    UpdateAppSettingsRequest, UpdateProfileDraftRequest,
+    DuplicateProfileDraftRequest, InstallState, ListProfileModelsRequest, ListProfileModelsResult,
+    NativeConfigDiffLine, NativeConfigPreview, PreviewProfileApplyRequest,
+    PreviewProfileApplyResult, PreviewProfileWriteRequest, PreviewProfileWriteResult,
+    ProfileApplyPreviewItem, ProfileConnectionCheck, ProfileDraft, ProfileModelMapping,
+    ProfileModelOption, ProfileSummary, ProfileWritePreviewItem, ProviderApplyMode,
+    ProviderApplyModePreview, ReorderProfileDraftsRequest, SaveProfileDraftRequest, Severity,
+    StartCodexOAuthLoginResult, SwitchActiveProfileRequest, TestProfileConnectionRequest,
+    TestProfileConnectionResult, UpdateAppSettingsRequest, UpdateProfileDraftRequest,
 };
 use chrono::Utc;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
@@ -32,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
+use url::Url;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AppConfig {
@@ -200,6 +203,107 @@ const BUILTIN_OFFICIAL_PROFILES: [(&str, &str, &str); 8] = [
     ),
 ];
 
+pub(crate) fn profile_runtime_base_url_for_protocol(protocol: &str, base_url: &str) -> String {
+    profile_runtime_base_url_with_v1_policy(base_url, protocol_uses_openai_v1_base(protocol))
+}
+
+fn profile_runtime_base_url_with_v1_policy(base_url: &str, add_v1: bool) -> String {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let trimmed = trimmed.trim_end_matches('/');
+    let fallback = || {
+        if add_v1 {
+            let path = runtime_base_path_with_v1(trimmed);
+            if path == trimmed {
+                trimmed.to_string()
+            } else {
+                path
+            }
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    let Ok(mut parsed) = Url::parse(trimmed) else {
+        return fallback();
+    };
+    if parsed.scheme().is_empty() || parsed.host_str().is_none() {
+        return fallback();
+    }
+
+    let path = if add_v1 {
+        runtime_base_path_with_v1(parsed.path())
+    } else {
+        parsed.path().trim_end_matches('/').to_string()
+    };
+    parsed.set_path(&path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+fn profile_runtime_base_url_matches(
+    protocol: &str,
+    configured: &str,
+    profile_base_url: &str,
+) -> bool {
+    profile_runtime_base_url_for_protocol(protocol, configured)
+        == profile_runtime_base_url_for_protocol(protocol, profile_base_url)
+}
+
+fn protocol_uses_openai_v1_base(protocol: &str) -> bool {
+    matches!(
+        normalize_protocol(Some(protocol)).as_deref(),
+        Ok(PROTOCOL_OPENAI_CHAT_COMPLETIONS) | Ok(PROTOCOL_OPENAI_RESPONSES)
+    )
+}
+
+fn runtime_base_path_with_v1(path: &str) -> String {
+    let clean = path.trim_end_matches('/');
+    let last_segment = clean.rsplit('/').find(|segment| !segment.is_empty());
+    if last_segment
+        .map(|segment| {
+            segment.eq_ignore_ascii_case("v1") || runtime_base_path_segment_is_version(segment)
+        })
+        .unwrap_or(false)
+    {
+        return if clean.is_empty() {
+            "/v1".to_string()
+        } else {
+            clean.to_string()
+        };
+    }
+
+    if clean.is_empty() {
+        "/v1".to_string()
+    } else {
+        format!("{clean}/v1")
+    }
+}
+
+fn runtime_base_path_segment_is_version(segment: &str) -> bool {
+    let segment = segment.trim();
+    let mut chars = segment.chars();
+    if !matches!(chars.next(), Some('v' | 'V')) {
+        return false;
+    }
+
+    let mut has_digit = false;
+    for ch in chars {
+        if ch.is_ascii_digit() {
+            has_digit = true;
+            continue;
+        }
+        if !has_digit || !(ch.is_ascii_alphabetic() || matches!(ch, '-' | '_' | '.')) {
+            return false;
+        }
+    }
+    has_digit
+}
+
 pub fn ensure_app_dirs() -> Result<(), String> {
     let paths = app_paths().map_err(|err| err.to_string())?;
     ensure_dirs(&paths).map_err(|err| err.to_string())?;
@@ -304,6 +408,8 @@ pub fn save_profile_draft(request: SaveProfileDraftRequest) -> Result<ProfileDra
         &request.base_url,
         request.secret_provided,
     )?;
+    let model_mappings =
+        normalize_profile_model_mappings(&plan.app, request.model_mappings.as_deref())?;
     ensure_profile_tool_installed(&plan.app)?;
     let now = Utc::now().to_rfc3339();
     let sort_order = storage::next_profile_sort_order(&plan.app, &plan.mode)?;
@@ -318,6 +424,7 @@ pub fn save_profile_draft(request: SaveProfileDraftRequest) -> Result<ProfileDra
         provider: plan.provider,
         protocol: plan.protocol,
         model: plan.model,
+        model_mappings,
         base_url: plan.base_url,
         auth_ref: plan.auth_ref,
         created_at: Some(now.clone()),
@@ -366,6 +473,15 @@ pub fn update_profile_draft(request: UpdateProfileDraftRequest) -> Result<Profil
     ensure_custom_official_profile_allowed(&app, &provider, mode)?;
     ensure_profile_protocol_supported_for_mode(&app, mode, &provider, &protocol)?;
     let model = request.model.trim().to_string();
+    let model_mappings = normalize_profile_model_mappings(
+        &app,
+        Some(
+            request
+                .model_mappings
+                .as_deref()
+                .unwrap_or(existing.model_mappings.as_slice()),
+        ),
+    )?;
     let base_url = validate_base_url_for_provider(&provider, &request.base_url)?;
     let now = Utc::now().to_rfc3339();
     let created_at = existing.created_at.clone().unwrap_or_else(|| now.clone());
@@ -400,6 +516,7 @@ pub fn update_profile_draft(request: UpdateProfileDraftRequest) -> Result<Profil
         provider,
         protocol,
         model,
+        model_mappings,
         base_url,
         auth_ref,
         created_at: Some(created_at.clone()),
@@ -476,6 +593,7 @@ pub fn duplicate_profile_draft(
         provider: source.provider.clone(),
         protocol: source.protocol.clone(),
         model: source.model.clone(),
+        model_mappings: source.model_mappings.clone(),
         base_url: source.base_url.clone(),
         auth_ref,
         created_at: Some(now.clone()),
@@ -620,6 +738,10 @@ pub fn preview_profile_write(
         provider: plan.provider.clone(),
         protocol: plan.protocol.clone(),
         model: plan.model.clone(),
+        model_mappings: normalize_profile_model_mappings(
+            &plan.app,
+            request.model_mappings.as_deref(),
+        )?,
         base_url: plan.base_url.clone(),
         auth_ref: plan.auth_ref.clone(),
         created_at: Some(now.clone()),
@@ -2436,7 +2558,7 @@ fn should_correct_detected_native_profile(
 
     profile.protocol == protocol
         && profile.model.trim() == model
-        && profile.base_url.trim() == base_url
+        && profile_runtime_base_url_matches(&protocol, &base_url, &profile.base_url)
 }
 
 fn upsert_detected_native_profile(
@@ -2463,29 +2585,18 @@ fn upsert_detected_native_profile(
     let model = native_optional_model(&detected.model).unwrap_or_default();
 
     if let Some(existing) = drafts.iter().find(|profile| {
-        !profile.is_builtin
-            && canonical_profile_app(&profile.app) == app
-            && profile.mode == ProviderApplyMode::Config
-            && profile.provider == provider
-            && profile.protocol == protocol
-            && profile.model.trim() == model
-            && profile.base_url.trim() == base_url
+        detected_native_profile_matches_existing_key(
+            profile, &app, &provider, &protocol, &model, &base_url, api_key,
+        )
     }) {
-        if let Some(auth_ref) = existing.auth_ref.as_deref() {
-            credentials::store_keychain_secret(auth_ref, api_key)?;
-            return Ok(existing.clone());
-        }
+        return Ok(existing.clone());
     }
 
     if let Some(existing_index) = drafts.iter().position(|profile| {
-        !profile.is_builtin
-            && canonical_profile_app(&profile.app) == app
-            && profile.mode == ProviderApplyMode::Config
+        is_auto_imported_native_profile(profile)
             && profile.provider != provider
-            && profile.protocol == protocol
-            && profile.model.trim() == model
-            && profile.base_url.trim() == base_url
-            && is_auto_imported_native_profile(profile)
+            && detected_native_profile_base_matches(profile, &app, &protocol, &model, &base_url)
+            && profile_api_key_matches_config_by_reading_keychain(profile, api_key)
     }) {
         let now = Utc::now().to_rfc3339();
         let mut updated = drafts[existing_index].clone();
@@ -2538,6 +2649,7 @@ fn upsert_detected_native_profile(
         provider,
         protocol,
         model,
+        model_mappings: Vec::new(),
         base_url,
         auth_ref,
         created_at: Some(now.clone()),
@@ -2562,6 +2674,35 @@ fn upsert_detected_native_profile(
     )?;
 
     Ok(draft)
+}
+
+fn detected_native_profile_matches_existing_key(
+    profile: &ProfileDraft,
+    app: &str,
+    provider: &str,
+    protocol: &str,
+    model: &str,
+    base_url: &str,
+    api_key: &str,
+) -> bool {
+    profile.provider == provider
+        && detected_native_profile_base_matches(profile, app, protocol, model, base_url)
+        && profile_api_key_matches_config_by_reading_keychain(profile, api_key)
+}
+
+fn detected_native_profile_base_matches(
+    profile: &ProfileDraft,
+    app: &str,
+    protocol: &str,
+    model: &str,
+    base_url: &str,
+) -> bool {
+    !profile.is_builtin
+        && canonical_profile_app(&profile.app) == app
+        && profile.mode == ProviderApplyMode::Config
+        && profile.protocol == protocol
+        && profile.model.trim() == model
+        && profile_runtime_base_url_matches(protocol, base_url, &profile.base_url)
 }
 
 fn unique_detected_native_profile_name(
@@ -2735,15 +2876,7 @@ fn detect_codex_native_profile_with_auth(
     if looks_like_local_gateway_url(base_url) {
         return None;
     }
-    let requires_openai_auth = toml_lookup(
-        value,
-        &format!("model_providers.{provider_id}.requires_openai_auth"),
-    )
-    .and_then(|item| item.as_bool())
-    .unwrap_or(false);
-    let auth_api_key = auth
-        .filter(|_| requires_openai_auth)
-        .and_then(codex_auth_api_key_from_value);
+    let auth_api_key = auth.and_then(codex_auth_api_key_from_value);
     let api_key = auth_api_key?;
     let wire_api = toml_lookup(value, &format!("model_providers.{provider_id}.wire_api"))
         .and_then(|item| item.as_str())
@@ -2829,7 +2962,7 @@ fn claude_desktop_config_matches_profile(
         None => claude_desktop_detected_model(&value).is_none(),
     };
     let token_matches = json_string_lookup(&value, &["inferenceGatewayApiKey"])
-        .map(|token| profile_config_token_is_present(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
     json_string_lookup(&value, &["inferenceProvider"]).as_deref() == Some("gateway")
@@ -2838,8 +2971,10 @@ fn claude_desktop_config_matches_profile(
             .unwrap_or(true)
         && json_string_lookup(&value, &["inferenceGatewayBaseUrl"])
             .map(|base_url| claude_desktop_direct_profile_base_url(&base_url))
-            .as_deref()
-            == Some(profile.base_url.trim())
+            .map(|base_url| {
+                profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+            })
+            .unwrap_or(false)
         && token_matches
         && model_matches
 }
@@ -3085,7 +3220,7 @@ fn read_json_string_from_file(path: &Path, keys: &[&str]) -> Option<String> {
 
 fn codex_direct_config_matches_profile(
     value: &toml::Value,
-    _auth: Option<&serde_json::Value>,
+    auth: Option<&serde_json::Value>,
     profile: &ProfileDraft,
 ) -> bool {
     if !is_codex_family_app(&profile.app) || profile.mode != ProviderApplyMode::Config {
@@ -3107,12 +3242,20 @@ fn codex_direct_config_matches_profile(
     let Ok(wire_api) = codex_wire_api_for_protocol(&profile.protocol) else {
         return false;
     };
+    let token_matches = auth
+        .and_then(codex_auth_api_key_from_value)
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .unwrap_or(true);
 
     read_toml_string(value, "model_provider").as_deref() == Some(provider_id.as_str())
         && model_matches
+        && token_matches
         && toml_lookup(value, &format!("model_providers.{provider_id}.base_url"))
             .and_then(|item| item.as_str())
-            == Some(profile.base_url.trim())
+            .map(|base_url| {
+                profile_runtime_base_url_matches(&profile.protocol, base_url, &profile.base_url)
+            })
+            .unwrap_or(false)
         && toml_lookup(value, &format!("model_providers.{provider_id}.wire_api"))
             .and_then(|item| item.as_str())
             == Some(wire_api)
@@ -3121,7 +3264,7 @@ fn codex_direct_config_matches_profile(
             &format!("model_providers.{provider_id}.requires_openai_auth"),
         )
         .and_then(|item| item.as_bool())
-        .is_some()
+            == Some(true)
 }
 
 fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileDraft) -> bool {
@@ -3138,8 +3281,11 @@ fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileD
         .and_then(|item| item.as_str())
         .map(|base_url| base_url.trim().is_empty())
         .unwrap_or(true);
+    let auth_required = toml_lookup(value, "model_providers.openai.requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(true);
 
-    provider_matches && model_matches && base_url_is_absent
+    provider_matches && model_matches && base_url_is_absent && auth_required
 }
 
 fn codex_active_provider_id_for_profile(
@@ -3158,7 +3304,10 @@ fn codex_active_provider_id_for_profile(
     )
     .and_then(|item| item.as_str())
     .map(str::trim)
-        == Some(profile.base_url.trim());
+    .map(|base_url| {
+        profile_runtime_base_url_matches(&profile.protocol, base_url, &profile.base_url)
+    })
+    .unwrap_or(false);
     let wire_api_matches = codex_wire_api_for_protocol(&profile.protocol)
         .ok()
         .and_then(|wire_api| {
@@ -3205,11 +3354,14 @@ fn claude_config_matches_profile(value: &serde_json::Value, profile: &ProfileDra
         }
     };
     let token_matches = json_string_lookup(value, &["env", "ANTHROPIC_AUTH_TOKEN"])
-        .map(|token| profile_config_token_is_present(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
-    json_string_lookup(value, &["env", "ANTHROPIC_BASE_URL"]).as_deref()
-        == Some(profile.base_url.trim())
+    json_string_lookup(value, &["env", "ANTHROPIC_BASE_URL"])
+        .map(|base_url| {
+            profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+        })
+        .unwrap_or(false)
         && token_matches
         && model_matches
 }
@@ -3241,10 +3393,14 @@ fn gemini_env_matches_profile(env: &HashMap<String, String>, profile: &ProfileDr
     };
     let token_matches = env
         .get("GEMINI_API_KEY")
-        .map(|token| profile_config_token_is_present(profile, token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, token))
         .unwrap_or(false);
 
-    env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str) == Some(profile.base_url.trim())
+    env.get("GOOGLE_GEMINI_BASE_URL")
+        .map(|base_url| {
+            profile_runtime_base_url_matches(&profile.protocol, base_url, &profile.base_url)
+        })
+        .unwrap_or(false)
         && token_matches
         && model_matches
 }
@@ -3269,7 +3425,7 @@ fn gemini_code_assist_settings_match_profile(
     }
 
     json_string_lookup(value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING])
-        .map(|token| profile_config_token_is_present(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false)
 }
 
@@ -3301,11 +3457,14 @@ fn opencode_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
         None => json_string_lookup(value, &["model"]).is_none(),
     };
     let token_matches = json_string_lookup(value, &["provider", &provider_id, "options", "apiKey"])
-        .map(|token| profile_config_token_is_present(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
-    json_string_lookup(value, &["provider", &provider_id, "options", "baseURL"]).as_deref()
-        == Some(profile.base_url.trim())
+    json_string_lookup(value, &["provider", &provider_id, "options", "baseURL"])
+        .map(|base_url| {
+            profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+        })
+        .unwrap_or(false)
         && token_matches
         && model_matches
 }
@@ -3337,11 +3496,14 @@ fn openclaw_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
         None => true,
     };
     let token_matches = json_string_lookup(value, &["models", "providers", &provider_id, "apiKey"])
-        .map(|token| profile_config_token_is_present(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
-    json_string_lookup(value, &["models", "providers", &provider_id, "baseUrl"]).as_deref()
-        == Some(profile.base_url.trim())
+    json_string_lookup(value, &["models", "providers", &provider_id, "baseUrl"])
+        .map(|base_url| {
+            profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+        })
+        .unwrap_or(false)
         && token_matches
         && model_matches
 }
@@ -3368,12 +3530,15 @@ fn hermes_config_matches_profile(value: &serde_norway::Value, profile: &ProfileD
         None => yaml_string_lookup(value, &["model", "default"]).is_none(),
     };
     let token_matches = yaml_string_lookup(value, &["model", "api_key"])
-        .map(|token| profile_config_token_is_present(profile, &token))
+        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
     yaml_string_lookup(value, &["model", "provider"]).as_deref() == Some("custom")
-        && yaml_string_lookup(value, &["model", "base_url"]).as_deref()
-            == Some(profile.base_url.trim())
+        && yaml_string_lookup(value, &["model", "base_url"])
+            .map(|base_url| {
+                profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+            })
+            .unwrap_or(false)
         && yaml_string_lookup(value, &["model", "api_mode"]).as_deref() == Some("chat_completions")
         && token_matches
         && model_matches
@@ -3423,17 +3588,6 @@ fn remove_json_managed_provider_entries(root: &mut serde_json::Value, path: &[&s
 fn hermes_config_has_managed_endpoint(value: &serde_norway::Value) -> bool {
     yaml_string_lookup(value, &["model", "base_url"]).is_some()
         || yaml_string_lookup(value, &["model", "api_key"]).is_some()
-}
-
-fn profile_config_token_is_present(profile: &ProfileDraft, token: &str) -> bool {
-    profile
-        .auth_ref
-        .as_deref()
-        .map(str::trim)
-        .filter(|auth_ref| !auth_ref.is_empty())
-        .is_some()
-        && !token.trim().is_empty()
-        && !looks_like_local_gateway_token(token)
 }
 
 fn profile_api_key_matches_config_by_reading_keychain(profile: &ProfileDraft, token: &str) -> bool {
@@ -3578,6 +3732,308 @@ pub fn test_profile_connection(
         status,
         checks,
     })
+}
+
+pub fn list_profile_models(
+    request: ListProfileModelsRequest,
+) -> Result<ListProfileModelsResult, String> {
+    ensure_app_dirs()?;
+
+    let app = canonical_profile_app(&normalize_token("Tool", &request.app)?);
+    let provider = normalize_provider_token(&request.provider)?;
+    if provider_is_official(&provider) {
+        return Err(
+            "Official provider uses the target client's own login; model listing is only available for API profiles."
+                .to_string(),
+        );
+    }
+    let mode = normalize_profile_mode(&provider, request.mode.as_ref())?;
+    let protocol = normalize_protocol(request.protocol.as_deref())?;
+    ensure_profile_protocol_supported_for_mode(&app, mode, &provider, &protocol)?;
+    let base_url = validate_base_url_for_provider(&provider, &request.base_url)?;
+    let api_key = resolve_model_list_api_key(&request, &provider)?;
+    let url = profile_model_list_url(&protocol, &base_url);
+    let payload = fetch_profile_model_list_payload(&protocol, &url, &api_key)?;
+    let models = profile_model_options_from_payload(&protocol, &payload);
+
+    activity_log::append(
+        Severity::Ok,
+        format!(
+            "Fetched {} model option(s) for {app}/{provider}.",
+            models.len()
+        ),
+    )?;
+
+    Ok(ListProfileModelsResult {
+        generated_at: Utc::now().to_rfc3339(),
+        provider,
+        protocol,
+        base_url,
+        models,
+    })
+}
+
+fn resolve_model_list_api_key(
+    request: &ListProfileModelsRequest,
+    provider: &str,
+) -> Result<String, String> {
+    if !provider_requires_api_key(provider) {
+        return Ok(String::new());
+    }
+
+    if let Some(api_key) = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(api_key.to_string());
+    }
+
+    let Some(profile_id) = request
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err("Provider API key is required to fetch models.".to_string());
+    };
+    let profile = load_profile_by_id(profile_id)?;
+    if !profile.provider.eq_ignore_ascii_case(provider) {
+        return Err("Provider API key is required after changing Provider.".to_string());
+    }
+    let Some(auth_ref) = profile.auth_ref.as_deref() else {
+        return Err("Stored Provider API key is missing for this profile.".to_string());
+    };
+    let api_key = credentials::load_keychain_secret(auth_ref)?;
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err("Stored Provider API key is empty.".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn fetch_profile_model_list_payload(
+    protocol: &str,
+    url: &str,
+    api_key: &str,
+) -> Result<serde_json::Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| format!("Could not create provider model client: {err}"))?;
+    let request = client.get(url).header("Accept", "application/json");
+    let request = match protocol {
+        PROTOCOL_ANTHROPIC_MESSAGES => request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        PROTOCOL_GOOGLE_GEMINI => request.header("x-goog-api-key", api_key),
+        _ => request.bearer_auth(api_key),
+    };
+    let response = request
+        .send()
+        .map_err(|err| format!("Could not fetch provider models: {err}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .map_err(|err| format!("Could not read provider model response: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Provider model request failed with HTTP {}: {}",
+            status.as_u16(),
+            provider_error_summary(&text)
+        ));
+    }
+    serde_json::from_str(&text)
+        .map_err(|err| format!("Provider model response is not valid JSON: {err}"))
+}
+
+fn profile_model_list_url(protocol: &str, base_url: &str) -> String {
+    let runtime_base_url = profile_runtime_base_url_for_protocol(protocol, base_url);
+    let path = match protocol {
+        PROTOCOL_OPENAI_CHAT_COMPLETIONS | PROTOCOL_OPENAI_RESPONSES => "/models",
+        PROTOCOL_ANTHROPIC_MESSAGES => "/models",
+        PROTOCOL_GOOGLE_GEMINI => "/models",
+        _ => "/models",
+    };
+    append_profile_api_path(&runtime_base_url, path)
+}
+
+fn append_profile_api_path(base_url: &str, path: &str) -> String {
+    let trimmed_base = base_url.trim_end_matches('/');
+    let clean_path = format!("/{}", path.trim().trim_start_matches('/'));
+    let fallback = || format!("{trimmed_base}{clean_path}");
+    let Ok(mut parsed) = Url::parse(trimmed_base) else {
+        return fallback();
+    };
+    if parsed.scheme().is_empty() || parsed.host_str().is_none() {
+        return fallback();
+    }
+    let base_path = parsed.path().trim_end_matches('/');
+    let next_path = if base_path.is_empty() || base_path == "/" {
+        clean_path
+    } else {
+        format!("{base_path}{clean_path}")
+    };
+    parsed.set_path(&next_path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+fn profile_model_options_from_payload(
+    protocol: &str,
+    payload: &serde_json::Value,
+) -> Vec<ProfileModelOption> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for array in profile_model_arrays(payload) {
+        for item in array {
+            if let Some(model) = profile_model_option_from_value(protocol, item) {
+                if seen.insert(model.id.clone()) {
+                    models.push(model);
+                }
+            }
+        }
+    }
+    models
+}
+
+fn profile_model_arrays(payload: &serde_json::Value) -> Vec<&Vec<serde_json::Value>> {
+    let mut arrays = Vec::new();
+    if let Some(array) = payload.as_array() {
+        arrays.push(array);
+    }
+    for key in ["data", "models", "items"] {
+        if let Some(array) = payload.get(key).and_then(|value| value.as_array()) {
+            arrays.push(array);
+        }
+    }
+    arrays
+}
+
+fn profile_model_option_from_value(
+    protocol: &str,
+    item: &serde_json::Value,
+) -> Option<ProfileModelOption> {
+    if let Some(value) = item
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(ProfileModelOption {
+            id: normalize_profile_model_id(protocol, value),
+            name: None,
+            owned_by: None,
+            supports_1m: false,
+        });
+    }
+    if protocol == PROTOCOL_GOOGLE_GEMINI && !gemini_model_supports_generation(item) {
+        return None;
+    }
+    let raw_id = json_string_any(item, &["id", "name", "model", "value"])?;
+    let id = normalize_profile_model_id(protocol, &raw_id);
+    let name = json_string_any(
+        item,
+        &["display_name", "displayName", "label", "description"],
+    )
+    .filter(|value| value != &id && value != &raw_id);
+    let owned_by = json_string_any(item, &["owned_by", "ownedBy", "owner"]);
+    let supports_1m = json_bool_any(item, &["supports1m", "supports_1m", "supportsOneMillion"])
+        .unwrap_or_else(|| {
+            model_context_window(item)
+                .map(|window| window >= 1_000_000)
+                .unwrap_or(false)
+        });
+    Some(ProfileModelOption {
+        id,
+        name,
+        owned_by,
+        supports_1m,
+    })
+}
+
+fn normalize_profile_model_id(protocol: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    if protocol == PROTOCOL_GOOGLE_GEMINI {
+        return trimmed
+            .strip_prefix("models/")
+            .unwrap_or(trimmed)
+            .to_string();
+    }
+    trimmed.to_string()
+}
+
+fn gemini_model_supports_generation(item: &serde_json::Value) -> bool {
+    let methods = item
+        .get("supportedGenerationMethods")
+        .or_else(|| item.get("supported_generation_methods"))
+        .and_then(|value| value.as_array());
+    let Some(methods) = methods else {
+        return true;
+    };
+    methods
+        .iter()
+        .filter_map(|value| value.as_str())
+        .any(|method| {
+            method.eq_ignore_ascii_case("generateContent")
+                || method.eq_ignore_ascii_case("streamGenerateContent")
+        })
+}
+
+fn json_string_any(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn json_bool_any(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|item| item.as_bool()))
+}
+
+fn model_context_window(value: &serde_json::Value) -> Option<u64> {
+    [
+        "context_window",
+        "contextWindow",
+        "max_context_tokens",
+        "maxContextTokens",
+        "input_token_limit",
+        "inputTokenLimit",
+    ]
+    .iter()
+    .find_map(|key| value.get(*key).and_then(|item| item.as_u64()))
+}
+
+fn provider_error_summary(body: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(message) = json_string_lookup(&value, &["error", "message"])
+            .or_else(|| json_string_lookup(&value, &["message"]))
+        {
+            return truncate_provider_error(&message);
+        }
+    }
+    truncate_provider_error(body)
+}
+
+fn truncate_provider_error(body: &str) -> String {
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return "No response body.".to_string();
+    }
+    let mut output = String::new();
+    for ch in normalized.chars().take(300) {
+        output.push(ch);
+    }
+    if normalized.chars().count() > output.chars().count() {
+        output.push_str("...");
+    }
+    output
 }
 
 pub fn switch_active_profile(
@@ -4156,6 +4612,7 @@ fn builtin_official_profiles() -> Vec<ProfileDraft> {
             provider: "official".to_string(),
             protocol: (*protocol).to_string(),
             model: String::new(),
+            model_mappings: Vec::new(),
             base_url: String::new(),
             auth_ref: None,
             created_at: None,
@@ -4489,6 +4946,7 @@ fn profile_sql_preview_content(
             "provider": profile.provider,
             "protocol": profile.protocol,
             "model": profile.model,
+            "model_mappings": profile.model_mappings,
             "base_url": profile.base_url,
             "auth_ref": profile.auth_ref,
             "created_at": profile.created_at,
@@ -4516,6 +4974,56 @@ fn normalize_profile_remark(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn normalize_profile_model_mappings(
+    app: &str,
+    mappings: Option<&[ProfileModelMapping]>,
+) -> Result<Vec<ProfileModelMapping>, String> {
+    if canonical_profile_app(app) != "claude" {
+        return Ok(Vec::new());
+    }
+
+    let Some(mappings) = mappings else {
+        return Ok(Vec::new());
+    };
+    let mut normalized = Vec::new();
+    let mut aliases = HashSet::new();
+
+    for mapping in mappings {
+        let alias = mapping.alias.trim();
+        let model = mapping.model.trim();
+        let description = mapping
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        if alias.is_empty() && model.is_empty() && description.is_none() {
+            continue;
+        }
+        if alias.is_empty() || model.is_empty() {
+            return Err(
+                "Claude Code model mappings require both alias and target model.".to_string(),
+            );
+        }
+        let alias_key = alias.to_ascii_lowercase();
+        if !aliases.insert(alias_key) {
+            return Err(format!(
+                "Claude Code model mapping alias '{alias}' is duplicated."
+            ));
+        }
+
+        normalized.push(ProfileModelMapping {
+            alias: alias.to_string(),
+            model: model.to_string(),
+            supports_1m: mapping.supports_1m,
+            description,
+        });
+    }
+
+    Ok(normalized)
 }
 
 fn build_profile_write_plan(
@@ -5158,6 +5666,8 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
     let provider_name = profile.provider.trim();
     let wire_api = codex_wire_api_for_protocol(&profile.protocol)?;
     let model = profile.model.trim();
+    let runtime_base_url =
+        profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
 
     document["model_provider"] = toml_edit::value(provider_id.clone());
     if model.is_empty() {
@@ -5169,9 +5679,8 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
     document["model_providers"][&provider_id] = toml_edit::Item::Table(toml_edit::Table::new());
     document["model_providers"][&provider_id]["name"] = toml_edit::value(provider_name);
     document["model_providers"][&provider_id]["wire_api"] = toml_edit::value(wire_api);
-    document["model_providers"][&provider_id]["base_url"] =
-        toml_edit::value(profile.base_url.trim().to_string());
-    document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(false);
+    document["model_providers"][&provider_id]["base_url"] = toml_edit::value(runtime_base_url);
+    document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(true);
     repair_codex_preserved_auth_config(&mut document);
 
     let updated = document.to_string();
@@ -5225,17 +5734,6 @@ fn remove_codex_provider_entry(document: &mut toml_edit::DocumentMut, provider_i
     }
 }
 
-fn remove_empty_codex_model_providers_table(document: &mut toml_edit::DocumentMut) {
-    let should_remove_table = document
-        .get("model_providers")
-        .and_then(|item| item.as_table_like())
-        .map(|table| table.is_empty())
-        .unwrap_or(false);
-    if should_remove_table {
-        document.as_table_mut().remove("model_providers");
-    }
-}
-
 fn repair_codex_preserved_auth_config(document: &mut toml_edit::DocumentMut) {
     remove_codex_legacy_key_from_table(document, "auth", &["OPENAI_API_KEY", "api_key"]);
     remove_codex_legacy_key_from_table(document, "env", &["OPENAI_API_KEY"]);
@@ -5280,7 +5778,8 @@ fn codex_official_config_content(current: &str, profile: &ProfileDraft) -> Resul
         document["model"] = toml_edit::value(profile.model.trim());
     }
     remove_codex_provider_entry(&mut document, provider_id);
-    remove_empty_codex_model_providers_table(&mut document);
+    document["model_providers"][provider_id] = toml_edit::Item::Table(toml_edit::Table::new());
+    document["model_providers"][provider_id]["requires_openai_auth"] = toml_edit::value(true);
     repair_codex_preserved_auth_config(&mut document);
 
     let updated = document.to_string();
@@ -5363,8 +5862,10 @@ fn claude_desktop_direct_profile_content_with_api_key(
 ) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_ANTHROPIC_MESSAGES])?;
     let model_specs = claude_desktop_direct_inference_models(profile);
+    let runtime_base_url =
+        profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
     let value = claude_desktop_gateway_profile_value(
-        profile.base_url.trim(),
+        &runtime_base_url,
         api_key,
         (!model_specs.is_empty()).then_some(model_specs.as_slice()),
     );
@@ -5564,11 +6065,13 @@ fn claude_config_content_with_api_key(
 ) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_ANTHROPIC_MESSAGES])?;
     let mut value = parse_json5_or_empty(current, "Claude settings")?;
+    let runtime_base_url =
+        profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
 
     set_json_string_path(
         &mut value,
         &["env", "ANTHROPIC_BASE_URL"],
-        profile.base_url.trim(),
+        &runtime_base_url,
     );
     set_json_string_path(&mut value, &["env", "ANTHROPIC_AUTH_TOKEN"], api_key);
     if let Some(model) = profile_model(profile) {
@@ -5653,7 +6156,10 @@ fn gemini_env_content_with_api_key(
         ("GEMINI_API_KEY", Some(api_key.to_string())),
         (
             "GOOGLE_GEMINI_BASE_URL",
-            Some(profile.base_url.trim().to_string()),
+            Some(profile_runtime_base_url_for_protocol(
+                &profile.protocol,
+                &profile.base_url,
+            )),
         ),
     ];
     updates.push((
@@ -5774,7 +6280,7 @@ fn opencode_config_content_with_api_key(
     set_json_string_path(
         &mut value,
         &["provider", &provider_id, "options", "baseURL"],
-        profile.base_url.trim(),
+        &profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url),
     );
     set_json_string_path(
         &mut value,
@@ -5900,7 +6406,7 @@ fn openclaw_config_content_with_api_key(
     set_json_string_path(
         &mut value,
         &["models", "providers", &provider_id, "baseUrl"],
-        profile.base_url.trim(),
+        &profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url),
     );
     set_json_string_path(
         &mut value,
@@ -6036,9 +6542,11 @@ fn hermes_config_content_with_api_key(
 ) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_OPENAI_CHAT_COMPLETIONS])?;
     let mut value = parse_yaml_or_empty(current, "Hermes config")?;
+    let runtime_base_url =
+        profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
 
     set_yaml_string_path(&mut value, &["model", "provider"], "custom");
-    set_yaml_string_path(&mut value, &["model", "base_url"], profile.base_url.trim());
+    set_yaml_string_path(&mut value, &["model", "base_url"], &runtime_base_url);
     set_yaml_string_path(&mut value, &["model", "api_key"], api_key);
     set_yaml_string_path(&mut value, &["model", "api_mode"], "chat_completions");
     if let Some(model) = profile_model(profile) {
@@ -6133,7 +6641,7 @@ fn verify_claude_desktop_profile_config(
     let value = parse_json5_or_empty(&content, "Claude Desktop 3P profile")?;
     let (expected_base_url, expected_api_key) = match mode {
         ProviderApplyMode::Config => (
-            profile.base_url.trim().to_string(),
+            profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url),
             load_provider_api_key_for_direct_config(profile)?,
         ),
         ProviderApplyMode::Gateway => {
@@ -6219,7 +6727,10 @@ fn verify_codex_direct_config(path: &Path, profile: &ProfileDraft) -> Result<boo
         return Ok(
             read_toml_string(&value, "model_provider").as_deref() == Some("openai")
                 && model_matches
-                && toml_lookup(&value, "model_providers.openai").is_none(),
+                && toml_lookup(&value, "model_providers.openai.base_url").is_none()
+                && toml_lookup(&value, "model_providers.openai.requires_openai_auth")
+                    .and_then(|item| item.as_bool())
+                    == Some(true),
         );
     }
 
@@ -6240,13 +6751,16 @@ fn verify_codex_direct_config(path: &Path, profile: &ProfileDraft) -> Result<boo
             && toml_lookup(&value, &format!("model_providers.{provider_id}.base_url"))
                 .map(redacted_toml_value)
                 .as_deref()
-                == Some(profile.base_url.trim())
+                == Some(
+                    profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url)
+                        .as_str(),
+                )
             && toml_lookup(
                 &value,
                 &format!("model_providers.{provider_id}.requires_openai_auth"),
             )
             .and_then(|item| item.as_bool())
-                == Some(false),
+                == Some(true),
     )
 }
 
@@ -6270,12 +6784,13 @@ fn verify_claude_config(path: &Path, profile: &ProfileDraft) -> Result<bool, Str
         .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
         .unwrap_or(false);
 
-    Ok(
-        json_string_lookup(&value, &["env", "ANTHROPIC_BASE_URL"]).as_deref()
-            == Some(profile.base_url.trim())
-            && token_matches
-            && model_matches,
-    )
+    Ok(json_string_lookup(&value, &["env", "ANTHROPIC_BASE_URL"])
+        .map(|base_url| {
+            profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+        })
+        .unwrap_or(false)
+        && token_matches
+        && model_matches)
 }
 
 fn verify_claude_gateway_config(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
@@ -6310,11 +6825,14 @@ fn verify_gemini_env_config(path: &Path, profile: &ProfileDraft) -> Result<bool,
         .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, token))
         .unwrap_or(false);
 
-    Ok(
-        env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str) == Some(profile.base_url.trim())
-            && token_matches
-            && model_matches,
-    )
+    Ok(env
+        .get("GOOGLE_GEMINI_BASE_URL")
+        .map(|base_url| {
+            profile_runtime_base_url_matches(&profile.protocol, base_url, &profile.base_url)
+        })
+        .unwrap_or(false)
+        && token_matches
+        && model_matches)
 }
 
 fn verify_gemini_gateway_env_config(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
@@ -6360,8 +6878,11 @@ fn verify_opencode_config(path: &Path, profile: &ProfileDraft) -> Result<bool, S
             .unwrap_or(false);
 
     Ok(
-        json_string_lookup(&value, &["provider", &provider_id, "options", "baseURL"]).as_deref()
-            == Some(profile.base_url.trim())
+        json_string_lookup(&value, &["provider", &provider_id, "options", "baseURL"])
+            .map(|base_url| {
+                profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+            })
+            .unwrap_or(false)
             && token_matches
             && model_matches,
     )
@@ -6408,8 +6929,11 @@ fn verify_openclaw_config(path: &Path, profile: &ProfileDraft) -> Result<bool, S
             .unwrap_or(false);
 
     Ok(
-        json_string_lookup(&value, &["models", "providers", &provider_id, "baseUrl"]).as_deref()
-            == Some(profile.base_url.trim())
+        json_string_lookup(&value, &["models", "providers", &provider_id, "baseUrl"])
+            .map(|base_url| {
+                profile_runtime_base_url_matches(&profile.protocol, &base_url, &profile.base_url)
+            })
+            .unwrap_or(false)
             && token_matches
             && model_matches,
     )
@@ -6453,7 +6977,10 @@ fn verify_hermes_config(path: &Path, profile: &ProfileDraft) -> Result<bool, Str
     Ok(
         yaml_string_lookup(&value, &["model", "provider"]).as_deref() == Some("custom")
             && yaml_string_lookup(&value, &["model", "base_url"]).as_deref()
-                == Some(profile.base_url.trim())
+                == Some(
+                    profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url)
+                        .as_str(),
+                )
             && yaml_string_lookup(&value, &["model", "api_mode"]).as_deref()
                 == Some("chat_completions")
             && token_matches
@@ -6552,7 +7079,22 @@ fn custom_provider_id_for_profile(_profile: &ProfileDraft) -> String {
 }
 
 fn gateway_config_model_for_profile(profile: &ProfileDraft) -> &str {
-    profile_model(profile).unwrap_or(GATEWAY_FALLBACK_MODEL)
+    if canonical_profile_app(&profile.app) == "claude" {
+        if let Some(alias) = profile
+            .model_mappings
+            .iter()
+            .map(|mapping| mapping.alias.trim())
+            .find(|alias| !alias.is_empty())
+        {
+            return alias;
+        }
+    }
+    let model = profile.model.trim();
+    if model.is_empty() {
+        GATEWAY_FALLBACK_MODEL
+    } else {
+        model
+    }
 }
 
 fn load_provider_api_key_for_direct_config(profile: &ProfileDraft) -> Result<String, String> {
@@ -7109,8 +7651,14 @@ fn build_native_config_preview(
                     ),
                     diff_remove_line(
                         &value,
-                        "model_providers.openai",
-                        "Removes an OpenAI provider override because Codex's official provider cannot be overridden.",
+                        "model_providers.openai.base_url",
+                        "Removes any custom OpenAI base URL override for the official provider.",
+                    ),
+                    diff_line(
+                        &value,
+                        "model_providers.openai.requires_openai_auth",
+                        "true",
+                        "Uses Codex OAuth/OpenAI auth for the official provider.",
                     ),
                 ];
                 if profile.model.trim().is_empty() {
@@ -7133,6 +7681,8 @@ fn build_native_config_preview(
                 let provider_id = codex_provider_id_for_profile(profile);
                 let provider_name = profile.provider.trim();
                 let wire_api = codex_wire_api_for_protocol(&profile.protocol)?;
+                let runtime_base_url =
+                    profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
                 let mut changes = vec![
                     diff_line(
                         &value,
@@ -7155,14 +7705,14 @@ fn build_native_config_preview(
                     diff_line(
                         &value,
                         &format!("model_providers.{provider_id}.base_url"),
-                        profile.base_url.trim(),
+                        &runtime_base_url,
                         "Points Codex directly at the upstream Provider Base URL.",
                     ),
                     diff_line(
                         &value,
                         &format!("model_providers.{provider_id}.requires_openai_auth"),
-                        "false",
-                        "Disables Codex official OpenAI auth for this custom upstream entry.",
+                        "true",
+                        "Uses Codex OAuth/OpenAI auth for this direct upstream entry.",
                     ),
                 ];
                 changes.extend(codex_preserved_auth_repair_diff_lines(&value));
@@ -7348,6 +7898,8 @@ fn build_non_codex_native_config_preview(
     let (status, changes) = if is_official {
         build_non_codex_official_native_config_preview_changes(&app, &path_buf, &mut warnings)?
     } else {
+        let runtime_base_url =
+            profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
         match app.as_str() {
             "gemini" => {
                 let (env, status) = read_env_preview(&path_buf, &mut warnings)?;
@@ -7361,7 +7913,7 @@ fn build_non_codex_native_config_preview(
                     env_diff_line(
                         &env,
                         "GOOGLE_GEMINI_BASE_URL",
-                        profile.base_url.trim(),
+                        &runtime_base_url,
                         "Points Gemini CLI at the selected upstream Provider Base URL.",
                     ),
                 ];
@@ -7388,7 +7940,7 @@ fn build_non_codex_native_config_preview(
                     json_diff_line(
                         &json,
                         &["env", "ANTHROPIC_BASE_URL"],
-                        profile.base_url.trim(),
+                        &runtime_base_url,
                         "Points Claude Code at the selected upstream Provider Base URL.",
                     ),
                     json_diff_line(
@@ -7469,7 +8021,7 @@ fn build_non_codex_native_config_preview(
                     json_diff_line(
                         &json,
                         &["provider", &provider_id, "options", "baseURL"],
-                        profile.base_url.trim(),
+                        &runtime_base_url,
                         "Points OpenCode at the selected upstream Provider Base URL.",
                     ),
                     json_diff_line(
@@ -7520,7 +8072,7 @@ fn build_non_codex_native_config_preview(
                 json_diff_line(
                     &json,
                     &["models", "providers", &provider_id, "baseUrl"],
-                    profile.base_url.trim(),
+                    &runtime_base_url,
                     "Points OpenClaw at the selected upstream Provider Base URL.",
                 ),
                 json_diff_line(
@@ -7552,7 +8104,7 @@ fn build_non_codex_native_config_preview(
                     yaml_diff_line(
                         &yaml,
                         &["model", "base_url"],
-                        profile.base_url.trim(),
+                        &runtime_base_url,
                         "Points Hermes at the selected upstream Provider Base URL.",
                     ),
                     yaml_diff_line(
@@ -7815,6 +8367,8 @@ fn build_claude_desktop_native_config_preview(
         ],
         ProviderApplyMode::Config => {
             let model_specs = claude_desktop_direct_inference_models(profile);
+            let runtime_base_url =
+                profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
             let mut changes = vec![
                 diff_value_line(
                     "developer_settings.allowDevTools".to_string(),
@@ -7843,7 +8397,7 @@ fn build_claude_desktop_native_config_preview(
                 json_diff_line(
                     &json,
                     &["inferenceGatewayBaseUrl"],
-                    profile.base_url.trim(),
+                    &runtime_base_url,
                     "Points Claude Desktop directly at the selected Anthropic-compatible Provider Base URL.",
                 ),
                 json_diff_line(

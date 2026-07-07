@@ -374,6 +374,7 @@ export interface ProfileDraft {
   provider: string;
   protocol: string;
   model: string;
+  modelMappings: ProfileModelMapping[];
   baseUrl: string;
   authRef: string | null;
   createdAt: string | null;
@@ -384,6 +385,13 @@ export interface ProfileDraft {
 }
 
 export type ProviderApplyMode = "config" | "gateway";
+
+export interface ProfileModelMapping {
+  alias: string;
+  model: string;
+  supports1m: boolean;
+  description?: string | null;
+}
 
 export type UsageScriptTemplateType = "custom" | "general" | "newapi" | "token_plan" | "balance";
 
@@ -454,6 +462,7 @@ export interface SaveProfileDraftRequest {
   provider: string;
   protocol?: string | null;
   model: string;
+  modelMappings?: ProfileModelMapping[] | null;
   baseUrl: string;
   secretProvided: boolean;
   apiKey?: string | null;
@@ -468,6 +477,7 @@ export interface UpdateProfileDraftRequest {
   provider: string;
   protocol?: string | null;
   model: string;
+  modelMappings?: ProfileModelMapping[] | null;
   baseUrl: string;
   apiKey?: string | null;
 }
@@ -495,6 +505,7 @@ export interface PreviewProfileWriteRequest {
   provider: string;
   protocol?: string | null;
   model: string;
+  modelMappings?: ProfileModelMapping[] | null;
   baseUrl: string;
   secretProvided: boolean;
   apiKey?: string | null;
@@ -620,6 +631,31 @@ export interface TestProfileConnectionResult {
   checks: ProfileConnectionCheck[];
 }
 
+export interface ListProfileModelsRequest {
+  profileId?: string | null;
+  app: string;
+  mode?: ProviderApplyMode | null;
+  provider: string;
+  protocol?: string | null;
+  baseUrl: string;
+  apiKey?: string | null;
+}
+
+export interface ProfileModelOption {
+  id: string;
+  name?: string | null;
+  ownedBy?: string | null;
+  supports1m: boolean;
+}
+
+export interface ListProfileModelsResult {
+  generatedAt: string;
+  provider: string;
+  protocol: string;
+  baseUrl: string;
+  models: ProfileModelOption[];
+}
+
 export interface BackupManifest {
   id: string;
   reason: string;
@@ -705,7 +741,11 @@ export interface CodexClientSettings {
   installRoot: string;
   keepUserDataOnUninstall: boolean;
   syncHistoryOnLaunch: boolean;
-  patchForcePluginUnlock: boolean;
+  pluginMarketplaceUnlockOnLaunch: boolean;
+  pluginAutoExpandOnLaunch: boolean;
+  modelWhitelistUnlockOnLaunch: boolean;
+  serviceTierControlsOnLaunch: boolean;
+  officialRemotePluginCacheOnLaunch: boolean;
   computerUseGuardOnLaunch: boolean;
 }
 
@@ -718,7 +758,11 @@ export interface UpdateCodexClientSettingsRequest {
   installRoot?: string | null;
   keepUserDataOnUninstall?: boolean | null;
   syncHistoryOnLaunch?: boolean | null;
-  patchForcePluginUnlock?: boolean | null;
+  pluginMarketplaceUnlockOnLaunch?: boolean | null;
+  pluginAutoExpandOnLaunch?: boolean | null;
+  modelWhitelistUnlockOnLaunch?: boolean | null;
+  serviceTierControlsOnLaunch?: boolean | null;
+  officialRemotePluginCacheOnLaunch?: boolean | null;
   computerUseGuardOnLaunch?: boolean | null;
 }
 

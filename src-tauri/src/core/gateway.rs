@@ -922,6 +922,9 @@ fn models_response(target: &GatewayRouteTarget) -> HttpResponse {
     if target.tool_id.as_deref() == Some("claude-desktop") {
         return claude_desktop_models_response(target);
     }
+    if target.tool_id.as_deref() == Some("claude") {
+        return claude_code_models_response(target);
+    }
 
     let active = active_profile_for_target(target);
     let mut data = vec![json!({
@@ -991,6 +994,74 @@ fn claude_desktop_models_response(target: &GatewayRouteTarget) -> HttpResponse {
             "last_id": last_id
         }),
     )
+}
+
+fn claude_code_models_response(target: &GatewayRouteTarget) -> HttpResponse {
+    let items = active_profile_for_target(target)
+        .as_ref()
+        .map(claude_code_model_items)
+        .unwrap_or_else(claude_default_model_items);
+    let first_id = items
+        .first()
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let last_id = items
+        .last()
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    json_response(
+        200,
+        "OK",
+        json!({
+            "data": items,
+            "has_more": false,
+            "first_id": first_id,
+            "last_id": last_id
+        }),
+    )
+}
+
+fn claude_code_model_items(profile: &ProfileDraft) -> Vec<Value> {
+    if !profile.model_mappings.is_empty() {
+        return profile
+            .model_mappings
+            .iter()
+            .map(|mapping| {
+                let mut item = claude_model_item(&mapping.alias, mapping.supports_1m);
+                if let Some(description) = mapping.description.as_deref() {
+                    item["display_name"] = json!(description);
+                    item["description"] = json!(description);
+                }
+                item
+            })
+            .collect();
+    }
+
+    profile_model(profile)
+        .map(|model| vec![claude_model_item(&model, false)])
+        .unwrap_or_else(claude_default_model_items)
+}
+
+fn claude_default_model_items() -> Vec<Value> {
+    profile::claude_desktop_default_gateway_inference_models()
+        .iter()
+        .map(|spec| claude_model_item(&spec.name, spec.supports_1m))
+        .collect()
+}
+
+fn claude_model_item(id: &str, supports_1m: bool) -> Value {
+    let mut item = json!({
+        "type": "model",
+        "id": id,
+        "created_at": "2024-01-01T00:00:00Z"
+    });
+    if supports_1m {
+        item["supports1m"] = json!(true);
+    }
+    item
 }
 
 fn responses_response(
@@ -1491,12 +1562,11 @@ fn forward_gateway_request(
     };
 
     if client_protocol == upstream_protocol {
-        if config.model_override && !profile.model.trim().is_empty() {
-            request_body["model"] = Value::String(profile.model.clone());
+        let requested_model = request_model(&request_body);
+        let upstream_model = effective_upstream_model(&request_body, &profile, config);
+        if requested_model.as_deref() != Some(upstream_model.as_str()) {
+            request_body["model"] = Value::String(upstream_model.clone());
         }
-        let upstream_model = request_model(&request_body)
-            .or_else(|| profile_model(&profile))
-            .unwrap_or_else(|| CLIENT_MODEL.to_string());
         let endpoint = upstream_endpoint(upstream_protocol, &profile, &upstream_model, stream);
         let headers =
             upstream_headers_with_passthrough(upstream_protocol, &api_key, request_headers);
@@ -1855,8 +1925,29 @@ fn effective_upstream_model(
         return profile.model.trim().to_string();
     }
     request_model(request_body)
+        .map(|model| mapped_profile_model(profile, &model).unwrap_or(model))
         .or_else(|| profile_model(profile))
+        .or_else(|| default_mapped_profile_model(profile))
         .unwrap_or_else(|| CLIENT_MODEL.to_string())
+}
+
+fn mapped_profile_model(profile: &ProfileDraft, requested_model: &str) -> Option<String> {
+    profile
+        .model_mappings
+        .iter()
+        .find(|mapping| mapping.alias.eq_ignore_ascii_case(requested_model.trim()))
+        .map(|mapping| mapping.model.trim())
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string)
+}
+
+fn default_mapped_profile_model(profile: &ProfileDraft) -> Option<String> {
+    profile
+        .model_mappings
+        .first()
+        .map(|mapping| mapping.model.trim())
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string)
 }
 
 fn request_model(request_body: &Value) -> Option<String> {
@@ -3775,11 +3866,13 @@ fn upstream_endpoint(
         GatewayProtocol::OpenAiResponses => {
             upstream_api_endpoint(&profile.base_url, "/v1/responses")
         }
-        GatewayProtocol::AnthropicMessages => {
-            upstream_api_endpoint(&profile.base_url, "/v1/messages")
-        }
+        GatewayProtocol::AnthropicMessages => upstream_api_endpoint(&profile.base_url, "/messages"),
         GatewayProtocol::GoogleGemini => {
-            let base_url = profile.base_url.trim_end_matches('/');
+            let runtime_base_url = profile::profile_runtime_base_url_for_protocol(
+                PROTOCOL_GOOGLE_GEMINI,
+                &profile.base_url,
+            );
+            let base_url = runtime_base_url.trim_end_matches('/');
             let model = normalize_gemini_model_name(model);
             if stream {
                 format!("{base_url}/models/{model}:streamGenerateContent?alt=sse")
@@ -5436,6 +5529,7 @@ mod tests {
             provider: "test-provider".to_string(),
             protocol: protocol.to_string(),
             model: "test-model".to_string(),
+            model_mappings: Vec::new(),
             base_url: "https://api.example.test/v1".to_string(),
             auth_ref: Some("test-key".to_string()),
             created_at: None,
@@ -5451,6 +5545,56 @@ mod tests {
             base_url: base_url.to_string(),
             ..test_profile(protocol)
         }
+    }
+
+    #[test]
+    fn claude_code_model_items_use_profile_mappings_and_1m_flags() {
+        let mut profile = test_profile(PROTOCOL_ANTHROPIC_MESSAGES);
+        profile.app = "claude".to_string();
+        profile.model_mappings = vec![
+            crate::core::types::ProfileModelMapping {
+                alias: "claude-sonnet-4-6".to_string(),
+                model: "provider-sonnet".to_string(),
+                supports_1m: true,
+                description: Some("Provider Sonnet".to_string()),
+            },
+            crate::core::types::ProfileModelMapping {
+                alias: "claude-haiku-4-5".to_string(),
+                model: "provider-haiku".to_string(),
+                supports_1m: false,
+                description: None,
+            },
+        ];
+
+        let items = claude_code_model_items(&profile);
+
+        assert_eq!(items[0]["id"].as_str(), Some("claude-sonnet-4-6"));
+        assert_eq!(items[0]["supports1m"].as_bool(), Some(true));
+        assert_eq!(items[0]["display_name"].as_str(), Some("Provider Sonnet"));
+        assert_eq!(items[1]["id"].as_str(), Some("claude-haiku-4-5"));
+        assert!(items[1]["supports1m"].is_null());
+    }
+
+    #[test]
+    fn effective_upstream_model_maps_claude_code_alias_to_provider_model() {
+        let mut profile = test_profile(PROTOCOL_ANTHROPIC_MESSAGES);
+        profile.app = "claude".to_string();
+        profile.model = String::new();
+        profile.model_mappings = vec![crate::core::types::ProfileModelMapping {
+            alias: "claude-sonnet-4-6".to_string(),
+            model: "provider-sonnet".to_string(),
+            supports_1m: true,
+            description: None,
+        }];
+        let config = GatewayConfig {
+            model_override: false,
+            ..test_config(false)
+        };
+
+        assert_eq!(
+            effective_upstream_model(&json!({ "model": "claude-sonnet-4-6" }), &profile, &config),
+            "provider-sonnet"
+        );
     }
 
     fn header_map(items: &[(&str, &str)]) -> HashMap<String, String> {
@@ -6237,7 +6381,7 @@ mod tests {
             (
                 "https://api.anthropic.com",
                 GatewayProtocol::AnthropicMessages,
-                "https://api.anthropic.com/v1/messages",
+                "https://api.anthropic.com/messages",
             ),
             (
                 "https://api.anthropic.com/v1/messages",
@@ -6248,6 +6392,45 @@ mod tests {
                 "https://api.example.com/v1?ignored=1",
                 GatewayProtocol::OpenAiChatCompletions,
                 "https://api.example.com/v1/chat/completions",
+            ),
+        ];
+
+        for (base_url, protocol, expected) in cases {
+            let profile = test_profile_with_base_url("unused", base_url);
+            assert_eq!(
+                upstream_endpoint(protocol, &profile, "test-model", false),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_endpoint_adds_v1_only_for_openai_root_profiles() {
+        let cases = [
+            (
+                "https://api.apikey.fun",
+                GatewayProtocol::OpenAiResponses,
+                "https://api.apikey.fun/v1/responses",
+            ),
+            (
+                "https://api.apikey.fun/",
+                GatewayProtocol::OpenAiResponses,
+                "https://api.apikey.fun/v1/responses",
+            ),
+            (
+                "https://api.apikey.fun/v1",
+                GatewayProtocol::OpenAiResponses,
+                "https://api.apikey.fun/v1/responses",
+            ),
+            (
+                "https://generativelanguage.googleapis.com",
+                GatewayProtocol::GoogleGemini,
+                "https://generativelanguage.googleapis.com/models/test-model:generateContent",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta",
+                GatewayProtocol::GoogleGemini,
+                "https://generativelanguage.googleapis.com/v1beta/models/test-model:generateContent",
             ),
         ];
 

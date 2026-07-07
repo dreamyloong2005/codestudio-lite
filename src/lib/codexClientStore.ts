@@ -120,7 +120,11 @@ function defaultCodexClientSettings(): CodexClientSettings {
     installRoot: "",
     keepUserDataOnUninstall: true,
     syncHistoryOnLaunch: false,
-    patchForcePluginUnlock: false,
+    pluginMarketplaceUnlockOnLaunch: true,
+    pluginAutoExpandOnLaunch: true,
+    modelWhitelistUnlockOnLaunch: true,
+    serviceTierControlsOnLaunch: false,
+    officialRemotePluginCacheOnLaunch: true,
     computerUseGuardOnLaunch: false
   };
 }
@@ -204,7 +208,11 @@ function settingsKey(settings: CodexClientSettings) {
     installRoot: settings.installRoot,
     keepUserDataOnUninstall: settings.keepUserDataOnUninstall,
     syncHistoryOnLaunch: settings.syncHistoryOnLaunch,
-    patchForcePluginUnlock: settings.patchForcePluginUnlock,
+    pluginMarketplaceUnlockOnLaunch: settings.pluginMarketplaceUnlockOnLaunch,
+    pluginAutoExpandOnLaunch: settings.pluginAutoExpandOnLaunch,
+    modelWhitelistUnlockOnLaunch: settings.modelWhitelistUnlockOnLaunch,
+    serviceTierControlsOnLaunch: settings.serviceTierControlsOnLaunch,
+    officialRemotePluginCacheOnLaunch: settings.officialRemotePluginCacheOnLaunch,
     computerUseGuardOnLaunch: settings.computerUseGuardOnLaunch
   });
 }
@@ -230,9 +238,21 @@ function mergeScannedSettings(
     syncHistoryOnLaunch: preserveLaunchOptions && draft
       ? draft.syncHistoryOnLaunch
       : stateSettings.syncHistoryOnLaunch,
-    patchForcePluginUnlock: preserveLaunchOptions && draft
-      ? draft.patchForcePluginUnlock
-      : stateSettings.patchForcePluginUnlock,
+    pluginMarketplaceUnlockOnLaunch: preserveLaunchOptions && draft
+      ? draft.pluginMarketplaceUnlockOnLaunch
+      : stateSettings.pluginMarketplaceUnlockOnLaunch,
+    pluginAutoExpandOnLaunch: preserveLaunchOptions && draft
+      ? draft.pluginAutoExpandOnLaunch
+      : stateSettings.pluginAutoExpandOnLaunch,
+    modelWhitelistUnlockOnLaunch: preserveLaunchOptions && draft
+      ? draft.modelWhitelistUnlockOnLaunch
+      : stateSettings.modelWhitelistUnlockOnLaunch,
+    serviceTierControlsOnLaunch: preserveLaunchOptions && draft
+      ? draft.serviceTierControlsOnLaunch
+      : stateSettings.serviceTierControlsOnLaunch,
+    officialRemotePluginCacheOnLaunch: preserveLaunchOptions && draft
+      ? draft.officialRemotePluginCacheOnLaunch
+      : stateSettings.officialRemotePluginCacheOnLaunch,
     computerUseGuardOnLaunch: preserveLaunchOptions && draft
       ? draft.computerUseGuardOnLaunch
       : stateSettings.computerUseGuardOnLaunch

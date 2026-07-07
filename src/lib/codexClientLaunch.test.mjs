@@ -39,7 +39,132 @@ test("Codex plugin force unlock includes modern marketplace request patches", ()
   assert.match(core, /plugin_marketplace_hidden_filter_bypassed/);
 });
 
-test("Codex plugin force unlock injection runs after launch without blocking the command", () => {
+test("Codex launch options mirror Codex++ plugin and model toggles", () => {
+  const route = read("src/routes/CodexClient.svelte");
+  const store = read("src/lib/codexClientStore.ts");
+  const types = read("src/types.ts");
+  const core = read("src-tauri/src/core/codex_client.rs");
+  const zhCN = read("src/lib/locales/zh-CN.ts");
+  const zhTW = read("src/lib/locales/zh-TW.ts");
+  const enUS = read("src/lib/locales/en-US.ts");
+
+  const codexPlusPluginAndModelDefaults = {
+    pluginMarketplaceUnlockOnLaunch: true,
+    pluginAutoExpandOnLaunch: true,
+    modelWhitelistUnlockOnLaunch: true,
+    serviceTierControlsOnLaunch: false
+  };
+
+  for (const [key, defaultValue] of Object.entries(codexPlusPluginAndModelDefaults)) {
+    assert.match(route, new RegExp(`settingsDraft\\.${key}`));
+    assert.match(route, new RegExp(`updateCodexClientDraft\\(\\{ ${key}: event\\.currentTarget\\.checked \\}\\)`));
+    assert.match(store, new RegExp(`${key}: ${defaultValue}`));
+    assert.match(store, new RegExp(`${key}: settings\\.${key}`));
+    assert.match(store, new RegExp(`${key}: preserveLaunchOptions && draft[\\s\\S]*\\? draft\\.${key}[\\s\\S]*: stateSettings\\.${key}`));
+    assert.match(types, new RegExp(`${key}: boolean;`));
+    assert.match(types, new RegExp(`${key}\\?: boolean \\| null;`));
+  }
+
+  for (const dictionary of [zhCN, zhTW, enUS]) {
+    assert.match(dictionary, /"codexClient\.pluginMarketplaceUnlockOnLaunch"/);
+    assert.match(dictionary, /"codexClient\.pluginAutoExpandOnLaunch"/);
+    assert.match(dictionary, /"codexClient\.modelWhitelistUnlockOnLaunch"/);
+    assert.match(dictionary, /"codexClient\.serviceTierControlsOnLaunch"/);
+  }
+
+  assert.doesNotMatch(route, /settingsDraft\.patchForcePluginUnlock/);
+  assert.match(core, /pub plugin_marketplace_unlock_on_launch: bool/);
+  assert.match(core, /pub plugin_auto_expand_on_launch: bool/);
+  assert.match(core, /pub model_whitelist_unlock_on_launch: bool/);
+  assert.match(core, /pub service_tier_controls_on_launch: bool/);
+});
+
+test("Codex launch options include the official remote plugin cache", () => {
+  const route = read("src/routes/CodexClient.svelte");
+  const store = read("src/lib/codexClientStore.ts");
+  const types = read("src/types.ts");
+  const api = read("src/lib/api.ts");
+  const core = read("src-tauri/src/core/codex_client.rs");
+  const moduleIndex = read("src-tauri/src/core/mod.rs");
+  const zhCN = read("src/lib/locales/zh-CN.ts");
+  const zhTW = read("src/lib/locales/zh-TW.ts");
+  const enUS = read("src/lib/locales/en-US.ts");
+
+  assert.match(route, /settingsDraft\.officialRemotePluginCacheOnLaunch/);
+  assert.match(route, /updateCodexClientDraft\(\{ officialRemotePluginCacheOnLaunch: event\.currentTarget\.checked \}\)/);
+  assert.match(store, /officialRemotePluginCacheOnLaunch: true/);
+  assert.match(store, /officialRemotePluginCacheOnLaunch: settings\.officialRemotePluginCacheOnLaunch/);
+  assert.match(store, /officialRemotePluginCacheOnLaunch: preserveLaunchOptions && draft[\s\S]*\? draft\.officialRemotePluginCacheOnLaunch[\s\S]*: stateSettings\.officialRemotePluginCacheOnLaunch/);
+  assert.match(types, /officialRemotePluginCacheOnLaunch: boolean;/);
+  assert.match(types, /officialRemotePluginCacheOnLaunch\?: boolean \| null;/);
+  assert.match(api, /officialRemotePluginCacheOnLaunch: request\.officialRemotePluginCacheOnLaunch \?\? mockCodexClientSettings\.officialRemotePluginCacheOnLaunch/);
+  assert.match(core, /pub official_remote_plugin_cache_on_launch: bool/);
+  assert.match(core, /ensure_official_remote_plugin_cache_if_enabled\(&settings\)/);
+  assert.match(moduleIndex, /pub mod codex_plugin_marketplace;/);
+
+  const marketplace = read("src-tauri/src/core/codex_plugin_marketplace.rs");
+  assert.match(marketplace, /OPENAI_CURATED_REMOTE_MARKETPLACE: &str = "openai-curated-remote"/);
+  assert.match(marketplace, /plugins-remote/);
+  assert.match(marketplace, /include_bytes!\(.+openai-curated-remote\.zip/);
+  assert.match(marketplace, /ensure_official_remote_plugin_cache/);
+  assert.match(marketplace, /source_type"\]\s*=\s*toml_edit::value\("local"\)/);
+
+  for (const dictionary of [zhCN, zhTW, enUS]) {
+    assert.match(dictionary, /"codexClient\.officialRemotePluginCacheOnLaunch"/);
+    assert.match(dictionary, /"codexClient\.officialRemotePluginCacheOnLaunchHint"/);
+  }
+});
+
+test("Codex plugin and model injection is gated by individual Codex++ launch options", () => {
+  const core = read("src-tauri/src/core/codex_client.rs");
+
+  assert.match(core, /struct CodexEnhancementInjectionSettings/);
+  assert.match(core, /plugin_marketplace_unlock:\s*settings\.plugin_marketplace_unlock_on_launch/);
+  assert.match(core, /plugin_auto_expand:\s*settings\.plugin_auto_expand_on_launch/);
+  assert.match(core, /model_whitelist_unlock:\s*settings\.model_whitelist_unlock_on_launch/);
+  assert.match(core, /service_tier_controls:\s*settings\.service_tier_controls_on_launch/);
+  assert.match(core, /function codestudioLiteSettings\(\)/);
+  assert.match(core, /if \(settings\.pluginMarketplaceUnlock\)/);
+  assert.match(core, /if \(settings\.pluginAutoExpand\)/);
+  assert.match(core, /if \(settings\.modelWhitelistUnlock\)/);
+  assert.match(core, /if \(settings\.serviceTierControls\)/);
+  assert.match(core, /function schedulePluginAutoExpand/);
+  assert.match(core, /function patchCodexModelWhitelist/);
+  assert.match(core, /function installCodexServiceTierDispatcherPatch/);
+  assert.doesNotMatch(core, /function unlockInstallButtons/);
+  assert.doesNotMatch(core, /强制安装/);
+});
+
+test("Codex model whitelist injection reads Codex++ local model catalog files", () => {
+  const core = read("src-tauri/src/core/codex_client.rs");
+
+  assert.match(core, /model_catalog_json/);
+  assert.match(core, /fn collect_codex_model_catalog_json_models/);
+  assert.match(core, /supported_in_api/);
+  assert.match(core, /visibility/);
+  assert.match(core, /profiles/);
+});
+
+test("Codex service tier injection mirrors the latest Codex++ Fast controls", () => {
+  const core = read("src-tauri/src/core/codex_client.rs");
+
+  assert.match(core, /const codexThreadServiceTierVersion = "1"/);
+  assert.match(core, /const codexThreadServiceTierMaxEntries = 120/);
+  assert.match(core, /const codexThreadServiceTierDraftBindWindowMs = 60 \* 1000/);
+  assert.match(core, /const codexDefaultServiceTierSetting = \{ key: "default-service-tier", default: null \}/);
+  assert.match(core, /function getCodexServiceTierSetting\(\)/);
+  assert.match(core, /function readThreadServiceTierState\(\)/);
+  assert.match(core, /function setCodexServiceTierControlMode\(mode\)/);
+  assert.match(core, /function setCodexThreadServiceTierMode\(mode\)/);
+  assert.match(core, /function codexServiceTierOverrideForRequest\(method, params, threadIdHint = ""\)/);
+  assert.match(core, /global-standard/);
+  assert.match(core, /global-fast/);
+  assert.match(core, /custom/);
+  assert.match(core, /fastBlocked/);
+  assert.doesNotMatch(core, /function codexServiceTierMode\(\)/);
+});
+
+test("Codex enhancement injection runs after launch without blocking the command", () => {
   const commands = read("src-tauri/src/commands/codex_client.rs");
   const core = read("src-tauri/src/core/codex_client.rs");
   const launchBody = core
@@ -51,8 +176,8 @@ test("Codex plugin force unlock injection runs after launch without blocking the
   assert.ok(launchBody, "Codex launch body should be present");
   assert.match(commands, /pub async fn launch_codex_client\(\) -> Result<\(\), String>/);
   assert.match(commands, /spawn_blocking\(\|\| codex_client::launch\(\)\)/);
-  assert.doesNotMatch(launchBody, /inject_plugin_unlock\(debug_port\)\?/);
-  assert.match(launchBody, /spawn_plugin_unlock_injection\(debug_port\)/);
+  assert.doesNotMatch(launchBody, /inject_codex_enhancements\(debug_port/);
+  assert.match(launchBody, /spawn_codex_enhancement_injection\(debug_port/);
 });
 
 test("Codex client notices are localized and dismiss with an icon", () => {

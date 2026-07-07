@@ -3,13 +3,13 @@ use crate::core::codex_client::CodexClientState;
 use crate::core::privacy_filter::{PrivacyFilterAction, PrivacyFilterMode};
 use crate::core::types::{
     ActiveProfilesByMode, ActivityEvent, BackupManifest, DetectionSnapshot, DetectionSource,
-    GatewayRequestLogEntry, ProfileDraft, ProviderApplyMode, Severity, UsageQueryResult,
-    UsageScriptConfig, UsageScriptTemplateType,
+    GatewayRequestLogEntry, ProfileDraft, ProfileModelMapping, ProviderApplyMode, Severity,
+    UsageQueryResult, UsageScriptConfig, UsageScriptTemplateType,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug, Clone)]
 pub struct StoredAppConfig {
@@ -90,7 +90,8 @@ pub fn load_profiles() -> Result<Vec<ProfileDraft>, String> {
     let conn = connection()?;
     let mut statement = conn
         .prepare(
-            "SELECT id, name, icon, remark, app, mode, provider, protocol, model, base_url, auth_ref,
+            "SELECT id, name, icon, remark, app, mode, provider, protocol, model, model_mappings_json,
+                    base_url, auth_ref,
                     created_at, updated_at, last_test_status, sort_order
              FROM profiles
              ORDER BY app ASC, mode ASC, sort_order ASC, name ASC",
@@ -98,41 +99,50 @@ pub fn load_profiles() -> Result<Vec<ProfileDraft>, String> {
         .map_err(|err| err.to_string())?;
     let rows = statement
         .query_map([], |row| {
-            Ok(ProfileDraft {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                remark: row.get(3)?,
-                app: row.get(4)?,
-                is_builtin: false,
-                mode: mode_from_storage(row.get::<_, String>(5)?.as_str()),
-                provider: row.get(6)?,
-                protocol: row.get(7)?,
-                model: row.get(8)?,
-                base_url: row.get(9)?,
-                auth_ref: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
-                last_test_status: row.get(13)?,
-                usage_enabled: false,
-                sort_order: row.get(14)?,
-            })
+            Ok((
+                ProfileDraft {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    icon: row.get(2)?,
+                    remark: row.get(3)?,
+                    app: row.get(4)?,
+                    is_builtin: false,
+                    mode: mode_from_storage(row.get::<_, String>(5)?.as_str()),
+                    provider: row.get(6)?,
+                    protocol: row.get(7)?,
+                    model: row.get(8)?,
+                    model_mappings: Vec::new(),
+                    base_url: row.get(10)?,
+                    auth_ref: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
+                    last_test_status: row.get(14)?,
+                    usage_enabled: false,
+                    sort_order: row.get(15)?,
+                },
+                row.get::<_, Option<String>>(9)?,
+            ))
         })
         .map_err(|err| err.to_string())?;
     let mut profiles = Vec::new();
     for row in rows {
-        profiles.push(row.map_err(|err| err.to_string())?);
+        let (mut profile, model_mappings_json) = row.map_err(|err| err.to_string())?;
+        profile.model_mappings =
+            deserialize_profile_model_mappings(model_mappings_json.as_deref())?;
+        profiles.push(profile);
     }
     Ok(profiles)
 }
 
 pub fn save_profile(profile: &ProfileDraft) -> Result<(), String> {
     let conn = connection()?;
+    let model_mappings_json = serialize_profile_model_mappings(&profile.model_mappings)?;
     conn.execute(
         "INSERT INTO profiles (
-            id, name, icon, remark, app, mode, provider, protocol, model, base_url, auth_ref,
+            id, name, icon, remark, app, mode, provider, protocol, model, model_mappings_json,
+            base_url, auth_ref,
             created_at, updated_at, last_test_status, sort_order
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(id) DO UPDATE SET
             name=excluded.name,
             icon=excluded.icon,
@@ -142,6 +152,7 @@ pub fn save_profile(profile: &ProfileDraft) -> Result<(), String> {
             provider=excluded.provider,
             protocol=excluded.protocol,
             model=excluded.model,
+            model_mappings_json=excluded.model_mappings_json,
             base_url=excluded.base_url,
             auth_ref=excluded.auth_ref,
             created_at=excluded.created_at,
@@ -158,6 +169,7 @@ pub fn save_profile(profile: &ProfileDraft) -> Result<(), String> {
             profile.provider,
             profile.protocol,
             profile.model,
+            model_mappings_json,
             profile.base_url,
             profile.auth_ref,
             profile.created_at,
@@ -168,6 +180,19 @@ pub fn save_profile(profile: &ProfileDraft) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn serialize_profile_model_mappings(mappings: &[ProfileModelMapping]) -> Result<String, String> {
+    serde_json::to_string(mappings).map_err(|err| err.to_string())
+}
+
+fn deserialize_profile_model_mappings(
+    value: Option<&str>,
+) -> Result<Vec<ProfileModelMapping>, String> {
+    let Some(value) = value.map(str::trim).filter(|item| !item.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(value).map_err(|err| format!("Invalid profile model mappings: {err}"))
 }
 
 pub fn next_profile_sort_order(app: &str, mode: &ProviderApplyMode) -> Result<i64, String> {
@@ -760,6 +785,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
           provider TEXT NOT NULL,
           protocol TEXT NOT NULL,
           model TEXT NOT NULL,
+          model_mappings_json TEXT NOT NULL DEFAULT '[]',
           base_url TEXT NOT NULL,
           auth_ref TEXT,
           created_at TEXT,
@@ -859,6 +885,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     ensure_profiles_icon_column(conn)?;
     ensure_profiles_remark_column(conn)?;
     ensure_profiles_sort_order_column(conn)?;
+    ensure_profiles_model_mappings_column(conn)?;
     ensure_gateway_request_privacy_columns(conn)?;
     ensure_codex_client_state_table(conn)?;
     save_meta(conn, "schema_version", &SCHEMA_VERSION.to_string())?;
@@ -911,6 +938,18 @@ fn ensure_profiles_sort_order_column(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     initialize_profile_sort_order(conn)
+}
+
+fn ensure_profiles_model_mappings_column(conn: &Connection) -> Result<(), String> {
+    if table_has_column(conn, "profiles", "model_mappings_json")? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE profiles ADD COLUMN model_mappings_json TEXT NOT NULL DEFAULT '[]'",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
@@ -1683,6 +1722,33 @@ mod tests {
     }
 
     #[test]
+    fn profiles_table_has_model_mappings_column() {
+        let conn = Connection::open_in_memory().expect("in-memory database should open");
+        initialize_schema(&conn).expect("schema should initialize");
+
+        assert!(table_has_column(&conn, "profiles", "model_mappings_json")
+            .expect("profile model mappings column should be inspectable"));
+    }
+
+    #[test]
+    fn profile_model_mappings_json_roundtrips() {
+        let mappings = vec![ProfileModelMapping {
+            alias: "claude-sonnet-4-6".to_string(),
+            model: "provider-sonnet".to_string(),
+            supports_1m: true,
+            description: Some("Provider Sonnet".to_string()),
+        }];
+
+        let json =
+            serialize_profile_model_mappings(&mappings).expect("model mappings should serialize");
+        assert_eq!(
+            deserialize_profile_model_mappings(Some(&json))
+                .expect("model mappings should deserialize"),
+            mappings
+        );
+    }
+
+    #[test]
     fn profiles_roundtrip_optional_remark() {
         let conn = Connection::open_in_memory().expect("in-memory database should open");
         initialize_schema(&conn).expect("schema should initialize");
@@ -1697,6 +1763,7 @@ mod tests {
             provider: "openai".to_string(),
             protocol: "openai-chat-completions".to_string(),
             model: String::new(),
+            model_mappings: Vec::new(),
             base_url: "https://example.test/v1".to_string(),
             auth_ref: None,
             created_at: None,

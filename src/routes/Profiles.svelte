@@ -15,6 +15,7 @@
     deleteProfileDraft,
     deleteUsageScript,
     duplicateProfileDraft,
+    listProfileModels,
     loadUsageScriptState,
     previewProfileApply,
     queryProfileUsage,
@@ -85,6 +86,8 @@
     DetectionSnapshot,
     PreviewProfileApplyResult,
     ProfileDraft,
+    ProfileModelMapping,
+    ProfileModelOption,
     ProfileSummary,
     ProviderApplyMode,
     UsageData,
@@ -123,8 +126,16 @@
     provider: string;
     protocol: string;
     model: string;
+    modelMappings: ProfileModelMappingForm[];
     baseUrl: string;
     apiKey: string;
+  };
+
+  type ProfileModelMappingForm = {
+    alias: string;
+    model: string;
+    supports1m: boolean;
+    description: string;
   };
 
   type UsageForm = {
@@ -150,6 +161,10 @@
   let pendingEdit: ProfileDraft | null = null;
   let editForm: EditProfileForm = emptyEditForm();
   let editingId: string | null = null;
+  let editModelOptions: ProfileModelOption[] = [];
+  let editModelLoading = false;
+  let editModelError: string | null = null;
+  let editModelLoadedKey = "";
   let applyingId: string | null = null;
   let duplicatingId: string | null = null;
   let deletingId: string | null = null;
@@ -222,6 +237,84 @@
     "& code": {
       width: "100%"
     }
+  });
+  const modelPickerClass = css({
+    display: "grid",
+    gap: "6px",
+    color: "var(--text-soft)",
+    fontSize: "13px",
+    fontWeight: 800,
+    minWidth: 0
+  });
+  const modelPickerRowClass = css({
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto",
+    alignItems: "center",
+    gap: "8px",
+    minWidth: 0,
+    "& button": {
+      height: "38px"
+    },
+    "@media (max-width: 860px)": {
+      gridTemplateColumns: "1fr",
+      alignItems: "stretch"
+    }
+  });
+  const modelPickerStatusClass = css({
+    color: "var(--text-muted)",
+    fontSize: "12px",
+    fontWeight: 700,
+    lineHeight: 1.35,
+    overflowWrap: "anywhere"
+  });
+  const modelMappingPanelClass = css({
+    display: "grid",
+    gap: "10px",
+    gridColumn: "1 / -1",
+    padding: "12px",
+    border: "1px solid var(--border)",
+    borderRadius: "8px",
+    background: "var(--surface-muted)",
+    minWidth: 0
+  });
+  const modelMappingHeaderClass = css({
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "10px",
+    minWidth: 0,
+    "& strong": {
+      color: "var(--text)",
+      fontSize: "13px",
+      fontWeight: 800
+    }
+  });
+  const modelMappingRowsClass = css({
+    display: "grid",
+    gap: "8px",
+    minWidth: 0
+  });
+  const modelMappingRowClass = css({
+    display: "grid",
+    gridTemplateColumns: "minmax(120px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) auto auto",
+    gap: "8px",
+    alignItems: "end",
+    minWidth: 0,
+    "& label": {
+      minWidth: 0
+    },
+    "@media (max-width: 980px)": {
+      gridTemplateColumns: "1fr"
+    }
+  });
+  const modelMappingToggleClass = css({
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "8px",
+    color: "var(--text-soft)",
+    fontSize: "13px",
+    fontWeight: 800,
+    minHeight: "38px"
   });
 
   const toolOrder = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes"];
@@ -304,6 +397,28 @@
   $: availableEditProtocolOptions = pendingEdit
     ? protocolOptionsFor(pendingEdit.app, editForm.mode)
     : protocolOptions;
+  $: editSupportsModelMappings = Boolean(pendingEdit) && profileSupportsModelMappings(pendingEdit?.app ?? "");
+  $: editModelMappingsValid =
+    !editSupportsModelMappings || profileModelMappingsAreValid(editForm.modelMappings);
+  $: editModelListId = pendingEdit
+    ? `edit-model-options-${domSafeId(pendingEdit.id)}`
+    : "edit-model-options";
+  $: editModelRequestKey = pendingEdit
+    ? profileModelRequestKey({
+        profileId: pendingEdit.id,
+        app: pendingEdit.app,
+        mode: editForm.mode,
+        provider: editForm.provider,
+        protocol: editForm.protocol,
+        baseUrl: editForm.baseUrl,
+        apiKey: editForm.apiKey
+      })
+    : "";
+  $: if (editModelLoadedKey && editModelLoadedKey !== editModelRequestKey) {
+    editModelOptions = [];
+    editModelError = null;
+    editModelLoadedKey = "";
+  }
   $: pendingUsageIsCodexOfficialOAuth = pendingUsageProfile
     ? profileUsesCodexOfficialOAuth(pendingUsageProfile)
     : false;
@@ -316,8 +431,29 @@
     isProtocolAllowedForToolMode(pendingEdit?.app ?? "", editForm.mode, editForm.protocol) &&
     (!providerNeedsBaseUrl(editForm.provider) || editBaseUrlErrorKey === null) &&
     (!providerRequiresApiKey(editForm.provider) || Boolean(pendingEdit?.authRef) || editForm.apiKey.trim().length > 0) &&
+    editModelMappingsValid &&
     !pendingEdit?.isBuiltin &&
     editingId === null;
+  $: canFetchEditModels =
+    Boolean(pendingEdit) &&
+    !providerIsOfficial(editForm.provider) &&
+    editForm.provider.trim().length > 0 &&
+    isProtocolAllowedForToolMode(pendingEdit?.app ?? "", editForm.mode, editForm.protocol) &&
+    (!providerNeedsBaseUrl(editForm.provider) || editBaseUrlErrorKey === null) &&
+    (!providerRequiresApiKey(editForm.provider) ||
+      editForm.apiKey.trim().length > 0 ||
+      (pendingEdit?.provider === editForm.provider && Boolean(pendingEdit?.authRef))) &&
+    editingId === null &&
+    !editModelLoading;
+  $: editModelFetchDisabled =
+    !pendingEdit || providerIsOfficial(editForm.provider) || editingId !== null || editModelLoading;
+  $: editModelStatus = editModelLoading
+    ? $t("profiles.fetchingModels")
+    : editModelError
+      ? editModelError
+      : editModelOptions.length > 0
+        ? $t("profiles.modelListLoaded", { count: editModelOptions.length })
+        : null;
   $: canSaveUsage =
     Boolean(pendingUsageProfile) &&
     (!usageForm.enabled || pendingUsageIsCodexOfficialOAuth || usageForm.code.trim().length > 0) &&
@@ -368,6 +504,7 @@
       provider: "",
       protocol: "openai-chat-completions",
       model: "",
+      modelMappings: [],
       baseUrl: "",
       apiKey: ""
     };
@@ -751,6 +888,7 @@
     }
     pendingEdit = profile;
     editError = null;
+    resetEditModels();
     const nextForm = {
       name: profile.name,
       icon: profile.icon ?? "",
@@ -759,6 +897,7 @@
       provider: profile.provider,
       protocol: profile.protocol,
       model: profile.model,
+      modelMappings: modelMappingFormsFromProfile(profile),
       baseUrl: profile.baseUrl,
       apiKey: ""
     };
@@ -774,14 +913,61 @@
     }
     pendingEdit = null;
     editError = null;
+    resetEditModels();
     editForm = emptyEditForm();
+  }
+
+  function resetEditModels() {
+    editModelOptions = [];
+    editModelLoading = false;
+    editModelError = null;
+    editModelLoadedKey = "";
+  }
+
+  async function refreshEditModels() {
+    if (!pendingEdit) {
+      return;
+    }
+    if (!canFetchEditModels) {
+      editModelError = $t("profiles.modelListNeedsConfig");
+      return;
+    }
+
+    editModelLoading = true;
+    editModelError = null;
+    const requestKey = editModelRequestKey;
+
+    try {
+      const result = await listProfileModels({
+        profileId: pendingEdit.id,
+        app: pendingEdit.app,
+        mode: editForm.mode,
+        provider: editForm.provider,
+        protocol: editForm.protocol,
+        baseUrl: normalizeBaseUrl(editForm.baseUrl),
+        apiKey: editForm.apiKey.trim() || null
+      });
+      editModelOptions = result.models;
+      editModelLoadedKey = requestKey;
+      if (result.models.length === 0) {
+        editModelError = $t("profiles.modelListEmpty");
+      }
+    } catch (err) {
+      editModelOptions = [];
+      editModelLoadedKey = "";
+      editModelError = errorLabel(err instanceof Error ? err.message : String(err));
+    } finally {
+      editModelLoading = false;
+    }
   }
 
   async function handleEditSave() {
     if (!pendingEdit || !canSaveEdit) {
       editError = editIconTooLong
         ? $t("profiles.iconTooLong")
-        : editBaseUrlErrorKey ? $t(editBaseUrlErrorKey) : $t("profiles.editRequired");
+        : editBaseUrlErrorKey ? $t(editBaseUrlErrorKey)
+          : !editModelMappingsValid ? $t("profiles.modelMappingsInvalid")
+            : $t("profiles.editRequired");
       return;
     }
 
@@ -798,6 +984,7 @@
         provider: editForm.provider,
         protocol: editForm.protocol,
         model: editForm.model,
+        modelMappings: modelMappingsForRequest(pendingEdit.app, editForm.modelMappings),
         baseUrl: normalizeBaseUrl(editForm.baseUrl),
         apiKey: editForm.apiKey.trim().length > 0 ? editForm.apiKey : null
       });
@@ -971,6 +1158,128 @@
 
   function providerIsOfficial(providerId: string) {
     return providerId.trim() === "official";
+  }
+
+  function domSafeId(value: string) {
+    return value.replace(/[^a-zA-Z0-9_-]+/g, "-") || "model";
+  }
+
+  function profileModelRequestKey(input: {
+    profileId?: string | null;
+    app: string;
+    mode: ProviderApplyMode;
+    provider: string;
+    protocol: string;
+    baseUrl: string;
+    apiKey: string;
+  }) {
+    return [
+      input.profileId ?? "",
+      input.app.trim(),
+      input.mode,
+      input.provider.trim(),
+      input.protocol.trim(),
+      normalizeBaseUrl(input.baseUrl),
+      input.apiKey.trim() ? "inline-key" : "stored-key"
+    ].join("|");
+  }
+
+  function modelOptionLabel(option: ProfileModelOption) {
+    const label = option.name && option.name !== option.id ? `${option.id} - ${option.name}` : option.id;
+    return option.supports1m ? `${label} (1M)` : label;
+  }
+
+  function profileSupportsModelMappings(toolId: string) {
+    return canonicalProfileToolId(toolId) === "claude";
+  }
+
+  function emptyProfileModelMappingForm(): ProfileModelMappingForm {
+    return {
+      alias: "",
+      model: "",
+      supports1m: false,
+      description: ""
+    };
+  }
+
+  function modelMappingFormsFromProfile(profile: ProfileDraft): ProfileModelMappingForm[] {
+    return (profile.modelMappings ?? []).map((mapping) => ({
+      alias: mapping.alias,
+      model: mapping.model,
+      supports1m: Boolean(mapping.supports1m),
+      description: mapping.description ?? ""
+    }));
+  }
+
+  function modelMappingsForRequest(
+    toolId: string,
+    mappings: ProfileModelMappingForm[]
+  ): ProfileModelMapping[] {
+    if (!profileSupportsModelMappings(toolId)) {
+      return [];
+    }
+    return mappings
+      .map((mapping) => ({
+        alias: mapping.alias.trim(),
+        model: mapping.model.trim(),
+        supports1m: Boolean(mapping.supports1m),
+        description: mapping.description.trim() || null
+      }))
+      .filter((mapping) => mapping.alias || mapping.model || mapping.description);
+  }
+
+  function profileModelMappingsAreValid(mappings: ProfileModelMappingForm[]) {
+    const aliases = new Set<string>();
+    for (const mapping of mappings) {
+      const alias = mapping.alias.trim();
+      const model = mapping.model.trim();
+      const description = mapping.description.trim();
+      if (!alias && !model && !description) {
+        continue;
+      }
+      if (!alias || !model) {
+        return false;
+      }
+      const aliasKey = alias.toLowerCase();
+      if (aliases.has(aliasKey)) {
+        return false;
+      }
+      aliases.add(aliasKey);
+    }
+    return true;
+  }
+
+  function addEditModelMapping() {
+    editForm = {
+      ...editForm,
+      modelMappings: [...editForm.modelMappings, emptyProfileModelMappingForm()]
+    };
+  }
+
+  function updateEditModelMapping(index: number, patch: Partial<ProfileModelMappingForm>) {
+    editForm = {
+      ...editForm,
+      modelMappings: editForm.modelMappings.map((mapping, itemIndex) =>
+        itemIndex === index ? { ...mapping, ...patch } : mapping
+      )
+    };
+  }
+
+  function updateEditModelMappingModel(index: number, value: string) {
+    const option = editModelOptions.find((item) => item.id === value.trim());
+    const current = editForm.modelMappings[index];
+    updateEditModelMapping(index, {
+      model: value,
+      supports1m: option?.supports1m ?? current?.supports1m ?? false,
+      description: current?.description || option?.name || ""
+    });
+  }
+
+  function removeEditModelMapping(index: number) {
+    editForm = {
+      ...editForm,
+      modelMappings: editForm.modelMappings.filter((_, itemIndex) => itemIndex !== index)
+    };
   }
 
   function editableOfficialProfileAllowed(profile: ProfileDraft | null, mode: ProviderApplyMode) {
@@ -1458,6 +1767,13 @@
     }
     if (message === "Official provider uses the client login directly and does not run through the local gateway.") {
       return $t("profiles.warning.officialGatewayUnsupported");
+    }
+    if (message === "Claude Code model mappings require both alias and target model.") {
+      return $t("profiles.modelMappingsInvalid");
+    }
+    const duplicateMappingMatch = message.match(/Claude Code model mapping alias '([^']+)' is duplicated\./);
+    if (duplicateMappingMatch) {
+      return $t("profiles.modelMappingsDuplicate", { alias: duplicateMappingMatch[1] });
     }
     if (
       message === "Profile is already active for this tool and mode." ||
@@ -2177,10 +2493,108 @@
             {/each}
           </select>
         </label>
-          <label>
-            {$t("common.model")}
-            <input bind:value={editForm.model} disabled={editingId !== null} />
-          </label>
+          <div class={modelPickerClass}>
+            <label for={`${editModelListId}-input`}>{$t("common.model")}</label>
+            <div class={modelPickerRowClass}>
+              <input
+                id={`${editModelListId}-input`}
+                bind:value={editForm.model}
+                list={editModelOptions.length > 0 ? editModelListId : undefined}
+                disabled={editingId !== null}
+              />
+              <button
+                class={actionButtonRecipe()}
+                type="button"
+                data-refresh-button="true"
+                disabled={editModelFetchDisabled}
+                title={$t("profiles.fetchModels")}
+                on:click={refreshEditModels}
+              >
+                <AppIcon name={editModelLoading ? "loading" : "refresh"} class={editModelLoading ? spinRecipe() : ""} size={15} />
+                {editModelLoading ? $t("profiles.fetchingModels") : $t("profiles.fetchModels")}
+              </button>
+            </div>
+            {#if editModelOptions.length > 0}
+              <datalist id={editModelListId}>
+                {#each editModelOptions as option}
+                  <option value={option.id} label={modelOptionLabel(option)}></option>
+                {/each}
+              </datalist>
+            {/if}
+            {#if editModelStatus}
+              <small class={modelPickerStatusClass}>{editModelStatus}</small>
+            {/if}
+          </div>
+          {#if editSupportsModelMappings}
+            <section class={modelMappingPanelClass}>
+              <div class={modelMappingHeaderClass}>
+                <strong>{$t("profiles.modelMappingsTitle")}</strong>
+                <button
+                  class={actionButtonRecipe()}
+                  type="button"
+                  disabled={editingId !== null}
+                  on:click={addEditModelMapping}
+                >
+                  <AppIcon name="add" size={15} />
+                  {$t("profiles.modelMappingAdd")}
+                </button>
+              </div>
+              {#if editForm.modelMappings.length > 0}
+                <div class={modelMappingRowsClass}>
+                  {#each editForm.modelMappings as mapping, index}
+                    <div class={modelMappingRowClass}>
+                      <label>
+                        {$t("profiles.modelMappingAlias")}
+                        <input
+                          value={mapping.alias}
+                          disabled={editingId !== null}
+                          on:input={(event) => updateEditModelMapping(index, { alias: event.currentTarget.value })}
+                        />
+                      </label>
+                      <label>
+                        {$t("profiles.modelMappingTarget")}
+                        <input
+                          value={mapping.model}
+                          list={editModelOptions.length > 0 ? editModelListId : undefined}
+                          disabled={editingId !== null}
+                          on:input={(event) => updateEditModelMappingModel(index, event.currentTarget.value)}
+                        />
+                      </label>
+                      <label>
+                        {$t("profiles.modelMappingDescription")}
+                        <input
+                          value={mapping.description}
+                          disabled={editingId !== null}
+                          on:input={(event) => updateEditModelMapping(index, { description: event.currentTarget.value })}
+                        />
+                      </label>
+                      <label class={modelMappingToggleClass}>
+                        <input
+                          type="checkbox"
+                          checked={mapping.supports1m}
+                          disabled={editingId !== null}
+                          on:change={(event) => updateEditModelMapping(index, { supports1m: event.currentTarget.checked })}
+                        />
+                        {$t("profiles.modelMappingSupports1m")}
+                      </label>
+                      <button
+                        class={iconButtonRecipe({ danger: true })}
+                        type="button"
+                        title={$t("profiles.modelMappingRemove")}
+                        disabled={editingId !== null}
+                        on:click={() => removeEditModelMapping(index)}
+                      >
+                        <AppIcon name="delete" size={16} />
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+                {#if !editModelMappingsValid}
+                  <small class={profileFieldErrorRecipe()}>{$t("profiles.modelMappingsInvalid")}</small>
+                {/if}
+              {/if}
+            </section>
+          {/if}
           {#if providerNeedsBaseUrl(editForm.provider)}
             <label>
               {$t("wizard.providerBaseUrl")}

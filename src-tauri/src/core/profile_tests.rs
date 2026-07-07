@@ -263,6 +263,138 @@ fn detected_provider_preserves_dotted_display_tokens() {
 }
 
 #[test]
+fn profile_runtime_base_url_adds_v1_only_for_openai_upstream_protocols() {
+    let cases = [
+        (
+            PROTOCOL_OPENAI_RESPONSES,
+            "https://api.apikey.fun",
+            "https://api.apikey.fun/v1",
+        ),
+        (
+            PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+            "http://127.0.0.1:8000/",
+            "http://127.0.0.1:8000/v1",
+        ),
+        (
+            PROTOCOL_ANTHROPIC_MESSAGES,
+            "https://api.anthropic.test",
+            "https://api.anthropic.test/",
+        ),
+        (
+            PROTOCOL_GOOGLE_GEMINI,
+            "https://generativelanguage.googleapis.com/v1beta",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ),
+        (
+            PROTOCOL_GOOGLE_GEMINI,
+            "https://generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com/",
+        ),
+    ];
+
+    for (protocol, base_url, expected) in cases {
+        assert_eq!(
+            profile_runtime_base_url_for_protocol(protocol, base_url),
+            expected
+        );
+    }
+}
+
+#[test]
+fn profile_model_list_url_matches_protocol_base_rules() {
+    let cases = [
+        (
+            PROTOCOL_OPENAI_RESPONSES,
+            "https://api.apikey.fun",
+            "https://api.apikey.fun/v1/models",
+        ),
+        (
+            PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "https://open.bigmodel.cn/api/coding/paas/v4/models",
+        ),
+        (
+            PROTOCOL_ANTHROPIC_MESSAGES,
+            "https://api.anthropic.test/v1",
+            "https://api.anthropic.test/v1/models",
+        ),
+        (
+            PROTOCOL_GOOGLE_GEMINI,
+            "https://generativelanguage.googleapis.com/v1beta",
+            "https://generativelanguage.googleapis.com/v1beta/models",
+        ),
+    ];
+
+    for (protocol, base_url, expected) in cases {
+        assert_eq!(profile_model_list_url(protocol, base_url), expected);
+    }
+}
+
+#[test]
+fn profile_model_options_parse_common_provider_shapes() {
+    let openai = serde_json::json!({
+        "data": [
+            { "id": "gpt-5", "owned_by": "openai" },
+            { "id": "gpt-5", "owned_by": "duplicate" },
+            { "id": "gpt-5-mini", "display_name": "GPT-5 mini" }
+        ]
+    });
+    assert_eq!(
+        profile_model_options_from_payload(PROTOCOL_OPENAI_RESPONSES, &openai),
+        vec![
+            ProfileModelOption {
+                id: "gpt-5".to_string(),
+                name: None,
+                owned_by: Some("openai".to_string()),
+                supports_1m: false,
+            },
+            ProfileModelOption {
+                id: "gpt-5-mini".to_string(),
+                name: Some("GPT-5 mini".to_string()),
+                owned_by: None,
+                supports_1m: false,
+            },
+        ]
+    );
+
+    let anthropic = serde_json::json!({
+        "data": [
+            { "id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6" }
+        ]
+    });
+    assert_eq!(
+        profile_model_options_from_payload(PROTOCOL_ANTHROPIC_MESSAGES, &anthropic)[0]
+            .name
+            .as_deref(),
+        Some("Claude Sonnet 4.6")
+    );
+
+    let gemini = serde_json::json!({
+        "models": [
+            {
+                "name": "models/gemini-2.5-pro",
+                "displayName": "Gemini 2.5 Pro",
+                "supportedGenerationMethods": ["generateContent"]
+            },
+            {
+                "name": "models/embedding-001",
+                "displayName": "Embedding",
+                "supportedGenerationMethods": ["embedContent"]
+            }
+        ]
+    });
+    assert_eq!(
+        profile_model_options_from_payload(PROTOCOL_GOOGLE_GEMINI, &gemini),
+        vec![ProfileModelOption {
+            id: "gemini-2.5-pro".to_string(),
+            name: Some("Gemini 2.5 Pro".to_string()),
+            owned_by: None,
+            supports_1m: false,
+        }]
+    );
+}
+
+#[test]
 fn auto_detected_native_profile_name_allows_provider_correction() {
     assert!(is_auto_detected_native_profile_name(
         "Claude Code fun",
@@ -315,7 +447,33 @@ requires_openai_auth = true
 }
 
 #[test]
-fn codex_direct_profile_matches_auth_json_without_keychain_read() {
+fn detects_codex_native_profile_with_api_key_even_when_openai_auth_not_required() {
+    let value: toml::Value = toml::from_str(
+        r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "APIKEY.FUN"
+base_url = "https://api.apikey.fun/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+    )
+    .expect("config should parse");
+    let auth = serde_json::json!({
+        "OPENAI_API_KEY": "sk-auth-json"
+    });
+
+    let detected = detect_codex_native_profile_with_auth(&value, Some(&auth))
+        .expect("auth json backed profile should import");
+
+    assert_eq!(detected.app, "codex");
+    assert_eq!(detected.api_key, "sk-auth-json");
+}
+
+#[test]
+fn codex_direct_profile_matches_auth_json_key_when_available() {
     let value: toml::Value = toml::from_str(
         r#"
 model_provider = "custom"
@@ -343,6 +501,7 @@ requires_openai_auth = true
         provider: "apikey.fun".to_string(),
         protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
         model: "gpt-5.5".to_string(),
+        model_mappings: Vec::new(),
         base_url: "https://api.apikey.fun/v1".to_string(),
         auth_ref: Some("keychain:test/codex-auth-json/api_key".to_string()),
         created_at: None,
@@ -351,10 +510,16 @@ requires_openai_auth = true
         usage_enabled: false,
         sort_order: 0,
     };
+    store_test_profile_secret(&profile, "sk-auth-json");
     assert!(codex_direct_config_matches_profile(
         &value,
         Some(&auth),
         &profile
+    ));
+    assert!(!codex_direct_config_matches_profile(
+        &value,
+        Some(&serde_json::json!({ "OPENAI_API_KEY": "sk-other-auth-json" })),
+        &profile,
     ));
 }
 
@@ -369,7 +534,7 @@ model = "gpt-5.5"
 name = "CodeStudio openrouter"
 base_url = "https://openrouter.ai/api/v1"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
 "#,
     )
     .expect("config should parse");
@@ -384,6 +549,7 @@ requires_openai_auth = false
         provider: "openrouter".to_string(),
         protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
         model: "gpt-5.5".to_string(),
+        model_mappings: Vec::new(),
         base_url: "https://openrouter.ai/api/v1".to_string(),
         auth_ref: Some("keychain:test/missing-secret/api_key".to_string()),
         created_at: None,
@@ -394,6 +560,262 @@ requires_openai_auth = false
     };
 
     assert!(codex_direct_config_matches_profile(&value, None, &profile));
+}
+
+#[test]
+fn claude_config_matching_requires_same_auth_token_for_same_url() {
+    let mut profile = test_profile("claude", ProviderApplyMode::Config);
+    profile.provider = "anthropic.test".to_string();
+    profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+    profile.model = "claude-sonnet-4-6".to_string();
+    profile.base_url = "https://api.anthropic.test/v1".to_string();
+    profile.auth_ref = Some("keychain:test/claude-same-url/api_key".to_string());
+    let auth_ref = profile.auth_ref.as_deref().expect("auth ref");
+    credentials::store_keychain_secret(auth_ref, "sk-old").expect("test key should store");
+
+    let matching = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.test/v1",
+            "ANTHROPIC_AUTH_TOKEN": "sk-old"
+        }
+    });
+    assert!(claude_config_matches_profile(&matching, &profile));
+    assert!(detected_native_profile_matches_existing_key(
+        &profile,
+        "claude",
+        "anthropic.test",
+        PROTOCOL_ANTHROPIC_MESSAGES,
+        "claude-sonnet-4-6",
+        "https://api.anthropic.test/v1",
+        "sk-old",
+    ));
+
+    let different_key = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.test/v1",
+            "ANTHROPIC_AUTH_TOKEN": "sk-new"
+        }
+    });
+    assert!(!claude_config_matches_profile(&different_key, &profile));
+    assert!(!detected_native_profile_matches_existing_key(
+        &profile,
+        "claude",
+        "anthropic.test",
+        PROTOCOL_ANTHROPIC_MESSAGES,
+        "claude-sonnet-4-6",
+        "https://api.anthropic.test/v1",
+        "sk-new",
+    ));
+}
+
+#[test]
+fn non_codex_native_config_matching_requires_same_api_key_for_same_endpoint() {
+    let paths = test_paths();
+    let desktop_profile_path = paths.config_dir.join("claude-desktop-profile.json");
+    fs::create_dir_all(
+        desktop_profile_path
+            .parent()
+            .expect("desktop profile parent"),
+    )
+    .expect("desktop profile parent should be created");
+    let desktop_paths = ClaudeDesktopPaths {
+        normal_config_path: paths.config_dir.join("claude-normal.json"),
+        threep_config_path: paths.config_dir.join("claude-threep.json"),
+        profile_path: desktop_profile_path.clone(),
+        meta_path: paths.config_dir.join("claude-meta.json"),
+        developer_settings_paths: Vec::new(),
+    };
+    let mut desktop_profile = test_profile("claude-desktop", ProviderApplyMode::Config);
+    desktop_profile.provider = "anthropic.test".to_string();
+    desktop_profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+    desktop_profile.model = "claude-sonnet-4-6".to_string();
+    desktop_profile.base_url = "https://api.anthropic.test/v1".to_string();
+    desktop_profile.auth_ref = Some("keychain:test/claude-desktop-same-url/api_key".to_string());
+    store_test_profile_secret(&desktop_profile, "sk-desktop-old");
+    fs::write(
+        &desktop_profile_path,
+        serde_json::json!({
+            "inferenceProvider": "gateway",
+            "inferenceGatewayBaseUrl": "https://api.anthropic.test/v1",
+            "inferenceGatewayApiKey": "sk-desktop-old",
+            "inferenceModels": ["claude-sonnet-4-6"]
+        })
+        .to_string(),
+    )
+    .expect("desktop profile should be written");
+    assert!(claude_desktop_config_matches_profile(
+        &desktop_profile,
+        Some(&desktop_paths),
+        false,
+    ));
+    fs::write(
+        &desktop_profile_path,
+        serde_json::json!({
+            "inferenceProvider": "gateway",
+            "inferenceGatewayBaseUrl": "https://api.anthropic.test/v1",
+            "inferenceGatewayApiKey": "sk-desktop-new",
+            "inferenceModels": ["claude-sonnet-4-6"]
+        })
+        .to_string(),
+    )
+    .expect("desktop profile should be updated");
+    assert!(!claude_desktop_config_matches_profile(
+        &desktop_profile,
+        Some(&desktop_paths),
+        false,
+    ));
+
+    let mut gemini_profile = test_profile("gemini", ProviderApplyMode::Config);
+    gemini_profile.provider = "gemini-compatible".to_string();
+    gemini_profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
+    gemini_profile.model = "gemini-3-pro".to_string();
+    gemini_profile.base_url = "https://generativelanguage.googleapis.com/v1beta".to_string();
+    gemini_profile.auth_ref = Some("keychain:test/gemini-same-url/api_key".to_string());
+    store_test_profile_secret(&gemini_profile, "sk-gemini-old");
+    let gemini_old_env = HashMap::from([
+        (
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        ),
+        ("GEMINI_API_KEY".to_string(), "sk-gemini-old".to_string()),
+        ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
+    ]);
+    assert!(gemini_env_matches_profile(&gemini_old_env, &gemini_profile));
+    let gemini_new_env = HashMap::from([
+        (
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        ),
+        ("GEMINI_API_KEY".to_string(), "sk-gemini-new".to_string()),
+        ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
+    ]);
+    assert!(!gemini_env_matches_profile(
+        &gemini_new_env,
+        &gemini_profile
+    ));
+
+    let mut code_assist_profile = test_profile("gemini-code-assist", ProviderApplyMode::Config);
+    code_assist_profile.provider = "gemini-compatible".to_string();
+    code_assist_profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
+    code_assist_profile.auth_ref =
+        Some("keychain:test/gemini-code-assist-same-url/api_key".to_string());
+    store_test_profile_secret(&code_assist_profile, "sk-code-assist-old");
+    assert!(gemini_code_assist_settings_match_profile(
+        &serde_json::json!({ GEMINI_CODE_ASSIST_API_KEY_SETTING: "sk-code-assist-old" }),
+        &code_assist_profile,
+    ));
+    assert!(!gemini_code_assist_settings_match_profile(
+        &serde_json::json!({ GEMINI_CODE_ASSIST_API_KEY_SETTING: "sk-code-assist-new" }),
+        &code_assist_profile,
+    ));
+
+    let mut opencode_profile = test_profile("opencode", ProviderApplyMode::Config);
+    opencode_profile.provider = "openrouter".to_string();
+    opencode_profile.protocol = PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string();
+    opencode_profile.model = "gpt-5.5".to_string();
+    opencode_profile.base_url = "https://openrouter.ai/api/v1".to_string();
+    opencode_profile.auth_ref = Some("keychain:test/opencode-same-url/api_key".to_string());
+    store_test_profile_secret(&opencode_profile, "sk-opencode-old");
+    assert!(opencode_config_matches_profile(
+        &serde_json::json!({
+            "model": "custom/gpt-5.5",
+            "provider": {
+                "custom": {
+                    "options": {
+                        "baseURL": "https://openrouter.ai/api/v1",
+                        "apiKey": "sk-opencode-old"
+                    }
+                }
+            }
+        }),
+        &opencode_profile,
+    ));
+    assert!(!opencode_config_matches_profile(
+        &serde_json::json!({
+            "model": "custom/gpt-5.5",
+            "provider": {
+                "custom": {
+                    "options": {
+                        "baseURL": "https://openrouter.ai/api/v1",
+                        "apiKey": "sk-opencode-new"
+                    }
+                }
+            }
+        }),
+        &opencode_profile,
+    ));
+
+    let mut openclaw_profile = test_profile("openclaw", ProviderApplyMode::Config);
+    openclaw_profile.provider = "openrouter".to_string();
+    openclaw_profile.protocol = PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string();
+    openclaw_profile.model = "gpt-5.5".to_string();
+    openclaw_profile.base_url = "https://openrouter.ai/api/v1".to_string();
+    openclaw_profile.auth_ref = Some("keychain:test/openclaw-same-url/api_key".to_string());
+    store_test_profile_secret(&openclaw_profile, "sk-openclaw-old");
+    assert!(openclaw_config_matches_profile(
+        &serde_json::json!({
+            "agents": { "defaults": { "model": { "primary": "custom/gpt-5.5" } } },
+            "models": {
+                "providers": {
+                    "custom": {
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        "apiKey": "sk-openclaw-old"
+                    }
+                }
+            }
+        }),
+        &openclaw_profile,
+    ));
+    assert!(!openclaw_config_matches_profile(
+        &serde_json::json!({
+            "agents": { "defaults": { "model": { "primary": "custom/gpt-5.5" } } },
+            "models": {
+                "providers": {
+                    "custom": {
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        "apiKey": "sk-openclaw-new"
+                    }
+                }
+            }
+        }),
+        &openclaw_profile,
+    ));
+
+    let mut hermes_profile = test_profile("hermes", ProviderApplyMode::Config);
+    hermes_profile.provider = "openrouter".to_string();
+    hermes_profile.protocol = PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string();
+    hermes_profile.model = "gpt-5.5".to_string();
+    hermes_profile.base_url = "https://openrouter.ai/api/v1".to_string();
+    hermes_profile.auth_ref = Some("keychain:test/hermes-same-url/api_key".to_string());
+    store_test_profile_secret(&hermes_profile, "sk-hermes-old");
+    let hermes_old = parse_yaml_or_empty(
+        r#"
+model:
+  provider: custom
+  base_url: https://openrouter.ai/api/v1
+  api_key: sk-hermes-old
+  api_mode: chat_completions
+  default: gpt-5.5
+"#,
+        "Hermes config",
+    )
+    .expect("Hermes config should parse");
+    assert!(hermes_config_matches_profile(&hermes_old, &hermes_profile));
+    let hermes_new = parse_yaml_or_empty(
+        r#"
+model:
+  provider: custom
+  base_url: https://openrouter.ai/api/v1
+  api_key: sk-hermes-new
+  api_mode: chat_completions
+  default: gpt-5.5
+"#,
+        "Hermes config",
+    )
+    .expect("Hermes config should parse");
+    assert!(!hermes_config_matches_profile(&hermes_new, &hermes_profile));
 }
 
 #[test]
@@ -435,10 +857,62 @@ model_reasoning_effort = "xhigh"
         toml_lookup(&value, "model_providers.custom.wire_api").and_then(|item| item.as_str()),
         Some("responses")
     );
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.requires_openai_auth")
+            .and_then(|item| item.as_bool()),
+        Some(true)
+    );
     assert!(config.contains("[model_providers]\n"));
     assert!(config.contains("[model_providers.custom]\n"));
     assert!(!config.contains("model_providers = {"));
     assert!(!config.contains("codestudio-"));
+}
+
+#[test]
+fn direct_config_runtime_base_url_adds_v1_without_changing_profile_value() {
+    let mut profile = test_profile("codex", ProviderApplyMode::Config);
+    profile.provider = "compatible".to_string();
+    profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    profile.model = "gpt-5.5".to_string();
+    profile.base_url = "https://api.apikey.fun/".to_string();
+
+    let config = codex_direct_config_content("", &profile).expect("config should render");
+    let value: toml::Value = toml::from_str(&config).expect("config should parse");
+
+    assert_eq!(profile.base_url, "https://api.apikey.fun/");
+    assert_eq!(
+        toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
+        Some("https://api.apikey.fun/v1")
+    );
+    assert!(codex_direct_config_matches_profile(&value, None, &profile));
+}
+
+#[test]
+fn direct_config_runtime_base_url_does_not_add_v1_for_non_openai_protocols() {
+    let mut claude_profile = test_profile("claude", ProviderApplyMode::Config);
+    claude_profile.provider = "anthropic-compatible".to_string();
+    claude_profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+    claude_profile.base_url = "https://api.anthropic.test".to_string();
+    let claude_config = claude_config_content_with_api_key("{}", &claude_profile, "sk-test")
+        .expect("Claude config should render");
+    let claude_value = parse_json5_or_empty(&claude_config, "Claude settings")
+        .expect("Claude config should parse");
+    assert_eq!(
+        json_string_lookup(&claude_value, &["env", "ANTHROPIC_BASE_URL"]).as_deref(),
+        Some("https://api.anthropic.test/")
+    );
+
+    let mut gemini_profile = test_profile("gemini", ProviderApplyMode::Config);
+    gemini_profile.provider = "gemini-compatible".to_string();
+    gemini_profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
+    gemini_profile.base_url = "https://generativelanguage.googleapis.com".to_string();
+    let gemini_config = gemini_env_content_with_api_key("", &gemini_profile, "gemini-test-key")
+        .expect("Gemini env should render");
+    let gemini_env = parse_env_content(&gemini_config);
+    assert_eq!(
+        gemini_env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+        Some("https://generativelanguage.googleapis.com/")
+    );
 }
 
 #[test]
@@ -754,7 +1228,7 @@ fn codex_native_config_uses_relay_injection_without_official_auth() {
 }
 
 #[test]
-fn codex_official_config_does_not_write_openai_provider_override() {
+fn codex_official_config_requires_openai_auth_without_base_url_override() {
     let profile = builtin_official_profiles()
         .into_iter()
         .find(|profile| profile.app == "codex")
@@ -776,10 +1250,15 @@ base_url = "https://example.invalid/v1"
         read_toml_string(&value, "model_provider").as_deref(),
         Some("openai")
     );
-    assert!(toml_lookup(&value, "model_providers.openai").is_none());
+    assert_eq!(
+        toml_lookup(&value, "model_providers.openai.requires_openai_auth")
+            .and_then(|item| item.as_bool()),
+        Some(true)
+    );
+    assert!(toml_lookup(&value, "model_providers.openai.base_url").is_none());
     assert!(toml_lookup(&value, "auth.api_key").is_none());
-    assert!(!config.contains("[model_providers.openai]"));
-    assert!(!config.contains("model_providers = { openai"));
+    assert!(config.contains("[model_providers.openai]"));
+    assert!(!config.contains("base_url ="));
 }
 
 #[test]
@@ -1564,6 +2043,23 @@ fn claude_vscode_alias_uses_claude_profile_category() {
     );
 }
 
+#[test]
+fn claude_gateway_config_model_uses_first_mapping_alias() {
+    let mut profile = test_profile("claude", ProviderApplyMode::Gateway);
+    profile.model = "provider-default".to_string();
+    profile.model_mappings = vec![ProfileModelMapping {
+        alias: "claude-sonnet-4-6".to_string(),
+        model: "provider-sonnet".to_string(),
+        supports_1m: true,
+        description: None,
+    }];
+
+    assert_eq!(
+        gateway_config_model_for_profile(&profile),
+        "claude-sonnet-4-6"
+    );
+}
+
 fn test_profile(app: &str, mode: ProviderApplyMode) -> ProfileDraft {
     ProfileDraft {
         id: format!("{app}-custom"),
@@ -1576,6 +2072,7 @@ fn test_profile(app: &str, mode: ProviderApplyMode) -> ProfileDraft {
         provider: "openai".to_string(),
         protocol: PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string(),
         model: String::new(),
+        model_mappings: Vec::new(),
         base_url: "https://example.test/v1".to_string(),
         auth_ref: Some(format!("keychain:test/{app}/api_key")),
         created_at: None,
@@ -1584,6 +2081,11 @@ fn test_profile(app: &str, mode: ProviderApplyMode) -> ProfileDraft {
         usage_enabled: false,
         sort_order: 0,
     }
+}
+
+fn store_test_profile_secret(profile: &ProfileDraft, secret: &str) {
+    let auth_ref = profile.auth_ref.as_deref().expect("auth ref");
+    credentials::store_keychain_secret(auth_ref, secret).expect("test key should store");
 }
 
 fn test_paths() -> crate::core::app_paths::AppPaths {

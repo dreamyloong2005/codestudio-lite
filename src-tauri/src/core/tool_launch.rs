@@ -430,6 +430,7 @@ mod tests {
             provider: "apikey.fun".to_string(),
             protocol: protocol.to_string(),
             model: "model-a".to_string(),
+            model_mappings: Vec::new(),
             base_url: "https://api.example.test/v1".to_string(),
             auth_ref: None,
             created_at: None,

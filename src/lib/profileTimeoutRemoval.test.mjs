@@ -68,7 +68,7 @@ test("base URL inputs do not auto-prefix https", () => {
   }
 });
 
-test("mock Codex official preview does not write an OpenAI provider override", () => {
+test("mock Codex official preview enables OpenAI auth without base URL override", () => {
   const api = source("src/lib/api.ts");
   const officialBranch = between(
     api,
@@ -77,8 +77,9 @@ test("mock Codex official preview does not write an OpenAI provider override", (
   );
 
   assert.equal(officialBranch.includes("model_providers.openai.wire_api"), false);
-  assert.equal(officialBranch.includes("model_providers.openai.requires_openai_auth"), false);
-  assert.equal(officialBranch.includes('key: "model_providers.openai"'), true);
+  assert.equal(officialBranch.includes("model_providers.openai.requires_openai_auth"), true);
+  assert.equal(officialBranch.includes('key: "model_providers.openai.base_url"'), true);
+  assert.equal(officialBranch.includes('after: "true"'), true);
 });
 
 test("mock Codex gateway preview disables OpenAI auth", () => {

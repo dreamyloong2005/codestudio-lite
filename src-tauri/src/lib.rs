@@ -63,6 +63,7 @@ pub fn run() {
             commands::profiles::clear_claude_environment_variables,
             commands::profiles::delete_profile_draft,
             commands::profiles::duplicate_profile_draft,
+            commands::profiles::list_profile_models,
             commands::profiles::load_profile_summary,
             commands::profiles::preview_profile_apply,
             commands::profiles::preview_profile_write,
