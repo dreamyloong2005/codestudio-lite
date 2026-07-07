@@ -4,6 +4,7 @@
   import { detectEnvironment, listProfileModels, openExternalUrl, previewProfileWrite, saveProfileDraft, startCodexOAuthLogin } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
   import AppIcon from "../components/AppIcon.svelte";
+  import ModelSelectInput from "../components/ModelSelectInput.svelte";
   import SecretInput from "../components/SecretInput.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
   import {
@@ -64,7 +65,7 @@
     alignItems: "center",
     gap: "8px",
     minWidth: 0,
-    "& button": {
+    "& > button": {
       height: "38px"
     },
     "@media (max-width: 860px)": {
@@ -127,6 +128,14 @@
     fontSize: "13px",
     fontWeight: 800,
     minHeight: "38px"
+  });
+  const modelMappingFieldClass = css({
+    display: "grid",
+    gap: "6px",
+    minWidth: 0,
+    color: "var(--text-soft)",
+    fontSize: "13px",
+    fontWeight: 800
   });
 
   export let onProfileSaved: (mode: ProviderApplyMode) => void | Promise<void> = () => {};
@@ -1153,10 +1162,12 @@
           <div class={modelPickerClass}>
             <label for={`${modelListId}-input`}>{$t("wizard.modelOptional")}</label>
             <div class={modelPickerRowClass}>
-              <input
+              <ModelSelectInput
                 id={`${modelListId}-input`}
                 bind:value={model}
-                list={modelOptions.length > 0 ? modelListId : undefined}
+                options={modelOptions}
+                optionLabel={modelOptionLabel}
+                toggleTitle={$t("wizard.modelOptional")}
               />
               <button
                 class={actionButtonRecipe()}
@@ -1170,13 +1181,6 @@
                 {modelLoading ? $t("profiles.fetchingModels") : $t("profiles.fetchModels")}
               </button>
             </div>
-            {#if modelOptions.length > 0}
-              <datalist id={modelListId}>
-                {#each modelOptions as option}
-                  <option value={option.id} label={modelOptionLabel(option)}></option>
-                {/each}
-              </datalist>
-            {/if}
             {#if modelStatus}
               <small class={modelPickerStatusClass}>{modelStatus}</small>
             {/if}
@@ -1201,14 +1205,17 @@
                           on:input={(event) => updateModelMapping(index, { alias: event.currentTarget.value })}
                         />
                       </label>
-                      <label>
-                        {$t("profiles.modelMappingTarget")}
-                        <input
+                      <div class={modelMappingFieldClass}>
+                        <label for={`${modelListId}-mapping-${index}`}>{$t("profiles.modelMappingTarget")}</label>
+                        <ModelSelectInput
+                          id={`${modelListId}-mapping-${index}`}
                           value={mapping.model}
-                          list={modelOptions.length > 0 ? modelListId : undefined}
-                          on:input={(event) => updateModelMappingModel(index, event.currentTarget.value)}
+                          options={modelOptions}
+                          optionLabel={modelOptionLabel}
+                          toggleTitle={$t("profiles.modelMappingTarget")}
+                          on:input={(event) => updateModelMappingModel(index, event.detail.value)}
                         />
-                      </label>
+                      </div>
                       <label>
                         {$t("profiles.modelMappingDescription")}
                         <input

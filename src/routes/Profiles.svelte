@@ -27,6 +27,7 @@
   import { t, type TranslationKey } from "../lib/i18n";
   import AppIcon from "../components/AppIcon.svelte";
   import DismissibleNotice from "../components/DismissibleNotice.svelte";
+  import ModelSelectInput from "../components/ModelSelectInput.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import ToolIcon from "../components/ToolIcon.svelte";
   import { css, cx } from "../../styled-system/css";
@@ -252,7 +253,7 @@
     alignItems: "center",
     gap: "8px",
     minWidth: 0,
-    "& button": {
+    "& > button": {
       height: "38px"
     },
     "@media (max-width: 860px)": {
@@ -315,6 +316,14 @@
     fontSize: "13px",
     fontWeight: 800,
     minHeight: "38px"
+  });
+  const modelMappingFieldClass = css({
+    display: "grid",
+    gap: "6px",
+    minWidth: 0,
+    color: "var(--text-soft)",
+    fontSize: "13px",
+    fontWeight: 800
   });
 
   const toolOrder = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes"];
@@ -2496,10 +2505,12 @@
           <div class={modelPickerClass}>
             <label for={`${editModelListId}-input`}>{$t("common.model")}</label>
             <div class={modelPickerRowClass}>
-              <input
+              <ModelSelectInput
                 id={`${editModelListId}-input`}
                 bind:value={editForm.model}
-                list={editModelOptions.length > 0 ? editModelListId : undefined}
+                options={editModelOptions}
+                optionLabel={modelOptionLabel}
+                toggleTitle={$t("common.model")}
                 disabled={editingId !== null}
               />
               <button
@@ -2514,13 +2525,6 @@
                 {editModelLoading ? $t("profiles.fetchingModels") : $t("profiles.fetchModels")}
               </button>
             </div>
-            {#if editModelOptions.length > 0}
-              <datalist id={editModelListId}>
-                {#each editModelOptions as option}
-                  <option value={option.id} label={modelOptionLabel(option)}></option>
-                {/each}
-              </datalist>
-            {/if}
             {#if editModelStatus}
               <small class={modelPickerStatusClass}>{editModelStatus}</small>
             {/if}
@@ -2551,15 +2555,18 @@
                           on:input={(event) => updateEditModelMapping(index, { alias: event.currentTarget.value })}
                         />
                       </label>
-                      <label>
-                        {$t("profiles.modelMappingTarget")}
-                        <input
+                      <div class={modelMappingFieldClass}>
+                        <label for={`${editModelListId}-mapping-${index}`}>{$t("profiles.modelMappingTarget")}</label>
+                        <ModelSelectInput
+                          id={`${editModelListId}-mapping-${index}`}
                           value={mapping.model}
-                          list={editModelOptions.length > 0 ? editModelListId : undefined}
+                          options={editModelOptions}
+                          optionLabel={modelOptionLabel}
+                          toggleTitle={$t("profiles.modelMappingTarget")}
                           disabled={editingId !== null}
-                          on:input={(event) => updateEditModelMappingModel(index, event.currentTarget.value)}
+                          on:input={(event) => updateEditModelMappingModel(index, event.detail.value)}
                         />
-                      </label>
+                      </div>
                       <label>
                         {$t("profiles.modelMappingDescription")}
                         <input

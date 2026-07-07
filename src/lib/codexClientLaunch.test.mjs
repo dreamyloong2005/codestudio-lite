@@ -164,6 +164,37 @@ test("Codex service tier injection mirrors the latest Codex++ Fast controls", ()
   assert.doesNotMatch(core, /function codexServiceTierMode\(\)/);
 });
 
+test("Codex service tier observer avoids badge self-trigger refresh loops", () => {
+  const core = read("src-tauri/src/core/codex_client.rs");
+
+  assert.match(core, /const codestudioLiteCodexEnhancementsVersion = "3"/);
+  assert.match(core, /clearInterval\(window\.__codestudioLiteCodexEnhancementsTimer\)/);
+  assert.match(core, /window\.__codestudioLiteCodexEnhancementsObserver\.disconnect\?\.\(\)/);
+  assert.match(core, /function setCodestudioLiteText\(node, value\)/);
+  assert.match(core, /if \(node\.textContent !== next\) node\.textContent = next;/);
+  assert.match(core, /function setCodestudioLiteDataset\(node, name, value\)/);
+  assert.match(core, /function shouldIgnoreCodestudioLiteMutations\(mutations\)/);
+  assert.match(core, /data-codex-service-tier-badge="true"/);
+  assert.match(core, /new MutationObserver\(\(mutations\) => scheduleCodestudioLiteRefresh\(mutations\)\)/);
+  assert.match(core, /window\.requestAnimationFrame/);
+  assert.match(core, /enhancement_refresh_temporarily_throttled/);
+  assert.match(core, /attributeFilter: \["disabled", "aria-disabled", "class", "style"\]/);
+  assert.doesNotMatch(core, /attributeFilter: \["disabled", "aria-disabled", "data-disabled", "class", "style"\]/);
+});
+
+test("Codex model whitelist refresh is not run twice from the main enhancement refresh", () => {
+  const core = read("src-tauri/src/core/codex_client.rs");
+  const refreshBody = core
+    .split("function refresh(mutations = null) {")
+    .at(1)
+    ?.split("function runCodestudioLiteRefresh")
+    .at(0);
+
+  assert.ok(refreshBody, "enhancement refresh body should be present");
+  assert.match(refreshBody, /patchCodexModelWhitelist\(mutations\)/);
+  assert.doesNotMatch(refreshBody, /refreshCodexModelWhitelistFromScan\(mutations\)/);
+});
+
 test("Codex enhancement injection runs after launch without blocking the command", () => {
   const commands = read("src-tauri/src/commands/codex_client.rs");
   const core = read("src-tauri/src/core/codex_client.rs");

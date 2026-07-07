@@ -3313,15 +3313,24 @@ fn codex_enhancement_script(
     let script = r#"
 (() => {
   const codestudioLiteInjectedSettings = __CODESTUDIO_LITE_SETTINGS__;
+  const codestudioLiteCodexEnhancementsVersion = "3";
   window.__codestudioLiteCodexEnhancementSettings = codestudioLiteInjectedSettings;
   function codestudioLiteSettings() {
     return window.__codestudioLiteCodexEnhancementSettings || codestudioLiteInjectedSettings;
   }
-  if (window.__codestudioLiteCodexEnhancements === "2") {
+  if (window.__codestudioLiteCodexEnhancements === codestudioLiteCodexEnhancementsVersion) {
     window.__codestudioLiteCodexEnhancementsRefresh?.();
     return true;
   }
-  window.__codestudioLiteCodexEnhancements = "2";
+  if (window.__codestudioLiteCodexEnhancementsTimer) {
+    clearInterval(window.__codestudioLiteCodexEnhancementsTimer);
+    window.__codestudioLiteCodexEnhancementsTimer = null;
+  }
+  if (window.__codestudioLiteCodexEnhancementsObserver) {
+    window.__codestudioLiteCodexEnhancementsObserver.disconnect?.();
+    window.__codestudioLiteCodexEnhancementsObserver = null;
+  }
+  window.__codestudioLiteCodexEnhancements = codestudioLiteCodexEnhancementsVersion;
   const styleId = "codestudio-lite-codex-enhancement-style";
   const pluginMarketplaceUnlockVersion = "2";
   const codexPluginAutoExpandVersion = "1";
@@ -3346,6 +3355,11 @@ fn codex_enhancement_script(
   let codexModelCatalogLoadedAt = 0;
   let codexModelWhitelistRefreshTimer = 0;
   let codexModelWhitelistRefreshUntil = 0;
+  let codestudioLiteRefreshScheduled = false;
+  let codestudioLitePendingMutations = null;
+  let codestudioLiteSlowRefreshCount = 0;
+  let codestudioLiteRefreshDisabledUntil = 0;
+  let codexServiceTierComposerCache = { element: null, expiresAt: 0 };
   let codexServiceTierStateLoadStarted = false;
   let codexServiceTierState = {
     status: "loading",
@@ -3707,6 +3721,30 @@ fn codex_enhancement_script(
 
   function uniqueValues(values) {
     return Array.from(new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean)));
+  }
+
+  function setCodestudioLiteText(node, value) {
+    const next = String(value ?? "");
+    if (node.textContent !== next) node.textContent = next;
+  }
+
+  function setCodestudioLiteAttribute(node, name, value) {
+    const next = String(value ?? "");
+    if (node.getAttribute(name) !== next) node.setAttribute(name, next);
+  }
+
+  function setCodestudioLiteProperty(node, name, value) {
+    if (node[name] !== value) node[name] = value;
+  }
+
+  function setCodestudioLiteBooleanProperty(node, name, value) {
+    const next = !!value;
+    if (node[name] !== next) node[name] = next;
+  }
+
+  function setCodestudioLiteDataset(node, name, value) {
+    const next = String(value ?? "");
+    if (node.dataset[name] !== next) node.dataset[name] = next;
   }
 
   function normalizeModelCatalog(value) {
@@ -4245,16 +4283,7 @@ fn codex_enhancement_script(
     tick();
   }
 
-  function patchCodexModelWhitelist() {
-    ensureCodexModelWhitelistInstalls();
-    if (!codexPlusModelNames().length) {
-      void loadCodexModelCatalog();
-      return;
-    }
-    runCodexModelWhitelistRefreshPass();
-  }
-
-  function refreshCodexModelWhitelistFromScan(mutations) {
+  function patchCodexModelWhitelist(mutations = null) {
     ensureCodexModelWhitelistInstalls();
     if (!codexPlusModelNames().length) {
       void loadCodexModelCatalog();
@@ -4265,6 +4294,10 @@ fn codex_enhancement_script(
     } else {
       runCodexModelWhitelistRefreshPass();
     }
+  }
+
+  function refreshCodexModelWhitelistFromScan(mutations) {
+    patchCodexModelWhitelist(mutations);
   }
 
   function normalizeCodexServiceTierModelName(model) {
@@ -4602,11 +4635,11 @@ fn codex_enhancement_script(
   function refreshCodexServiceTierBadges() {
     const state = codexServiceTierBadgeState();
     document.querySelectorAll(`[data-codex-service-tier-badge="true"]`).forEach((node) => {
-      node.dataset.tier = state.tier;
-      node.dataset.disabled = String(!!state.disabled);
-      node.textContent = state.label;
-      node.title = state.title;
-      node.setAttribute("aria-label", state.title);
+      setCodestudioLiteDataset(node, "tier", state.tier);
+      setCodestudioLiteDataset(node, "disabled", String(!!state.disabled));
+      setCodestudioLiteText(node, state.label);
+      setCodestudioLiteProperty(node, "title", state.title);
+      setCodestudioLiteAttribute(node, "aria-label", state.title);
     });
   }
 
@@ -4620,42 +4653,42 @@ fn codex_enhancement_script(
       : codexServiceTierFastUnsupportedMessage(fastAvailability.modelName);
     const fastUnsupportedActive = codexServiceTierState.effectiveMode === "fast" && !fastAvailability.supported;
     document.querySelectorAll("[data-codex-service-tier-controls]").forEach((node) => {
-      node.hidden = !codestudioLiteSettings().serviceTierControls;
+      setCodestudioLiteBooleanProperty(node, "hidden", !codestudioLiteSettings().serviceTierControls);
     });
     document.querySelectorAll("[data-codex-service-tier-status]").forEach((node) => {
-      node.dataset.status = fastUnsupportedActive ? "unsupported" : (codexServiceTierState.status || "loading");
-      node.textContent = codexServiceTierState.message || "未读取";
+      setCodestudioLiteDataset(node, "status", fastUnsupportedActive ? "unsupported" : (codexServiceTierState.status || "loading"));
+      setCodestudioLiteText(node, codexServiceTierState.message || "未读取");
     });
     document.querySelectorAll("[data-codex-service-tier-inherit]").forEach((button) => {
-      button.disabled = !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading";
-      button.dataset.active = String(codexServiceTierState.controlMode === "inherit");
+      setCodestudioLiteBooleanProperty(button, "disabled", !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading");
+      setCodestudioLiteDataset(button, "active", String(codexServiceTierState.controlMode === "inherit"));
     });
     document.querySelectorAll("[data-codex-service-tier-standard]").forEach((button) => {
-      button.disabled = !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading";
-      button.dataset.active = String(codexServiceTierState.controlMode === "global-standard");
+      setCodestudioLiteBooleanProperty(button, "disabled", !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading");
+      setCodestudioLiteDataset(button, "active", String(codexServiceTierState.controlMode === "global-standard"));
     });
     document.querySelectorAll("[data-codex-service-tier-fast]").forEach((button) => {
-      button.disabled = fastDisabled;
-      button.dataset.active = String(codexServiceTierState.controlMode === "global-fast");
-      button.title = fastTitle;
+      setCodestudioLiteBooleanProperty(button, "disabled", fastDisabled);
+      setCodestudioLiteDataset(button, "active", String(codexServiceTierState.controlMode === "global-fast"));
+      setCodestudioLiteProperty(button, "title", fastTitle);
     });
     document.querySelectorAll("[data-codex-service-tier-custom]").forEach((button) => {
-      button.disabled = !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading";
-      button.dataset.active = String(codexServiceTierState.controlMode === "custom");
+      setCodestudioLiteBooleanProperty(button, "disabled", !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading");
+      setCodestudioLiteDataset(button, "active", String(codexServiceTierState.controlMode === "custom"));
     });
     document.querySelectorAll("[data-codex-service-tier-thread-inherit]").forEach((button) => {
-      button.disabled = !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading";
-      button.dataset.active = String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "inherit");
-      button.title = `当前 thread 不单独覆盖，继承自定义默认 ${codexServiceTierState.defaultMode || "inherit"}`;
+      setCodestudioLiteBooleanProperty(button, "disabled", !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading");
+      setCodestudioLiteDataset(button, "active", String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "inherit"));
+      setCodestudioLiteProperty(button, "title", `当前 thread 不单独覆盖，继承自定义默认 ${codexServiceTierState.defaultMode || "inherit"}`);
     });
     document.querySelectorAll("[data-codex-service-tier-thread-standard]").forEach((button) => {
-      button.disabled = !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading";
-      button.dataset.active = String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "standard");
+      setCodestudioLiteBooleanProperty(button, "disabled", !codestudioLiteSettings().serviceTierControls || codexServiceTierState.status === "loading");
+      setCodestudioLiteDataset(button, "active", String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "standard"));
     });
     document.querySelectorAll("[data-codex-service-tier-thread-fast]").forEach((button) => {
-      button.disabled = fastDisabled;
-      button.dataset.active = String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "fast");
-      button.title = fastTitle;
+      setCodestudioLiteBooleanProperty(button, "disabled", fastDisabled);
+      setCodestudioLiteDataset(button, "active", String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "fast"));
+      setCodestudioLiteProperty(button, "title", fastTitle);
     });
     refreshCodexServiceTierBadges();
   }
@@ -4740,7 +4773,8 @@ fn codex_enhancement_script(
   }
 
   function codexServiceTierBadgeText(element) {
-    return String(element?.textContent || "").replace(/\s+/g, " ").trim();
+    const text = String(element?.textContent || "");
+    return (text.length > 4000 ? text.slice(-4000) : text).replace(/\s+/g, " ").trim();
   }
 
   function codexServiceTierKnownProviderNames() {
@@ -4817,9 +4851,21 @@ fn codex_enhancement_script(
         if (codexServiceTierBadgeVisibleElement(node)) candidates.add(node);
       }
     });
-    Array.from(document.querySelectorAll("form, main"))
+    Array.from(document.querySelectorAll("form, textarea, [role='textbox'], [contenteditable='true']"))
       .filter(codexServiceTierBadgeVisibleElement)
-      .forEach((node) => candidates.add(node));
+      .forEach((node) => {
+        candidates.add(node);
+        let parent = node.parentElement;
+        for (let depth = 0; parent instanceof HTMLElement && depth < 4; depth += 1, parent = parent.parentElement) {
+          if (codexServiceTierBadgeVisibleElement(parent)) candidates.add(parent);
+        }
+      });
+    if (!candidates.size) {
+      Array.from(document.querySelectorAll("main"))
+        .filter(codexServiceTierBadgeVisibleElement)
+        .slice(-2)
+        .forEach((node) => candidates.add(node));
+    }
     return Array.from(candidates);
   }
 
@@ -4830,9 +4876,15 @@ fn codex_enhancement_script(
   }
 
   function codexServiceTierFindComposerEl() {
-    return codexServiceTierComposerCandidates()
+    const now = Date.now();
+    if (codexServiceTierComposerCache.element?.isConnected && now < codexServiceTierComposerCache.expiresAt) {
+      return codexServiceTierComposerCache.element;
+    }
+    const composer = codexServiceTierComposerCandidates()
       .map((composer, index) => ({ composer, index, score: codexServiceTierComposerScore(composer) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.composer || null;
+    codexServiceTierComposerCache = { element: composer, expiresAt: composer ? now + 1500 : 0 };
+    return composer;
   }
 
   function codexServiceTierBadgeAnchor(composer) {
@@ -5077,6 +5129,24 @@ fn codex_enhancement_script(
     void patch();
   }
 
+  function codestudioLiteOwnedMutationNode(node) {
+    if (!node) return false;
+    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    return !!element?.closest?.(`[data-codex-service-tier-badge="true"], .codestudio-lite-codex-toast, #${styleId}`);
+  }
+
+  function codestudioLiteMutationTouchesOnlyOwnNodes(mutation) {
+    const changedNodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
+    if (changedNodes.length > 0) {
+      return codestudioLiteOwnedMutationNode(mutation.target) || changedNodes.every(codestudioLiteOwnedMutationNode);
+    }
+    return codestudioLiteOwnedMutationNode(mutation.target);
+  }
+
+  function shouldIgnoreCodestudioLiteMutations(mutations) {
+    return Array.isArray(mutations) && mutations.length > 0 && mutations.every(codestudioLiteMutationTouchesOnlyOwnNodes);
+  }
+
   function refresh(mutations = null) {
     ensureStyle();
     const settings = codestudioLiteSettings();
@@ -5092,8 +5162,7 @@ fn codex_enhancement_script(
       window.__codexPluginAutoExpandRunning = false;
     }
     if (settings.modelWhitelistUnlock) {
-      patchCodexModelWhitelist();
-      refreshCodexModelWhitelistFromScan(mutations);
+      patchCodexModelWhitelist(mutations);
     }
     if (settings.serviceTierControls) {
       ensureCodexServiceTierStateLoaded();
@@ -5106,14 +5175,55 @@ fn codex_enhancement_script(
     }
   }
 
-  window.__codestudioLiteCodexEnhancementsRefresh = refresh;
-  refresh();
+  function runCodestudioLiteRefresh(mutations = null) {
+    const now = Date.now();
+    if (now < codestudioLiteRefreshDisabledUntil) return;
+    const started = typeof performance !== "undefined" && performance.now ? performance.now() : now;
+    try {
+      refresh(mutations);
+    } finally {
+      const ended = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+      const elapsed = ended - started;
+      if (elapsed > 50) {
+        codestudioLiteSlowRefreshCount += 1;
+        if (codestudioLiteSlowRefreshCount === 1 || codestudioLiteSlowRefreshCount === 3) {
+          recordCodexEnhancementDiagnostic("enhancement_refresh_slow", { elapsedMs: Math.round(elapsed), count: codestudioLiteSlowRefreshCount });
+        }
+        if (codestudioLiteSlowRefreshCount >= 5) {
+          codestudioLiteRefreshDisabledUntil = Date.now() + 5000;
+          codestudioLiteSlowRefreshCount = 0;
+          recordCodexEnhancementDiagnostic("enhancement_refresh_temporarily_throttled", { disabledMs: 5000 });
+        }
+      } else {
+        codestudioLiteSlowRefreshCount = 0;
+      }
+    }
+  }
+
+  function scheduleCodestudioLiteRefresh(mutations = null) {
+    if (shouldIgnoreCodestudioLiteMutations(mutations)) return;
+    if (Array.isArray(mutations) && mutations.length > 0) {
+      codestudioLitePendingMutations = [...(codestudioLitePendingMutations || []), ...mutations].slice(-80);
+    }
+    if (codestudioLiteRefreshScheduled) return;
+    codestudioLiteRefreshScheduled = true;
+    const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+    scheduleFrame(() => {
+      codestudioLiteRefreshScheduled = false;
+      const pending = codestudioLitePendingMutations;
+      codestudioLitePendingMutations = null;
+      runCodestudioLiteRefresh(pending);
+    });
+  }
+
+  window.__codestudioLiteCodexEnhancementsRefresh = () => scheduleCodestudioLiteRefresh();
+  runCodestudioLiteRefresh();
   if (!window.__codestudioLiteCodexEnhancementsTimer) {
-    window.__codestudioLiteCodexEnhancementsTimer = setInterval(refresh, 1000);
+    window.__codestudioLiteCodexEnhancementsTimer = setInterval(() => scheduleCodestudioLiteRefresh(), 1000);
   }
   if (!window.__codestudioLiteCodexEnhancementsObserver) {
-    const observer = new MutationObserver((mutations) => refresh(mutations));
-    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled", "aria-disabled", "data-disabled", "class", "style"] });
+    const observer = new MutationObserver((mutations) => scheduleCodestudioLiteRefresh(mutations));
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled", "aria-disabled", "class", "style"] });
     window.__codestudioLiteCodexEnhancementsObserver = observer;
   }
   return true;

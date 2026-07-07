@@ -7,6 +7,7 @@
   import chartBar from "@iconify-icons/ph/chart-bar";
   import clock from "@iconify-icons/ph/clock";
   import copy from "@iconify-icons/ph/copy";
+  import caretDown from "@iconify-icons/ph/caret-down";
   import x from "@iconify-icons/ph/x";
   import appWindow from "@iconify-icons/ph/app-window";
   import downloadSimple from "@iconify-icons/ph/download-simple";
@@ -48,6 +49,7 @@
     arrowLeft,
     arrowRight,
     check: checkCircle,
+    chevronDown: caretDown,
     clock,
     close: x,
     claudeDesktop: appWindow,
