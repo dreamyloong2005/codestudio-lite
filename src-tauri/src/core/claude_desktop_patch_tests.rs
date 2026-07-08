@@ -1946,6 +1946,7 @@ fn patch_assets_intercept_native_locale_requests_without_dom_translation() {
     );
     assert!(TRANSLATION_RUNTIME.contains("rememberLocale"));
     assert!(TRANSLATION_RUNTIME.contains("localeRequestBodySync"));
+    assert!(TRANSLATION_RUNTIME.contains(r#""Home": "\u9996\u9875""#));
     assert!(TRANSLATION_RUNTIME.contains(r#""Chat": "\u804a\u5929""#));
     assert!(TRANSLATION_RUNTIME.contains(r#""About Claude": "\u5173\u4e8eClaude""#));
     assert!(TRANSLATION_RUNTIME.contains(r#""Get support": "\u83b7\u53d6\u652f\u6301""#));
@@ -2000,6 +2001,41 @@ fn locale_runtime_translates_code_ui_label_without_skipping_code_named_container
     assert!(TRANSLATION_RUNTIME.contains("TEXT_EN"));
     assert!(TRANSLATION_RUNTIME.contains(r#"[class*="markdown"]"#));
     assert!(TRANSLATION_RUNTIME.contains(r#"[class*="prose"]"#));
+}
+
+#[test]
+fn locale_runtime_translates_first_screen_copy_from_cache() {
+    assert!(TRANSLATION_RUNTIME.contains("claudeFirstScreenFallback"));
+    assert!(TRANSLATION_RUNTIME.contains("Let's knock something off your list"));
+    assert!(
+        TRANSLATION_RUNTIME.contains("\\u8ba9\\u6211\\u4eec\\u4ece\\u4f60\\u7684\\u6e05\\u5355")
+    );
+    assert!(TRANSLATION_RUNTIME.contains("What can I help you with today?"));
+    assert!(TRANSLATION_RUNTIME.contains("Good morning, "));
+    assert!(TRANSLATION_RUNTIME.contains("translatedWeekdayGreetingText"));
+    assert!(TRANSLATION_RUNTIME.contains("Monday"));
+    assert!(TRANSLATION_RUNTIME.contains("Tuesday"));
+    assert!(TRANSLATION_RUNTIME.contains("Wednesday"));
+    assert!(TRANSLATION_RUNTIME.contains("Thursday"));
+    assert!(TRANSLATION_RUNTIME.contains("Friday"));
+    assert!(TRANSLATION_RUNTIME.contains("Saturday"));
+    assert!(TRANSLATION_RUNTIME.contains("Sunday"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u5468\\u4e00"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u5468\\u65e5"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u5feb\\u4e50"));
+    assert!(TRANSLATION_RUNTIME.contains("translatedFirstScreenTextValue"));
+}
+
+#[test]
+fn locale_runtime_translates_current_onboarding_cta_fallbacks() {
+    assert!(TRANSLATION_RUNTIME.contains("Turn on memory"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u5f00\\u542f\\u8bb0\\u5fc6"));
+    assert!(TRANSLATION_RUNTIME.contains("Get started with Claude"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u5f00\\u59cb\\u4f7f\\u7528 Claude"));
+    assert!(TRANSLATION_RUNTIME.contains("Try Cowork"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u8bd5\\u8bd5 Cowork"));
+    assert!(TRANSLATION_RUNTIME.contains("Upgrade to let Claude take on real tasks for you"));
+    assert!(TRANSLATION_RUNTIME.contains("\\u5347\\u7ea7\\uff0c\\u8ba9 Claude"));
 }
 
 #[test]
@@ -2232,6 +2268,84 @@ fn bundled_zh_locale_uses_curated_terms_for_known_machine_translation_regression
             expected: "中",
             forbidden: &["媒介"],
         },
+        LocaleExpectation {
+            key: "5OIWPYyjEY",
+            label: "turn on memory button",
+            expected: "开启记忆",
+            forbidden: &["内存"],
+        },
+        LocaleExpectation {
+            key: "demo.h",
+            label: "get started with Claude onboarding button",
+            expected: "开始使用 Claude",
+            forbidden: &["Get started"],
+        },
+        LocaleExpectation {
+            key: "vm1bq3+TX8",
+            label: "get started with Claude alternate onboarding button",
+            expected: "开始使用 Claude",
+            forbidden: &["Get started"],
+        },
+        LocaleExpectation {
+            key: "ejEGdxSUGs",
+            label: "home nav label",
+            expected: "首页",
+            forbidden: &["Home"],
+        },
+        LocaleExpectation {
+            key: "5vDuzZxMbU",
+            label: "try Cowork button",
+            expected: "试试 Cowork",
+            forbidden: &["Try Cowork"],
+        },
+        LocaleExpectation {
+            key: "o2vHDAOpDQ",
+            label: "try Cowork alternate button",
+            expected: "试试 Cowork",
+            forbidden: &["Try Cowork", "试试Cowork吧"],
+        },
+        LocaleExpectation {
+            key: "MlGy39Hf4h",
+            label: "upgrade for real tasks banner",
+            expected: "升级，让 Claude 为你处理真正的任务",
+            forbidden: &["Upgrade to let Claude"],
+        },
+        LocaleExpectation {
+            key: "peYOflkXOK",
+            label: "turn on memory in settings help text",
+            expected: "如需在聊天间记住上下文，请<link>在设置中开启记忆</link>。",
+            forbidden: &["turn on memory", "内存"],
+        },
+        LocaleExpectation {
+            key: "+ZbIiH1928",
+            label: "generate memory from chats opt-in",
+            expected: "允许 Claude 根据你的聊天生成记忆。",
+            forbidden: &["内存", "存储器"],
+        },
+        LocaleExpectation {
+            key: "9jlvZMEAKh",
+            label: "read memory label",
+            expected: "读取记忆",
+            forbidden: &["内存", "存储器"],
+        },
+        LocaleExpectation {
+            key: "demo.memoryT",
+            label: "import memory onboarding label",
+            expected: "从其他 AI 导入记忆",
+            forbidden: &["内存", "存储器"],
+        },
+        LocaleExpectation {
+            key: "kvTeMA0Bfz",
+            label: "save to memory failure message",
+            expected: "Claude 无法保存到记忆。",
+            forbidden: &["内存", "存储器"],
+        },
+        LocaleExpectation {
+            key: "sjdp6mtP7Y",
+            label: "reading memory progress label",
+            expected: "正在读取记忆",
+            forbidden: &["内存", "存储器"],
+        },
     ];
 
     assert_locale_expectations(map, &expectations);
@@ -2240,7 +2354,7 @@ fn bundled_zh_locale_uses_curated_terms_for_known_machine_translation_regression
 #[test]
 fn locale_runtime_source_stays_small() {
     let source = build_locale_runtime_source();
-    assert!(source.len() < 16_000);
+    assert!(source.len() < 19_000);
     assert_contains_none(&source, &["__CLAUDE_ZH_ION_LOCALE__", CLAUDE_ION_ZH_LOCALE]);
 }
 

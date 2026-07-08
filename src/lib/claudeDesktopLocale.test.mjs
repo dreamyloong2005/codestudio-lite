@@ -194,16 +194,109 @@ test("Claude Desktop zh-CN locale keeps agent and Chrome terminology curated", (
   assert.equal(ion["sS42/B0p76"], "Chrome");
 });
 
+test("Claude Desktop zh-CN locale covers Claude 1.19367 onboarding and memory labels", () => {
+  const ion = readJson("src-tauri/resources/claude-desktop/i18n/ion-dist/i18n/zh-CN.json");
+
+  assert.equal(ion["5OIWPYyjEY"], "开启记忆");
+  assert.equal(ion["demo.h"], "开始使用 Claude");
+  assert.equal(ion["vm1bq3+TX8"], "开始使用 Claude");
+  assert.equal(ion["ejEGdxSUGs"], "首页");
+  assert.equal(ion["5vDuzZxMbU"], "试试 Cowork");
+  assert.equal(ion["o2vHDAOpDQ"], "试试 Cowork");
+  assert.equal(ion["MlGy39Hf4h"], "升级，让 Claude 为你处理真正的任务");
+  assert.equal(ion["peYOflkXOK"], "如需在聊天间记住上下文，请<link>在设置中开启记忆</link>。");
+  assert.equal(ion["+ZbIiH1928"], "允许 Claude 根据你的聊天生成记忆。");
+  assert.equal(ion["3jWLm/Vcib"], "现在无法重新生成记忆");
+  assert.equal(ion["8lL3FLt3SE"], "正在更新记忆…");
+  assert.equal(ion["9jlvZMEAKh"], "读取记忆");
+  assert.equal(ion["demo.memoryT"], "从其他 AI 导入记忆");
+  assert.equal(ion["kvTeMA0Bfz"], "Claude 无法保存到记忆。");
+  assert.equal(ion["sjdp6mtP7Y"], "正在读取记忆");
+
+  for (const key of [
+    "5OIWPYyjEY",
+    "6fvtWClSA2",
+    "YLcp+eluei",
+    "peYOflkXOK",
+    "+ZbIiH1928",
+    "9jlvZMEAKh",
+    "demo.memoryT",
+    "kvTeMA0Bfz",
+    "sjdp6mtP7Y",
+  ]) {
+    assert.ok(!ion[key].includes("内存"), `${key} should use 记忆 for Claude memory`);
+    assert.ok(!ion[key].includes("存储器"), `${key} should not use storage-device wording`);
+  }
+});
+
 test("Claude Desktop runtime only translates DOM fallback labels inside UI text", () => {
   const generatedCode = text("Code");
+  const generatedHome = text("Home");
   const uiCode = text("Code");
+  const uiHome = text("Home");
   const body = element("body", {}, [
-    element("article", { class: "markdown prose" }, [generatedCode]),
+    element("article", { class: "markdown prose" }, [generatedCode, generatedHome]),
     element("button", {}, [uiCode]),
+    element("nav", {}, [uiHome]),
   ]);
 
   runTranslationRuntimeOnBody(body);
 
   assert.equal(generatedCode.nodeValue, "Code");
+  assert.equal(generatedHome.nodeValue, "Home");
   assert.equal(uiCode.nodeValue, "代码");
+  assert.equal(uiHome.nodeValue, "首页");
+});
+
+test("Claude Desktop runtime translates current onboarding CTA fallback labels", () => {
+  const memory = text("Turn on memory");
+  const start = text("Get started with Claude");
+  const cowork = text("Try Cowork");
+  const upgrade = text("Upgrade to let Claude take on real tasks for you");
+  const generatedUpgrade = text("Upgrade to let Claude take on real tasks for you");
+  const body = element("body", {}, [
+    element("main", {}, [
+      element("button", {}, [memory]),
+      element("button", {}, [start]),
+      element("button", {}, [cowork]),
+      element("p", { role: "button" }, [upgrade]),
+    ]),
+    element("article", { class: "markdown prose" }, [generatedUpgrade]),
+  ]);
+
+  runTranslationRuntimeOnBody(body);
+
+  assert.equal(memory.nodeValue, "开启记忆");
+  assert.equal(start.nodeValue, "开始使用 Claude");
+  assert.equal(cowork.nodeValue, "试试 Cowork");
+  assert.equal(upgrade.nodeValue, "升级，让 Claude 为你处理真正的任务");
+  assert.equal(generatedUpgrade.nodeValue, "Upgrade to let Claude take on real tasks for you");
+});
+
+test("Claude Desktop runtime translates first-screen copy from the real locale cache", () => {
+  const greeting = text("Good morning, Alex");
+  const monday = text("Happy Monday");
+  const sunday = text("Happy Sunday, Alex");
+  const question = text("What can I help you with today?");
+  const headline = text("Let's knock something off your list");
+  const generatedHeadline = text("Let's knock something off your list");
+  const body = element("body", {}, [
+    element("main", { "data-testid": "first-chat-empty-state" }, [
+      element("h1", {}, [greeting]),
+      element("h1", {}, [monday]),
+      element("h1", {}, [sunday]),
+      element("p", {}, [question]),
+      element("p", {}, [headline]),
+    ]),
+    element("article", { class: "markdown prose" }, [generatedHeadline]),
+  ]);
+
+  runTranslationRuntimeOnBody(body);
+
+  assert.equal(greeting.nodeValue, "早上好，Alex");
+  assert.equal(monday.nodeValue, "周一快乐");
+  assert.equal(sunday.nodeValue, "周日快乐，Alex");
+  assert.equal(question.nodeValue, "今天有什么我可以帮忙的吗？");
+  assert.equal(headline.nodeValue, "让我们从你的清单上砍掉一件事");
+  assert.equal(generatedHeadline.nodeValue, "Let's knock something off your list");
 });

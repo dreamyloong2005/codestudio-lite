@@ -4340,8 +4340,13 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "Presentation \u00b7 PPTX": "\u6f14\u793a\u6587\u7a3f \u00b7 PPTX",
     "Document \u00b7 DOCX": "\u6587\u6863 \u00b7 DOCX",
     "Cowork": "\u534f\u4f5c",
+    "Try Cowork": "\u8bd5\u8bd5 Cowork",
+    "Home": "\u9996\u9875",
     "Chat": "\u804a\u5929",
     "Code": "\u4ee3\u7801",
+    "Turn on memory": "\u5f00\u542f\u8bb0\u5fc6",
+    "Get started with Claude": "\u5f00\u59cb\u4f7f\u7528 Claude",
+    "Upgrade to let Claude take on real tasks for you": "\u5347\u7ea7\uff0c\u8ba9 Claude \u4e3a\u4f60\u5904\u7406\u771f\u6b63\u7684\u4efb\u52a1",
     "Currently unavailable": "\u5f53\u524d\u4e0d\u53ef\u7528",
     "For more complex tasks": "\u66f4\u590d\u6742\u4efb\u52a1",
     "For complex tasks": "\u590d\u6742\u4efb\u52a1",
@@ -4361,6 +4366,7 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   };
   const gatewayProviderSubstringFallback = true;
   const codeUiLabelFallback = true;
+  const claudeFirstScreenFallback = true;
   const uiOnlyDomFallback = true;
   const reversibleTextFallback = true;
   const SUBSTR_ZH = {
@@ -4368,6 +4374,30 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "Gateway": "\u7f51\u5173",
     "Version ": "\u7248\u672c",
     "is currently unavailable.": "\u5f53\u524d\u4e0d\u53ef\u7528\u3002",
+  };
+  const FIRST_SCREEN_ZH = {
+    "Let's knock something off your list": "\u8ba9\u6211\u4eec\u4ece\u4f60\u7684\u6e05\u5355\u4e0a\u780d\u6389\u4e00\u4ef6\u4e8b",
+    "What can I help you with today?": "\u4eca\u5929\u6709\u4ec0\u4e48\u6211\u53ef\u4ee5\u5e2e\u5fd9\u7684\u5417\uff1f",
+    "What can I help you with?": "\u6211\u80fd\u5e2e\u4f60\u4ec0\u4e48\uff1f",
+    "Good morning": "\u65e9\u4e0a\u597d",
+    "Good afternoon": "\u4e0b\u5348\u597d",
+    "Good evening": "\u665a\u4e0a\u597d",
+    "Evening": "\u665a\u4e0a\u597d",
+  };
+  const FIRST_SCREEN_PREFIX_ZH = {
+    "Good morning, ": "\u65e9\u4e0a\u597d\uff0c",
+    "Good afternoon, ": "\u4e0b\u5348\u597d\uff0c",
+    "Good evening, ": "\u665a\u4e0a\u597d\uff0c",
+    "Evening, ": "\u665a\u4e0a\u597d\uff0c",
+  };
+  const WEEKDAY_ZH = {
+    Monday: "\u5468\u4e00",
+    Tuesday: "\u5468\u4e8c",
+    Wednesday: "\u5468\u4e09",
+    Thursday: "\u5468\u56db",
+    Friday: "\u5468\u4e94",
+    Saturday: "\u5468\u516d",
+    Sunday: "\u5468\u65e5",
   };
   const CSL_ORIG_TEXT = "__cslOrigText";
   const CSL_TRANSLATED_TEXT = "__cslTranslatedText";
@@ -4396,6 +4426,7 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     try {
       if (!trimmed || trimmed.length > 160) return false;
       if (generatedContentTextNode(node)) return false;
+      if (translatedFirstScreenTextValue(trimmed)) return true;
       return likelyUiTextNode(node);
     } catch (_) { return false; }
   };
@@ -4423,6 +4454,8 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     const trimmed = v.trim();
     if (!trimmed) return v;
     const lead = v.length - v.trimStart().length;
+    const firstScreen = translatedFirstScreenTextValue(v);
+    if (firstScreen) return firstScreen;
     var zh = TEXT_ZH[trimmed];
     if (zh) return v.slice(0, lead) + zh + v.slice(lead + trimmed.length);
     for (var fk in FULL_ZH) if (fk.length > 15 && trimmed.indexOf(fk) === 0) return v.slice(0, lead) + FULL_ZH[fk];
@@ -4434,6 +4467,35 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     }
     return nv;
   };
+  function translatedFirstScreenTextValue(v) {
+    if (!v) return null;
+    const trimmed = v.trim();
+    if (!trimmed || trimmed.length > 120) return null;
+    const lead = v.length - v.trimStart().length;
+    const trail = v.slice(lead + trimmed.length);
+    const wrap = (text) => v.slice(0, lead) + text + trail;
+    const weekday = translatedWeekdayGreetingText(trimmed);
+    if (weekday) return wrap(weekday);
+    const direct = FIRST_SCREEN_ZH[trimmed];
+    if (direct) return wrap(direct);
+    for (const prefix in FIRST_SCREEN_PREFIX_ZH) {
+      if (trimmed.indexOf(prefix) === 0 && trimmed.length > prefix.length) {
+        return wrap(FIRST_SCREEN_PREFIX_ZH[prefix] + trimmed.slice(prefix.length));
+      }
+    }
+    return null;
+  }
+  function translatedWeekdayGreetingText(trimmed) {
+    if (trimmed.indexOf("Happy ") !== 0) return null;
+    const rest = trimmed.slice(6);
+    for (const day in WEEKDAY_ZH) {
+      const zh = WEEKDAY_ZH[day] + "\u5feb\u4e50";
+      if (rest === day) return zh;
+      const prefix = day + ", ";
+      if (rest.indexOf(prefix) === 0 && rest.length > prefix.length) return zh + "\uff0c" + rest.slice(prefix.length);
+    }
+    return null;
+  }
   const translateTextNode = (node) => {
     if (!node || node.nodeType !== 3) return;
     if (generatedContentTextNode(node)) { restoreTextNode(node); return; }
