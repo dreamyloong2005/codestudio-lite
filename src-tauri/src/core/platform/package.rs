@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{hidden_command, run_powershell};
+use super::{hidden_command, powershell_exe, run_powershell};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -540,8 +540,13 @@ foreach ($dir in $targetDirs) {
 } | ConvertTo-Json -Compress -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
 '@ | Set-Content -LiteralPath $scriptPath -Encoding UTF8
 
-    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if (-not (Test-Path -LiteralPath $powershell)) { $powershell = 'powershell.exe' }
+    $powershellCandidates = @(
+      $env:WINDIR,
+      $env:SystemRoot,
+      'C:\Windows'
+    ) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+    $powershell = $powershellCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $powershell) { $powershell = 'powershell.exe' }
     $elevatedArgs = @(
       '-NoLogo',
       '-NoProfile',
@@ -1184,9 +1189,9 @@ pub fn create_portable_uninstall_entry(
     let uninstall_script = format!(
         "if ($env:APPDATA) {{ $Shortcut = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\{escaped_shortcut_name}'; Remove-Item -LiteralPath $Shortcut -Force -ErrorAction SilentlyContinue }}; Remove-Item -LiteralPath '{escaped_root}' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '{escaped_uninstall_key}' -Recurse -Force -ErrorAction SilentlyContinue"
     );
-    let uninstall_string = format!(
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"{uninstall_script}\""
-    );
+    let powershell = quote_windows_argument(&powershell_exe().to_string_lossy());
+    let uninstall_string =
+        format!("{powershell} -NoProfile -ExecutionPolicy Bypass -Command \"{uninstall_script}\"");
     let script = format!(
         r#"
 $key = {key}

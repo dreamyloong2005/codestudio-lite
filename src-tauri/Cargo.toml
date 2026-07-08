@@ -1,6 +1,6 @@
 [package]
 name = "codestudio-lite"
-version = "1.2.1"
+version = "1.2.2"
 description = "A desktop-only Local AI Gateway and Provider Switcher for AI coding tools."
 authors = ["CodeStudio Lite"]
 license = "MIT"

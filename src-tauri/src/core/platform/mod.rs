@@ -13,6 +13,10 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub fn resolve_command(command: &str) -> Option<String> {
+    if powershell_alias(command) {
+        return resolve_powershell_command();
+    }
+
     if let Some(found) = find_on_path(command) {
         return Some(found);
     }
@@ -31,6 +35,14 @@ pub fn resolve_command(command: &str) -> Option<String> {
 
 pub fn resolve_command_on_path(command: &str) -> Option<String> {
     find_on_path(command)
+}
+
+pub fn resolve_powershell_command() -> Option<String> {
+    let path = powershell_exe();
+    if path.is_file() {
+        return Some(path.to_string_lossy().to_string());
+    }
+    find_on_path("powershell")
 }
 
 pub fn repair_candidate_for_command(command: &str) -> Option<(PathBuf, PathBuf)> {
@@ -217,7 +229,7 @@ fn command_for_program(program: &str, args: &[&str]) -> Command {
             return command;
         }
         if lower.ends_with(".ps1") {
-            let mut command = Command::new("powershell.exe");
+            let mut command = Command::new(powershell_exe());
             command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", program]);
             command.args(args);
             return command;
@@ -229,22 +241,44 @@ fn command_for_program(program: &str, args: &[&str]) -> Command {
     command
 }
 
-fn powershell_exe() -> PathBuf {
+pub fn powershell_exe() -> PathBuf {
     if cfg!(target_os = "windows") {
-        return env::var_os("WINDIR")
-            .map(PathBuf::from)
-            .map(|windir| {
-                windir
-                    .join("System32")
-                    .join("WindowsPowerShell")
-                    .join("v1.0")
-                    .join("powershell.exe")
-            })
-            .filter(|path| path.exists())
-            .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+        if let Some(path) = windows_system_powershell_exe() {
+            return path;
+        }
+        if let Some(found) = find_on_path("powershell") {
+            return PathBuf::from(found);
+        }
+        return PathBuf::from("powershell.exe");
     }
 
     PathBuf::from("powershell")
+}
+
+fn powershell_alias(command: &str) -> bool {
+    let normalized = command.trim().to_ascii_lowercase();
+    normalized == "powershell" || normalized == "powershell.exe"
+}
+
+#[cfg(windows)]
+fn windows_system_powershell_exe() -> Option<PathBuf> {
+    ["WINDIR", "SystemRoot"]
+        .iter()
+        .filter_map(|key| env::var_os(key))
+        .map(PathBuf::from)
+        .chain(std::iter::once(PathBuf::from(r"C:\Windows")))
+        .map(|root| {
+            root.join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        })
+        .find(|path| path.is_file())
+}
+
+#[cfg(not(windows))]
+fn windows_system_powershell_exe() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(windows)]
@@ -293,6 +327,17 @@ mod tests {
             assert_eq!(
                 run_powershell("$PSVersionTable.PSVersion").unwrap_err(),
                 "PowerShell is only available on Windows."
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_command_resolution_handles_windows_system_location() {
+        if cfg!(windows) {
+            let resolved = resolve_command("powershell").expect("PowerShell should resolve");
+            assert!(
+                resolved.to_ascii_lowercase().ends_with("powershell.exe"),
+                "resolved PowerShell path should point at powershell.exe: {resolved}"
             );
         }
     }

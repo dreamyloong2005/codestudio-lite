@@ -4,7 +4,8 @@ use crate::core::detector;
 use crate::core::env_health;
 use crate::core::npm_global;
 use crate::core::platform::{
-    hidden_command, hidden_command_with_args, package, resolve_command, run_powershell,
+    hidden_command, hidden_command_with_args, package, powershell_exe, resolve_command,
+    run_powershell,
 };
 use crate::core::process_control;
 use crate::core::storage;
@@ -2430,8 +2431,13 @@ Start-Sleep -Seconds 1
 $remainingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $remainingProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
 if ($remainingService) {
-  $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  if (-not (Test-Path -LiteralPath $powershell)) { $powershell = 'powershell.exe' }
+  $powershellCandidates = @(
+    $env:WINDIR,
+    $env:SystemRoot,
+    'C:\Windows'
+  ) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+  $powershell = $powershellCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (-not $powershell) { $powershell = 'powershell.exe' }
   $elevatedScript = @"
 `$ErrorActionPreference = 'Continue'
 `$serviceName = '$serviceName'
@@ -2816,17 +2822,12 @@ fn command_available(command: &str) -> bool {
 }
 
 fn powershell_available() -> bool {
-    let Some(resolved) = resolve_command("powershell") else {
-        return false;
-    };
-
-    hidden_command_with_args(
-        &resolved,
-        &["-NoProfile", "-Command", "$PSVersionTable.PSVersion"],
-    )
-    .output()
-    .map(|output| output.status.success())
-    .unwrap_or(false)
+    let mut command = hidden_command(powershell_exe());
+    command
+        .args(["-NoProfile", "-Command", "$PSVersionTable.PSVersion"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn command_resolves(command: &str) -> bool {
@@ -3344,7 +3345,8 @@ fn run_action_command_elevated_on_windows(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let mut command = hidden_command_with_args("powershell.exe", &powershell_args);
+        let mut command = hidden_command(powershell_exe());
+        command.args(&powershell_args);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         return run_streaming_command(command, program, progress);
     }
@@ -3560,20 +3562,19 @@ foreach ($part in $parts) {
 }
 [Console]::Write(($merged -join ';'))
 "#;
-    let output = hidden_command_with_args(
-        "powershell.exe",
-        &[
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ],
-    )
-    .output()
-    .map_err(|err| format!("Failed to start PowerShell to refresh PATH: {err}"))?;
+    let mut command = hidden_command(powershell_exe());
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+    let output = command
+        .output()
+        .map_err(|err| format!("Failed to start PowerShell to refresh PATH: {err}"))?;
     if !output.status.success() {
         return Err(decode(&output.stderr).trim().to_string());
     }

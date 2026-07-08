@@ -425,6 +425,29 @@ test("Claude Desktop Windows launch script command hides PowerShell windows", ()
   assert.doesNotMatch(launchScript, /-Command \$command -Args \$argsLine/);
 });
 
+test("Windows PowerShell callers use the shared system-path resolver", () => {
+  const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
+  const platform = read("src-tauri/src/core/platform/mod.rs");
+  const packageCore = read("src-tauri/src/core/platform/package.rs");
+  const installer = read("src-tauri/src/core/tool_installer.rs");
+
+  assert.match(platform, /pub fn powershell_exe\(\) -> PathBuf/);
+  assert.match(platform, /System32[\s\S]*WindowsPowerShell[\s\S]*v1\.0[\s\S]*powershell\.exe/);
+  assert.match(platform, /if powershell_alias\(command\)/);
+
+  assert.match(patch, /use crate::core::platform::\{hidden_command, powershell_exe\}/);
+  assert.match(patch, /hidden_command\(powershell_exe\(\)\)/);
+  assert.match(installer, /hidden_command\(powershell_exe\(\)\)/);
+  assert.match(packageCore, /powershell_exe\(\)/);
+  assert.match(packageCore, /\$powershellCandidates = @\([\s\S]*\$env:WINDIR[\s\S]*\$env:SystemRoot[\s\S]*'C:\\Windows'/);
+  assert.match(installer, /\$powershellCandidates = @\([\s\S]*\$env:WINDIR[\s\S]*\$env:SystemRoot[\s\S]*'C:\\Windows'/);
+
+  for (const source of [patch, platform, installer]) {
+    assert.doesNotMatch(source, /hidden_command(?:_with_args)?\("powershell\.exe"/);
+    assert.doesNotMatch(source, /Command::new\("powershell\.exe"\)/);
+  }
+});
+
 test("Claude Desktop Windows debugger menu automation moves only menu popups offscreen", () => {
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
   const debuggerScript = patch.slice(

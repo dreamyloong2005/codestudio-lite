@@ -5,9 +5,9 @@ use crate::core::detector::{
     claude_desktop_windows_known_stale_msix_manifest, claude_desktop_windows_package_identities,
     claude_desktop_windows_stale_msix_manifest,
 };
-use crate::core::platform::hidden_command;
 #[cfg(target_os = "windows")]
 use crate::core::platform::package;
+use crate::core::platform::{hidden_command, powershell_exe};
 #[cfg(not(target_os = "macos"))]
 use crate::core::process_control;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -513,8 +513,10 @@ fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
 }
 
 fn powershell_file_command(path: &Path) -> String {
+    let powershell = powershell_exe();
     format!(
-        "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {}",
+        "{} -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {}",
+        windows_shell_quote(&powershell.to_string_lossy()),
         windows_shell_quote(&path.to_string_lossy())
     )
 }
@@ -1908,7 +1910,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
     fs::write(&script_path, &bytes)
         .map_err(|err| format!("Failed to write PowerShell script to temp file: {err}"))?;
 
-    let mut child = hidden_command("powershell.exe")
+    let mut child = hidden_command(powershell_exe())
         .args([
             "-NoLogo",
             "-NoProfile",
