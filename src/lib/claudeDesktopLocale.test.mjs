@@ -279,28 +279,55 @@ test("Claude Desktop runtime translates current onboarding CTA fallback labels",
 
 test("Claude Desktop runtime translates first-screen copy from the real locale cache", () => {
   const greeting = text("Good morning, Alex");
+  const nightOwl = text("Hello, night owl");
   const monday = text("Happy Monday");
   const sunday = text("Happy Sunday, Alex");
   const question = text("What can I help you with today?");
   const headline = text("Let's knock something off your list");
+  const nestedHeadline = text("Let's knock something off your list");
   const generatedHeadline = text("Let's knock something off your list");
+  const claudeIcon = element(
+    "button",
+    {
+      title: "Hi, I’m Claude. How can I help you today?",
+      "aria-label": "Hi, I'm Claude. How can I help you today?",
+    },
+    [],
+  );
+  const generatedTooltip = element(
+    "article",
+    {
+      class: "markdown prose",
+      title: "Hi, I’m Claude. How can I help you today?",
+    },
+    [],
+  );
   const body = element("body", {}, [
     element("main", { "data-testid": "first-chat-empty-state" }, [
+      claudeIcon,
       element("h1", {}, [greeting]),
+      element("h1", {}, [nightOwl]),
       element("h1", {}, [monday]),
       element("h1", {}, [sunday]),
       element("p", {}, [question]),
       element("p", {}, [headline]),
+      element("section", { class: "prose" }, [element("p", {}, [nestedHeadline])]),
     ]),
     element("article", { class: "markdown prose" }, [generatedHeadline]),
+    generatedTooltip,
   ]);
 
   runTranslationRuntimeOnBody(body);
 
   assert.equal(greeting.nodeValue, "早上好，Alex");
+  assert.equal(nightOwl.nodeValue, "你好，夜猫子");
   assert.equal(monday.nodeValue, "周一快乐");
   assert.equal(sunday.nodeValue, "周日快乐，Alex");
   assert.equal(question.nodeValue, "今天有什么我可以帮忙的吗？");
   assert.equal(headline.nodeValue, "让我们从你的清单上砍掉一件事");
+  assert.equal(nestedHeadline.nodeValue, "让我们从你的清单上砍掉一件事");
   assert.equal(generatedHeadline.nodeValue, "Let's knock something off your list");
+  assert.equal(claudeIcon.attrs.title, "嗨，我是 Claude。今天有什么我可以帮忙的吗？");
+  assert.equal(claudeIcon.attrs["aria-label"], "嗨，我是 Claude。今天有什么我可以帮忙的吗？");
+  assert.equal(generatedTooltip.attrs.title, "Hi, I’m Claude. How can I help you today?");
 });

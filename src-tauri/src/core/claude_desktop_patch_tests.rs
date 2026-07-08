@@ -62,7 +62,9 @@ fn locale_payload_for_url_with_locale(url: &str, current_locale: &str) -> Option
     let is_zh = bare.ends_with("/zh-cn.json");
     let is_en = bare.ends_with("/en-us.json");
     let local_like = bare.starts_with("app://") || bare.starts_with("file://");
-    if !is_zh && !(current_locale == "zh-CN" && is_en && local_like) {
+    let claude_like =
+        bare.starts_with("https://claude.ai/") || bare.starts_with("http://claude.ai/");
+    if !is_zh && !(current_locale == "zh-CN" && is_en && (local_like || claude_like)) {
         return None;
     }
     if bare.contains("/dynamic/") {
@@ -744,16 +746,24 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
             "Waiting for CodeStudio Lite to enable Claude main process debugger via Accessibility",
             "Timed out waiting for Claude main process debugger",
             "localized-launch.flag",
+            "enable_claude_devtools()",
+            "Claude/developer_settings.json",
+            "Claude-3p/developer_settings.json",
+            "/usr/bin/plutil -replace allowDevTools -bool YES",
+            "/usr/bin/plutil -insert allowDevTools -bool YES",
         ],
+    );
+    assert_order(
+        &script,
+        "enable_claude_devtools \"$HOME/Library/Application Support/Claude/developer_settings.json\"",
+        "/usr/bin/open -a Claude",
+        "macOS localized launch script should enable Claude Developer mode before launching Claude",
     );
     assert_contains_none(
         &script,
         &[
-            "developer_settings.json",
-            "allowDevTools",
             "osascript",
             "tell application",
-            "/usr/bin/plutil",
             "/usr/bin/seq 9229 9300",
             "APPLESCRIPT",
             "JXA",
@@ -1371,7 +1381,8 @@ fn node_inspector_injection_source_targets_electron_windows() {
             "translation-runtime.js",
             "localePayloadForUrl",
             "ion-dist/i18n/en-US.json",
-            "currentLocale === \"zh-CN\" && isEn && localLike",
+            "claudeLike",
+            "currentLocale === \"zh-CN\" && isEn && (localLike || claudeLike)",
             "webContents.getAllWebContents",
             "localWindowHotSwitchSync",
             "lower.startsWith(\"devtools://\")",
@@ -2055,6 +2066,9 @@ fn locale_runtime_translates_first_screen_copy_from_cache() {
         TRANSLATION_RUNTIME.contains("\\u8ba9\\u6211\\u4eec\\u4ece\\u4f60\\u7684\\u6e05\\u5355")
     );
     assert!(TRANSLATION_RUNTIME.contains("What can I help you with today?"));
+    assert!(TRANSLATION_RUNTIME.contains("Hi, I\\u2019m Claude. How can I help you today?"));
+    assert!(TRANSLATION_RUNTIME.contains("Hello, night owl"));
+    assert!(TRANSLATION_RUNTIME.contains("Hello, "));
     assert!(TRANSLATION_RUNTIME.contains("Good morning, "));
     assert!(TRANSLATION_RUNTIME.contains("translatedWeekdayGreetingText"));
     assert!(TRANSLATION_RUNTIME.contains("Monday"));
@@ -2068,6 +2082,12 @@ fn locale_runtime_translates_first_screen_copy_from_cache() {
     assert!(TRANSLATION_RUNTIME.contains("\\u5468\\u65e5"));
     assert!(TRANSLATION_RUNTIME.contains("\\u5feb\\u4e50"));
     assert!(TRANSLATION_RUNTIME.contains("translatedFirstScreenTextValue"));
+    assert!(TRANSLATION_RUNTIME.contains("firstScreenHint"));
+    assert!(TRANSLATION_RUNTIME.contains("firstScreenUiTextNode"));
+    assert!(TRANSLATION_RUNTIME.contains("CSL_ORIG_ATTRS"));
+    assert!(TRANSLATION_RUNTIME.contains("translateElementAttr"));
+    assert!(TRANSLATION_RUNTIME.contains("walkAttrs"));
+    assert!(TRANSLATION_RUNTIME.contains("\"title\", \"aria-label\""));
 }
 
 #[test]
@@ -2404,7 +2424,7 @@ fn bundled_zh_locale_uses_curated_terms_for_known_machine_translation_regression
 #[test]
 fn locale_runtime_source_stays_small() {
     let source = build_locale_runtime_source();
-    assert!(source.len() < 19_000);
+    assert!(source.len() < 24_000);
     assert_contains_none(&source, &["__CLAUDE_ZH_ION_LOCALE__", CLAUDE_ION_ZH_LOCALE]);
 }
 
@@ -2433,6 +2453,13 @@ fn locale_payload_selection_matches_shell_and_ion_urls() {
     );
     assert_eq!(
         locale_payload_for_url_with_locale("https://claude.ai/ion-dist/i18n/en-US.json", "zh-CN"),
+        Some(CLAUDE_ION_ZH_LOCALE)
+    );
+    assert_eq!(
+        locale_payload_for_url_with_locale(
+            "https://example.test/ion-dist/i18n/en-US.json",
+            "zh-CN"
+        ),
         None
     );
     assert_eq!(locale_payload_for_url("https://claude.ai/app.js"), None);

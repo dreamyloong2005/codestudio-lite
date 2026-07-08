@@ -2282,7 +2282,11 @@ fn sync_active_profiles_from_native_configs(
             drafts,
             "codex",
             |profile| {
-                codex_direct_config_matches_profile(&codex_config, codex_auth.as_ref(), profile)
+                codex_direct_config_matches_profile_without_keychain(
+                    &codex_config,
+                    codex_auth.as_ref(),
+                    profile,
+                )
             },
             || detect_codex_native_profile_with_auth(&codex_config, codex_auth.as_ref()),
         )?;
@@ -2297,7 +2301,7 @@ fn sync_active_profiles_from_native_configs(
             config,
             drafts,
             "claude",
-            |profile| claude_config_matches_profile(&claude_config, profile),
+            |profile| claude_config_matches_profile_without_keychain(&claude_config, profile),
             || detect_claude_native_profile(&claude_config),
         )?;
     }
@@ -2308,7 +2312,7 @@ fn sync_active_profiles_from_native_configs(
         config,
         drafts,
         "gemini",
-        |profile| gemini_env_matches_profile(&gemini_env, profile),
+        |profile| gemini_env_matches_profile_without_keychain(&gemini_env, profile),
         || detect_gemini_native_profile(&gemini_env),
     )?;
 
@@ -2322,7 +2326,9 @@ fn sync_active_profiles_from_native_configs(
             config,
             drafts,
             "gemini-code-assist",
-            |profile| gemini_code_assist_settings_match_profile(&settings, profile),
+            |profile| {
+                gemini_code_assist_settings_match_profile_without_keychain(&settings, profile)
+            },
             || detect_gemini_code_assist_native_profile(&settings),
         )?;
     }
@@ -2338,7 +2344,7 @@ fn sync_active_profiles_from_native_configs(
             config,
             drafts,
             "opencode",
-            |profile| opencode_config_matches_profile(&opencode_config, profile),
+            |profile| opencode_config_matches_profile_without_keychain(&opencode_config, profile),
             || detect_opencode_native_profile(&opencode_config),
         )?;
     }
@@ -2350,7 +2356,7 @@ fn sync_active_profiles_from_native_configs(
             config,
             drafts,
             "openclaw",
-            |profile| openclaw_config_matches_profile(&openclaw_config, profile),
+            |profile| openclaw_config_matches_profile_without_keychain(&openclaw_config, profile),
             || detect_openclaw_native_profile(&openclaw_config),
         )?;
     }
@@ -2362,7 +2368,7 @@ fn sync_active_profiles_from_native_configs(
             config,
             drafts,
             "hermes",
-            |profile| hermes_config_matches_profile(&hermes_config, profile),
+            |profile| hermes_config_matches_profile_without_keychain(&hermes_config, profile),
             || detect_hermes_native_profile(&hermes_config),
         )?;
     }
@@ -2396,7 +2402,13 @@ fn sync_claude_desktop_config_profile(
         config,
         drafts,
         "claude-desktop",
-        |profile| claude_desktop_config_matches_profile(profile, desktop_paths.as_ref(), official),
+        |profile| {
+            claude_desktop_config_matches_profile_without_keychain(
+                profile,
+                desktop_paths.as_ref(),
+                official,
+            )
+        },
         || {
             desktop_paths
                 .as_ref()
@@ -2585,7 +2597,7 @@ fn upsert_detected_native_profile(
     let model = native_optional_model(&detected.model).unwrap_or_default();
 
     if let Some(existing) = drafts.iter().find(|profile| {
-        detected_native_profile_matches_existing_key(
+        detected_native_profile_matches_existing_reference(
             profile, &app, &provider, &protocol, &model, &base_url, api_key,
         )
     }) {
@@ -2596,7 +2608,7 @@ fn upsert_detected_native_profile(
         is_auto_imported_native_profile(profile)
             && profile.provider != provider
             && detected_native_profile_base_matches(profile, &app, &protocol, &model, &base_url)
-            && profile_api_key_matches_config_by_reading_keychain(profile, api_key)
+            && profile_api_key_matches_config_without_keychain(profile, api_key)
     }) {
         let now = Utc::now().to_rfc3339();
         let mut updated = drafts[existing_index].clone();
@@ -2676,6 +2688,7 @@ fn upsert_detected_native_profile(
     Ok(draft)
 }
 
+#[cfg(test)]
 fn detected_native_profile_matches_existing_key(
     profile: &ProfileDraft,
     app: &str,
@@ -2685,9 +2698,52 @@ fn detected_native_profile_matches_existing_key(
     base_url: &str,
     api_key: &str,
 ) -> bool {
+    detected_native_profile_matches_existing_secret(
+        profile,
+        app,
+        provider,
+        protocol,
+        model,
+        base_url,
+        api_key,
+        SecretMatchMode::ExactKeychain,
+    )
+}
+
+fn detected_native_profile_matches_existing_reference(
+    profile: &ProfileDraft,
+    app: &str,
+    provider: &str,
+    protocol: &str,
+    model: &str,
+    base_url: &str,
+    api_key: &str,
+) -> bool {
+    detected_native_profile_matches_existing_secret(
+        profile,
+        app,
+        provider,
+        protocol,
+        model,
+        base_url,
+        api_key,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn detected_native_profile_matches_existing_secret(
+    profile: &ProfileDraft,
+    app: &str,
+    provider: &str,
+    protocol: &str,
+    model: &str,
+    base_url: &str,
+    api_key: &str,
+    secret_match: SecretMatchMode,
+) -> bool {
     profile.provider == provider
         && detected_native_profile_base_matches(profile, app, protocol, model, base_url)
-        && profile_api_key_matches_config_by_reading_keychain(profile, api_key)
+        && profile_api_key_matches_config(profile, api_key, secret_match)
 }
 
 fn detected_native_profile_base_matches(
@@ -2934,10 +2990,38 @@ fn detect_claude_desktop_native_profile(
     })
 }
 
+#[cfg(test)]
 fn claude_desktop_config_matches_profile(
     profile: &ProfileDraft,
     paths: Option<&ClaudeDesktopPaths>,
     official: bool,
+) -> bool {
+    claude_desktop_config_matches_profile_with_secret_match(
+        profile,
+        paths,
+        official,
+        SecretMatchMode::ExactKeychain,
+    )
+}
+
+fn claude_desktop_config_matches_profile_without_keychain(
+    profile: &ProfileDraft,
+    paths: Option<&ClaudeDesktopPaths>,
+    official: bool,
+) -> bool {
+    claude_desktop_config_matches_profile_with_secret_match(
+        profile,
+        paths,
+        official,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn claude_desktop_config_matches_profile_with_secret_match(
+    profile: &ProfileDraft,
+    paths: Option<&ClaudeDesktopPaths>,
+    official: bool,
+    secret_match: SecretMatchMode,
 ) -> bool {
     if canonical_profile_app(&profile.app) != "claude-desktop"
         || profile.mode != ProviderApplyMode::Config
@@ -2962,7 +3046,7 @@ fn claude_desktop_config_matches_profile(
         None => claude_desktop_detected_model(&value).is_none(),
     };
     let token_matches = json_string_lookup(&value, &["inferenceGatewayApiKey"])
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
         .unwrap_or(false);
 
     json_string_lookup(&value, &["inferenceProvider"]).as_deref() == Some("gateway")
@@ -3218,10 +3302,38 @@ fn read_json_string_from_file(path: &Path, keys: &[&str]) -> Option<String> {
         .and_then(|value| json_string_lookup(&value, keys))
 }
 
+#[cfg(test)]
 fn codex_direct_config_matches_profile(
     value: &toml::Value,
     auth: Option<&serde_json::Value>,
     profile: &ProfileDraft,
+) -> bool {
+    codex_direct_config_matches_profile_with_secret_match(
+        value,
+        auth,
+        profile,
+        SecretMatchMode::ExactKeychain,
+    )
+}
+
+fn codex_direct_config_matches_profile_without_keychain(
+    value: &toml::Value,
+    auth: Option<&serde_json::Value>,
+    profile: &ProfileDraft,
+) -> bool {
+    codex_direct_config_matches_profile_with_secret_match(
+        value,
+        auth,
+        profile,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn codex_direct_config_matches_profile_with_secret_match(
+    value: &toml::Value,
+    auth: Option<&serde_json::Value>,
+    profile: &ProfileDraft,
+    secret_match: SecretMatchMode,
 ) -> bool {
     if !is_codex_family_app(&profile.app) || profile.mode != ProviderApplyMode::Config {
         return false;
@@ -3244,7 +3356,7 @@ fn codex_direct_config_matches_profile(
     };
     let token_matches = auth
         .and_then(codex_auth_api_key_from_value)
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
         .unwrap_or(true);
 
     read_toml_string(value, "model_provider").as_deref() == Some(provider_id.as_str())
@@ -3328,6 +3440,25 @@ fn codex_active_provider_id_for_profile(
 }
 
 fn claude_config_matches_profile(value: &serde_json::Value, profile: &ProfileDraft) -> bool {
+    claude_config_matches_profile_with_secret_match(value, profile, SecretMatchMode::ExactKeychain)
+}
+
+fn claude_config_matches_profile_without_keychain(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+) -> bool {
+    claude_config_matches_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn claude_config_matches_profile_with_secret_match(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+    secret_match: SecretMatchMode,
+) -> bool {
     if provider_is_official(&profile.provider) {
         return canonical_profile_app(&profile.app) == "claude"
             && profile.mode == ProviderApplyMode::Config
@@ -3354,7 +3485,7 @@ fn claude_config_matches_profile(value: &serde_json::Value, profile: &ProfileDra
         }
     };
     let token_matches = json_string_lookup(value, &["env", "ANTHROPIC_AUTH_TOKEN"])
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
         .unwrap_or(false);
 
     json_string_lookup(value, &["env", "ANTHROPIC_BASE_URL"])
@@ -3372,6 +3503,21 @@ fn claude_vscode_plugin_config_matches(value: &serde_json::Value) -> bool {
 }
 
 fn gemini_env_matches_profile(env: &HashMap<String, String>, profile: &ProfileDraft) -> bool {
+    gemini_env_matches_profile_with_secret_match(env, profile, SecretMatchMode::ExactKeychain)
+}
+
+fn gemini_env_matches_profile_without_keychain(
+    env: &HashMap<String, String>,
+    profile: &ProfileDraft,
+) -> bool {
+    gemini_env_matches_profile_with_secret_match(env, profile, SecretMatchMode::KeychainReference)
+}
+
+fn gemini_env_matches_profile_with_secret_match(
+    env: &HashMap<String, String>,
+    profile: &ProfileDraft,
+    secret_match: SecretMatchMode,
+) -> bool {
     if provider_is_official(&profile.provider) {
         return canonical_profile_app(&profile.app) == "gemini"
             && profile.mode == ProviderApplyMode::Config
@@ -3393,7 +3539,7 @@ fn gemini_env_matches_profile(env: &HashMap<String, String>, profile: &ProfileDr
     };
     let token_matches = env
         .get("GEMINI_API_KEY")
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, token))
+        .map(|token| profile_api_key_matches_config(profile, token, secret_match))
         .unwrap_or(false);
 
     env.get("GOOGLE_GEMINI_BASE_URL")
@@ -3408,6 +3554,29 @@ fn gemini_env_matches_profile(env: &HashMap<String, String>, profile: &ProfileDr
 fn gemini_code_assist_settings_match_profile(
     value: &serde_json::Value,
     profile: &ProfileDraft,
+) -> bool {
+    gemini_code_assist_settings_match_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::ExactKeychain,
+    )
+}
+
+fn gemini_code_assist_settings_match_profile_without_keychain(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+) -> bool {
+    gemini_code_assist_settings_match_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn gemini_code_assist_settings_match_profile_with_secret_match(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+    secret_match: SecretMatchMode,
 ) -> bool {
     if provider_is_official(&profile.provider) {
         return canonical_profile_app(&profile.app) == "gemini-code-assist"
@@ -3425,11 +3594,34 @@ fn gemini_code_assist_settings_match_profile(
     }
 
     json_string_lookup(value, &[GEMINI_CODE_ASSIST_API_KEY_SETTING])
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
         .unwrap_or(false)
 }
 
 fn opencode_config_matches_profile(value: &serde_json::Value, profile: &ProfileDraft) -> bool {
+    opencode_config_matches_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::ExactKeychain,
+    )
+}
+
+fn opencode_config_matches_profile_without_keychain(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+) -> bool {
+    opencode_config_matches_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn opencode_config_matches_profile_with_secret_match(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+    secret_match: SecretMatchMode,
+) -> bool {
     if provider_is_official(&profile.provider) {
         return canonical_profile_app(&profile.app) == "opencode"
             && profile.mode == ProviderApplyMode::Config
@@ -3457,7 +3649,7 @@ fn opencode_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
         None => json_string_lookup(value, &["model"]).is_none(),
     };
     let token_matches = json_string_lookup(value, &["provider", &provider_id, "options", "apiKey"])
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
         .unwrap_or(false);
 
     json_string_lookup(value, &["provider", &provider_id, "options", "baseURL"])
@@ -3470,6 +3662,29 @@ fn opencode_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
 }
 
 fn openclaw_config_matches_profile(value: &serde_json::Value, profile: &ProfileDraft) -> bool {
+    openclaw_config_matches_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::ExactKeychain,
+    )
+}
+
+fn openclaw_config_matches_profile_without_keychain(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+) -> bool {
+    openclaw_config_matches_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn openclaw_config_matches_profile_with_secret_match(
+    value: &serde_json::Value,
+    profile: &ProfileDraft,
+    secret_match: SecretMatchMode,
+) -> bool {
     if provider_is_official(&profile.provider) {
         return canonical_profile_app(&profile.app) == "openclaw"
             && profile.mode == ProviderApplyMode::Config
@@ -3496,7 +3711,7 @@ fn openclaw_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
         None => true,
     };
     let token_matches = json_string_lookup(value, &["models", "providers", &provider_id, "apiKey"])
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
         .unwrap_or(false);
 
     json_string_lookup(value, &["models", "providers", &provider_id, "baseUrl"])
@@ -3509,6 +3724,25 @@ fn openclaw_config_matches_profile(value: &serde_json::Value, profile: &ProfileD
 }
 
 fn hermes_config_matches_profile(value: &serde_norway::Value, profile: &ProfileDraft) -> bool {
+    hermes_config_matches_profile_with_secret_match(value, profile, SecretMatchMode::ExactKeychain)
+}
+
+fn hermes_config_matches_profile_without_keychain(
+    value: &serde_norway::Value,
+    profile: &ProfileDraft,
+) -> bool {
+    hermes_config_matches_profile_with_secret_match(
+        value,
+        profile,
+        SecretMatchMode::KeychainReference,
+    )
+}
+
+fn hermes_config_matches_profile_with_secret_match(
+    value: &serde_norway::Value,
+    profile: &ProfileDraft,
+    secret_match: SecretMatchMode,
+) -> bool {
     if provider_is_official(&profile.provider) {
         return canonical_profile_app(&profile.app) == "hermes"
             && profile.mode == ProviderApplyMode::Config
@@ -3530,7 +3764,7 @@ fn hermes_config_matches_profile(value: &serde_norway::Value, profile: &ProfileD
         None => yaml_string_lookup(value, &["model", "default"]).is_none(),
     };
     let token_matches = yaml_string_lookup(value, &["model", "api_key"])
-        .map(|token| profile_api_key_matches_config_by_reading_keychain(profile, &token))
+        .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
         .unwrap_or(false);
 
     yaml_string_lookup(value, &["model", "provider"]).as_deref() == Some("custom")
@@ -3590,7 +3824,38 @@ fn hermes_config_has_managed_endpoint(value: &serde_norway::Value) -> bool {
         || yaml_string_lookup(value, &["model", "api_key"]).is_some()
 }
 
+#[derive(Clone, Copy)]
+enum SecretMatchMode {
+    ExactKeychain,
+    KeychainReference,
+}
+
 fn profile_api_key_matches_config_by_reading_keychain(profile: &ProfileDraft, token: &str) -> bool {
+    profile_api_key_matches_config(profile, token, SecretMatchMode::ExactKeychain)
+}
+
+fn profile_api_key_matches_config_without_keychain(profile: &ProfileDraft, token: &str) -> bool {
+    profile_api_key_matches_config(profile, token, SecretMatchMode::KeychainReference)
+}
+
+fn profile_api_key_matches_config(
+    profile: &ProfileDraft,
+    token: &str,
+    secret_match: SecretMatchMode,
+) -> bool {
+    if token.trim().is_empty() || looks_like_local_gateway_token(token) {
+        return false;
+    }
+
+    if matches!(secret_match, SecretMatchMode::KeychainReference) {
+        return profile
+            .auth_ref
+            .as_deref()
+            .map(str::trim)
+            .map(|auth_ref| auth_ref.starts_with("keychain:") && auth_ref.len() > "keychain:".len())
+            .unwrap_or(false);
+    }
+
     let Some(auth_ref) = profile.auth_ref.as_deref() else {
         return false;
     };
@@ -5208,10 +5473,11 @@ fn claude_desktop_paths(
     if cfg!(target_os = "macos") {
         let app_support = paths.home_dir.join("Library").join("Application Support");
         let normal_dir = app_support.join("Claude");
+        let threep_dir = app_support.join("Claude-3p");
         return Ok(claude_desktop_paths_from_dirs(
             normal_dir.clone(),
-            app_support.join("Claude-3p"),
-            vec![normal_dir.join("developer_settings.json")],
+            threep_dir.clone(),
+            macos_claude_desktop_developer_settings_paths(&normal_dir, &threep_dir),
         ));
     }
 
@@ -5239,6 +5505,16 @@ fn pick_windows_claude_desktop_dir(local_app_data: &Path, threep: bool) -> Optio
         .collect::<Vec<_>>();
     candidates.sort();
     candidates.into_iter().next()
+}
+
+fn macos_claude_desktop_developer_settings_paths(
+    normal_dir: &Path,
+    threep_dir: &Path,
+) -> Vec<PathBuf> {
+    vec![
+        normal_dir.join("developer_settings.json"),
+        threep_dir.join("developer_settings.json"),
+    ]
 }
 
 fn claude_desktop_paths_from_dirs(
@@ -7120,9 +7396,6 @@ fn redact_native_config_preview_content(
     mode: ProviderApplyMode,
 ) -> String {
     let mut output = content.to_string();
-    if let Ok(api_key) = load_provider_api_key_for_direct_config(profile) {
-        output = replace_nonempty(&output, &api_key, secret_preview(profile));
-    }
     if mode == ProviderApplyMode::Gateway {
         if let Ok(client) = gateway::client_config_for_tool(&profile.app) {
             output = replace_nonempty(&output, &client.token, &client.token_preview);

@@ -563,6 +563,48 @@ requires_openai_auth = true
 }
 
 #[test]
+fn startup_native_matching_uses_keychain_reference_without_loading_secret() {
+    let mut profile = test_profile("claude", ProviderApplyMode::Config);
+    profile.provider = "anthropic.test".to_string();
+    profile.protocol = PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+    profile.model = "claude-sonnet-4-6".to_string();
+    profile.base_url = "https://api.anthropic.test/v1".to_string();
+    profile.auth_ref = Some("keychain:test/missing-startup-secret/api_key".to_string());
+
+    let native_config = serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.test/v1",
+            "ANTHROPIC_AUTH_TOKEN": "sk-native"
+        }
+    });
+
+    assert!(!claude_config_matches_profile(&native_config, &profile));
+    assert!(claude_config_matches_profile_without_keychain(
+        &native_config,
+        &profile
+    ));
+    assert!(!detected_native_profile_matches_existing_key(
+        &profile,
+        "claude",
+        "anthropic.test",
+        PROTOCOL_ANTHROPIC_MESSAGES,
+        "claude-sonnet-4-6",
+        "https://api.anthropic.test/v1",
+        "sk-native",
+    ));
+    assert!(detected_native_profile_matches_existing_reference(
+        &profile,
+        "claude",
+        "anthropic.test",
+        PROTOCOL_ANTHROPIC_MESSAGES,
+        "claude-sonnet-4-6",
+        "https://api.anthropic.test/v1",
+        "sk-native",
+    ));
+}
+
+#[test]
 fn claude_config_matching_requires_same_auth_token_for_same_url() {
     let mut profile = test_profile("claude", ProviderApplyMode::Config);
     profile.provider = "anthropic.test".to_string();
@@ -1457,6 +1499,26 @@ fn claude_desktop_developer_settings_plan_only_when_disabled() {
     let plans = build_claude_desktop_developer_settings_plans(&paths).expect("plan should build");
     assert_eq!(plans.len(), 1);
     assert!(plans[0].content.contains("\"allowDevTools\": true"));
+}
+
+#[test]
+fn claude_desktop_macos_developer_settings_cover_normal_and_threep_dirs() {
+    let paths = macos_claude_desktop_developer_settings_paths(
+        Path::new("/Users/example/Library/Application Support/Claude"),
+        Path::new("/Users/example/Library/Application Support/Claude-3p"),
+    );
+
+    assert_eq!(
+        paths,
+        vec![
+            PathBuf::from(
+                "/Users/example/Library/Application Support/Claude/developer_settings.json"
+            ),
+            PathBuf::from(
+                "/Users/example/Library/Application Support/Claude-3p/developer_settings.json"
+            ),
+        ]
+    );
 }
 
 #[test]

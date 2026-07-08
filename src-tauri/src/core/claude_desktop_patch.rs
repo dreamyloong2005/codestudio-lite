@@ -2907,6 +2907,20 @@ fn macos_localized_launch_script() -> String {
 set -eu
 mkdir -p "$HOME/.codestudio-lite/claude-desktop-patch"
 printf 'zh-CN' > "$HOME/.codestudio-lite/claude-desktop-patch/__CLAUDE_LOCALIZED_LAUNCH_MARKER__"
+enable_claude_devtools() {
+  settings="$1"
+  settings_dir=${settings%/*}
+  /bin/mkdir -p "$settings_dir"
+  if [ ! -f "$settings" ]; then
+    /usr/bin/printf '{\n  "allowDevTools": true\n}\n' > "$settings"
+    return 0
+  fi
+  /usr/bin/plutil -replace allowDevTools -bool YES "$settings" >/dev/null 2>&1 && return 0
+  /usr/bin/plutil -insert allowDevTools -bool YES "$settings" >/dev/null 2>&1 && return 0
+  /usr/bin/printf '{\n  "allowDevTools": true\n}\n' > "$settings"
+}
+enable_claude_devtools "$HOME/Library/Application Support/Claude/developer_settings.json"
+enable_claude_devtools "$HOME/Library/Application Support/Claude-3p/developer_settings.json"
 if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
   /usr/bin/pkill -TERM -x Claude >/dev/null 2>&1 || true
 fi
@@ -3262,7 +3276,8 @@ fn build_main_process_injection_source_for_paths(
     const isZh = bare.endsWith("/zh-cn.json");
     const isEn = bare.endsWith("/en-us.json");
     const localLike = bare.startsWith("app://") || bare.startsWith("file://");
-    if (!isZh && !(currentLocale === "zh-CN" && isEn && localLike)) return null;
+    const claudeLike = bare.startsWith("https://claude.ai/") || bare.startsWith("http://claude.ai/");
+    if (!isZh && !(currentLocale === "zh-CN" && isEn && (localLike || claudeLike))) return null;
     if (bare.includes("/dynamic/")) return dynamicLocale;
     if (bare.includes("/ion-dist/i18n/") || bare.includes("/i18n/")) return ionLocale;
     return shellLocale;
@@ -4472,6 +4487,11 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "is currently unavailable.": "\u5f53\u524d\u4e0d\u53ef\u7528\u3002",
   };
   const FIRST_SCREEN_ZH = {
+    "Hi, I\u2019m Claude. How can I help you today?": "\u55e8\uff0c\u6211\u662f Claude\u3002\u4eca\u5929\u6709\u4ec0\u4e48\u6211\u53ef\u4ee5\u5e2e\u5fd9\u7684\u5417\uff1f",
+    "Hi, I'm Claude. How can I help you today?": "\u55e8\uff0c\u6211\u662f Claude\u3002\u4eca\u5929\u6709\u4ec0\u4e48\u6211\u53ef\u4ee5\u5e2e\u5fd9\u7684\u5417\uff1f",
+    "Hi, I\u2019m Claude. How can I help you?": "\u55e8\uff0c\u6211\u662f Claude\u3002\u6211\u80fd\u5e2e\u4f60\u4ec0\u4e48\uff1f",
+    "Hi, I'm Claude. How can I help you?": "\u55e8\uff0c\u6211\u662f Claude\u3002\u6211\u80fd\u5e2e\u4f60\u4ec0\u4e48\uff1f",
+    "Hello, night owl": "\u4f60\u597d\uff0c\u591c\u732b\u5b50",
     "Let's knock something off your list": "\u8ba9\u6211\u4eec\u4ece\u4f60\u7684\u6e05\u5355\u4e0a\u780d\u6389\u4e00\u4ef6\u4e8b",
     "What can I help you with today?": "\u4eca\u5929\u6709\u4ec0\u4e48\u6211\u53ef\u4ee5\u5e2e\u5fd9\u7684\u5417\uff1f",
     "What can I help you with?": "\u6211\u80fd\u5e2e\u4f60\u4ec0\u4e48\uff1f",
@@ -4485,6 +4505,7 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "Good afternoon, ": "\u4e0b\u5348\u597d\uff0c",
     "Good evening, ": "\u665a\u4e0a\u597d\uff0c",
     "Evening, ": "\u665a\u4e0a\u597d\uff0c",
+    "Hello, ": "\u4f60\u597d\uff0c",
   };
   const WEEKDAY_ZH = {
     Monday: "\u5468\u4e00",
@@ -4497,16 +4518,38 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   };
   const CSL_ORIG_TEXT = "__cslOrigText";
   const CSL_TRANSLATED_TEXT = "__cslTranslatedText";
+  const CSL_ORIG_ATTRS = "__cslOrigAttrs";
+  const ATTR_NAMES = ["title", "aria-label", "aria-description", "placeholder", "data-tooltip", "data-title"];
   const TEXT_EN = {};
   try { for (var rek in TEXT_ZH) if (TEXT_ZH[rek] && TEXT_EN[TEXT_ZH[rek]] === undefined) TEXT_EN[TEXT_ZH[rek]] = rek; } catch (_) {}
   const genSel = '[data-thinking], [class*="thinking"], [class*="thought"], [class*="markdown"], [class*="prose"], pre, code, [contenteditable]';
   const uiHint = /(nav|menu|sidebar|tab|model|toolbar|button|btn|dropdown|popover|modal)/i;
-  const generatedContentTextNode = (node) => {
-    try { return !!(node.parentElement?.closest?.(genSel)); } catch (_) { return false; }
+  const firstScreenHint = /(first[-_\s]*(chat|screen)|chat[-_\s]*empty|empty[-_\s]*state|onboarding|welcome|start[-_\s]*screen|new[-_\s]*chat)/i;
+  const generatedContentElement = (el) => {
+    try { return !!(el?.closest?.(genSel)); } catch (_) { return false; }
   };
-  const likelyUiTextNode = (node) => {
+  const firstScreenUiElement = (start, trimmed) => {
     try {
-      for (var el = node && node.parentElement, d = 0; el && d < 5; el = el.parentElement, d++) {
+      if (!translatedFirstScreenTextValue(trimmed)) return false;
+      for (var el = start, d = 0; el && d < 6; el = el.parentElement, d++) {
+        var tag = el.tagName || "";
+        if (/^(ARTICLE|PRE|CODE)$/.test(tag)) return false;
+        var hint = [
+          el.getAttribute?.("data-testid") || "",
+          el.getAttribute?.("id") || "",
+          el.getAttribute?.("class") || "",
+          el.getAttribute?.("aria-label") || "",
+          el.getAttribute?.("role") || ""
+        ].join(" ");
+        if (firstScreenHint.test(hint)) return true;
+      }
+    } catch (_) {}
+    return false;
+  };
+  const firstScreenUiTextNode = (node, trimmed) => firstScreenUiElement(node && node.parentElement, trimmed);
+  const likelyUiElement = (start) => {
+    try {
+      for (var el = start, d = 0; el && d < 5; el = el.parentElement, d++) {
         var tag = el.tagName || "";
         if (/^(BUTTON|A|NAV|ASIDE|HEADER)$/.test(tag)) return true;
         var role = el.getAttribute?.("role") || "";
@@ -4518,9 +4561,17 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     } catch (_) { return false; }
     return false;
   };
+  const generatedContentTextNode = (node) => {
+    try {
+      if (firstScreenUiTextNode(node, (node?.nodeValue || "").trim())) return false;
+      return generatedContentElement(node && node.parentElement);
+    } catch (_) { return false; }
+  };
+  const likelyUiTextNode = (node) => likelyUiElement(node && node.parentElement);
   const shouldTranslateDomFallbackTextNode = (node, trimmed) => {
     try {
       if (!trimmed || trimmed.length > 160) return false;
+      if (firstScreenUiTextNode(node, trimmed)) return true;
       if (generatedContentTextNode(node)) return false;
       if (translatedFirstScreenTextValue(trimmed)) return true;
       return likelyUiTextNode(node);
@@ -4608,6 +4659,66 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     try { node[CSL_ORIG_TEXT] = base; node[CSL_TRANSLATED_TEXT] = nv; } catch (_) {}
     if (node.nodeValue !== nv) node.nodeValue = nv;
   };
+  const clearAttrState = (el, attr) => {
+    try {
+      const state = el && el[CSL_ORIG_ATTRS];
+      if (state) delete state[attr];
+    } catch (_) {}
+  };
+  const restoreElementAttr = (el, attr) => {
+    try {
+      const state = el && el[CSL_ORIG_ATTRS];
+      const entry = state && state[attr];
+      if (!entry) return;
+      const current = el.getAttribute?.(attr);
+      if (current === entry.translated || current === entry.orig) el.setAttribute?.(attr, entry.orig);
+      delete state[attr];
+    } catch (_) {}
+  };
+  const shouldTranslateElementAttribute = (el, attr, trimmed) => {
+    try {
+      if (!trimmed || trimmed.length > 180) return false;
+      const firstScreen = translatedFirstScreenTextValue(trimmed);
+      if (firstScreen && (firstScreenUiElement(el, trimmed) || likelyUiElement(el))) return true;
+      if (generatedContentElement(el)) return false;
+      if (firstScreen) return likelyUiElement(el);
+      return likelyUiElement(el);
+    } catch (_) { return false; }
+  };
+  const translateElementAttr = (el, attr) => {
+    try {
+      if (!el || !el.getAttribute || !el.setAttribute || ATTR_NAMES.indexOf(attr) < 0) return;
+      const current = el.getAttribute(attr);
+      if (typeof current !== "string" || !current.trim()) { clearAttrState(el, attr); return; }
+      if (!zhOn()) { restoreElementAttr(el, attr); return; }
+      const state = el[CSL_ORIG_ATTRS] || (el[CSL_ORIG_ATTRS] = {});
+      let entry = state[attr];
+      if (entry && current !== entry.translated && current !== entry.orig) {
+        delete state[attr];
+        entry = null;
+      }
+      const base = entry ? entry.orig : current;
+      const trimmed = (base || "").trim();
+      if (!shouldTranslateElementAttribute(el, attr, trimmed)) { restoreElementAttr(el, attr); return; }
+      const nv = translatedTextValue(base);
+      if (!nv || nv === base) { clearAttrState(el, attr); return; }
+      state[attr] = { orig: base, translated: nv };
+      if (current !== nv) el.setAttribute(attr, nv);
+    } catch (_) {}
+  };
+  const translateElementAttrs = (el) => {
+    try { for (const attr of ATTR_NAMES) translateElementAttr(el, attr); } catch (_) {}
+  };
+  const walkAttrs = (root) => {
+    if (!root || root.nodeType !== 1) return;
+    const visit = (el) => {
+      if (!el || el.nodeType !== 1) return;
+      translateElementAttrs(el);
+      const kids = el.childNodes || [];
+      for (let i = 0; i < kids.length; i++) visit(kids[i]);
+    };
+    visit(root);
+  };
   const walkText = (root) => {
     if (!root) return;
     let walker;
@@ -4629,22 +4740,26 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
   const startTextPatch = () => {
     if (!document.body) { setTimeout(startTextPatch, 50); return; }
     walkText(document.body);
+    walkAttrs(document.body);
     try {
       const obs = new MutationObserver((muts) => {
         let rd = false;
         for (const m of muts) {
           if (m.type === "characterData" && m.target) translateTextNode(m.target);
-          else if (m.type === "attributes") rd = true;
+          else if (m.type === "attributes") {
+            if (m.attributeName && ATTR_NAMES.indexOf(m.attributeName) >= 0) translateElementAttr(m.target, m.attributeName);
+            rd = true;
+          }
           for (const node of m.addedNodes) {
             if (node.nodeType === 3) translateTextNode(node);
-            else if (node.nodeType === 1) { walkText(node); rd = true; }
+            else if (node.nodeType === 1) { walkText(node); walkAttrs(node); rd = true; }
           }
         }
         if (rd) fixLanguageRadio();
       });
-      obs.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["aria-checked"] });
+      obs.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ATTR_NAMES.concat(["aria-checked"]) });
     } catch (_) {}
-    setInterval(() => { try { walkText(document.body); } catch (_) {} fixLanguageRadio(); }, 800);
+    setInterval(() => { try { walkText(document.body); walkAttrs(document.body); } catch (_) {} fixLanguageRadio(); }, 800);
   };
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startTextPatch);
