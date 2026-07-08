@@ -201,6 +201,7 @@ test("Claude Desktop zh-CN locale covers Claude 1.19367 onboarding and memory la
   assert.equal(ion["demo.h"], "开始使用 Claude");
   assert.equal(ion["vm1bq3+TX8"], "开始使用 Claude");
   assert.equal(ion["ejEGdxSUGs"], "首页");
+  assert.equal(ion["zZtKixgRbu"], "获取 Pro 计划");
   assert.equal(ion["5vDuzZxMbU"], "试试 Cowork");
   assert.equal(ion["o2vHDAOpDQ"], "试试 Cowork");
   assert.equal(ion["MlGy39Hf4h"], "升级，让 Claude 为你处理真正的任务");
@@ -250,6 +251,7 @@ test("Claude Desktop runtime only translates DOM fallback labels inside UI text"
 
 test("Claude Desktop runtime translates current onboarding CTA fallback labels", () => {
   const memory = text("Turn on memory");
+  const pro = text("Get Pro plan");
   const start = text("Get started with Claude");
   const cowork = text("Try Cowork");
   const upgrade = text("Upgrade to let Claude take on real tasks for you");
@@ -257,6 +259,7 @@ test("Claude Desktop runtime translates current onboarding CTA fallback labels",
   const body = element("body", {}, [
     element("main", {}, [
       element("button", {}, [memory]),
+      element("button", {}, [pro]),
       element("button", {}, [start]),
       element("button", {}, [cowork]),
       element("p", { role: "button" }, [upgrade]),
@@ -267,6 +270,7 @@ test("Claude Desktop runtime translates current onboarding CTA fallback labels",
   runTranslationRuntimeOnBody(body);
 
   assert.equal(memory.nodeValue, "开启记忆");
+  assert.equal(pro.nodeValue, "获取 Pro 计划");
   assert.equal(start.nodeValue, "开始使用 Claude");
   assert.equal(cowork.nodeValue, "试试 Cowork");
   assert.equal(upgrade.nodeValue, "升级，让 Claude 为你处理真正的任务");

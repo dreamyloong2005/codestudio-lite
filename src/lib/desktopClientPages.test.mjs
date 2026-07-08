@@ -448,7 +448,7 @@ test("Windows PowerShell callers use the shared system-path resolver", () => {
   }
 });
 
-test("Claude Desktop Windows debugger menu automation moves only menu popups offscreen", () => {
+test("Claude Desktop Windows debugger menu automation activates the main window without moving it offscreen", () => {
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
   const debuggerScript = patch.slice(
     patch.indexOf("fn request_windows_claude_main_process_debugger_once"),
@@ -456,12 +456,15 @@ test("Claude Desktop Windows debugger menu automation moves only menu popups off
   );
 
   assert.match(debuggerScript, /SetWindowPos/);
+  assert.match(debuggerScript, /Activate-ClaudeMainWindow/);
+  assert.match(debuggerScript, /if \(-not \$isIconic -and \(\$width -lt 320 -or \$height -lt 240\)\)/);
+  assert.match(debuggerScript, /ShowWindow\(\$window\.Hwnd, \$SW_RESTORE\)/);
+  assert.match(debuggerScript, /SetForegroundWindow\(\$window\.Hwnd\)/);
   assert.match(debuggerScript, /Move-ClaudeMenuPopupsOffscreen/);
   assert.match(debuggerScript, /Move-ClaudeMenuPopupsOffscreen \$window/);
   assert.doesNotMatch(debuggerScript, /Move-ClaudeWindowOffscreen/);
   assert.doesNotMatch(debuggerScript, /Restore-ClaudeWindowPlacement/);
   assert.doesNotMatch(debuggerScript, /\$originalPlacement = Move-ClaudeWindowOffscreen \$window/);
-  assert.doesNotMatch(debuggerScript, /SetForegroundWindow\(\$window\.Hwnd\)/);
 });
 
 test("Claude Desktop localization progress keys are translated with fallbacks", () => {

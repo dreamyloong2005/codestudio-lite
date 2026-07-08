@@ -729,18 +729,32 @@ public class CslClaudeWin32 {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, UIntPtr wParam, IntPtr lParam);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 }
 '@
 
 [CslClaudeWin32]::SetProcessDPIAware() | Out-Null
 $WM_CLOSE = 0x0010
+$SW_SHOW = 5
+$SW_RESTORE = 9
+$HWND_TOPMOST = [IntPtr](-1)
+$HWND_NOTOPMOST = [IntPtr](-2)
+$SWP_NOSIZE = 0x0001
+$SWP_NOMOVE = 0x0002
+$SWP_SHOWWINDOW = 0x0040
 $script:claudeDebuggerLogPath = $null
 try {
   $patchRoot = Join-Path $env:USERPROFILE '.codestudio-lite\claude-desktop-patch'
@@ -818,7 +832,8 @@ function Build-ClaudeWindowCandidate([IntPtr]$hWnd, $proc) {
 
   $width = $rect.Right - $rect.Left
   $height = $rect.Bottom - $rect.Top
-  if ($width -lt 320 -or $height -lt 240) { return $null }
+  $isIconic = [CslClaudeWin32]::IsIconic($hWnd)
+  if (-not $isIconic -and ($width -lt 320 -or $height -lt 240)) { return $null }
 
   $title = $titleBuilder.ToString()
   $isInspectorPrompt = Test-ClaudeInspectorPromptCandidate $title $width $height
@@ -839,7 +854,7 @@ function Build-ClaudeWindowCandidate([IntPtr]$hWnd, $proc) {
     Title = $title
     ClassName = $className
     Visible = [CslClaudeWin32]::IsWindowVisible($hWnd)
-    Iconic = [CslClaudeWin32]::IsIconic($hWnd)
+    Iconic = $isIconic
     IsInspectorPrompt = $isInspectorPrompt
     TitleScore = $titleScore
     Width = $width
@@ -899,6 +914,84 @@ function Get-ClaudeMainWindow {
     Write-ClaudeDebuggerLog "Selected Claude window hwnd=[$($selected.Hwnd)] pid=[$($selected.ProcessId)] title=[$($selected.Title)] size=[$($selected.Width)x$($selected.Height)]."
   }
   $selected
+}
+
+function Activate-ClaudeMainWindow($window) {
+  if (-not $window -or $window.Hwnd -eq [IntPtr]::Zero) { return $window }
+
+  try {
+    $isIconic = [CslClaudeWin32]::IsIconic($window.Hwnd)
+    if ($isIconic) {
+      Write-ClaudeDebuggerLog "Restoring minimized Claude window hwnd=[$($window.Hwnd)]."
+      [CslClaudeWin32]::ShowWindow($window.Hwnd, $SW_RESTORE) | Out-Null
+    } else {
+      [CslClaudeWin32]::ShowWindow($window.Hwnd, $SW_SHOW) | Out-Null
+    }
+
+    $flags = [uint32]($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW)
+    [CslClaudeWin32]::SetWindowPos($window.Hwnd, $HWND_TOPMOST, 0, 0, 0, 0, $flags) | Out-Null
+    [CslClaudeWin32]::SetWindowPos($window.Hwnd, $HWND_NOTOPMOST, 0, 0, 0, 0, $flags) | Out-Null
+
+    $targetPid = [uint32]0
+    $targetThread = [CslClaudeWin32]::GetWindowThreadProcessId($window.Hwnd, [ref]$targetPid)
+    $currentThread = [CslClaudeWin32]::GetCurrentThreadId()
+    $foreground = [CslClaudeWin32]::GetForegroundWindow()
+    $foregroundPid = [uint32]0
+    $foregroundThread = if ($foreground -ne [IntPtr]::Zero) {
+      [CslClaudeWin32]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    } else {
+      [uint32]0
+    }
+
+    $attachedTarget = $false
+    $attachedForeground = $false
+    try {
+      if ($targetThread -ne 0 -and $targetThread -ne $currentThread) {
+        $attachedTarget = [CslClaudeWin32]::AttachThreadInput($currentThread, $targetThread, $true)
+      }
+      if ($foregroundThread -ne 0 -and
+          $foregroundThread -ne $currentThread -and
+          $foregroundThread -ne $targetThread) {
+        $attachedForeground = [CslClaudeWin32]::AttachThreadInput($currentThread, $foregroundThread, $true)
+      }
+      [CslClaudeWin32]::BringWindowToTop($window.Hwnd) | Out-Null
+      [CslClaudeWin32]::SetActiveWindow($window.Hwnd) | Out-Null
+      [CslClaudeWin32]::SetFocus($window.Hwnd) | Out-Null
+      [CslClaudeWin32]::SetForegroundWindow($window.Hwnd) | Out-Null
+    } finally {
+      if ($attachedForeground) {
+        [CslClaudeWin32]::AttachThreadInput($currentThread, $foregroundThread, $false) | Out-Null
+      }
+      if ($attachedTarget) {
+        [CslClaudeWin32]::AttachThreadInput($currentThread, $targetThread, $false) | Out-Null
+      }
+    }
+
+    $proc = Get-Process -Id ([int]$window.ProcessId) -ErrorAction SilentlyContinue
+    $refreshed = Build-ClaudeWindowCandidate $window.Hwnd $proc
+    if ($refreshed) { $window = $refreshed }
+
+    Wait-ClaudeCondition 20 100 {
+      try {
+        if ([CslClaudeWin32]::IsIconic($window.Hwnd)) { return $null }
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($window.Hwnd)
+        if (-not $root) { return $null }
+        $rect = $root.Current.BoundingRectangle
+        if ($root.Current.IsOffscreen -or $rect.IsEmpty -or $rect.Width -lt 320 -or $rect.Height -lt 240) {
+          return $null
+        }
+        return $true
+      } catch {
+        return $null
+      }
+    } | Out-Null
+
+    Write-ClaudeDebuggerLog "Activated Claude window hwnd=[$($window.Hwnd)] iconic=[$([CslClaudeWin32]::IsIconic($window.Hwnd))]."
+  } catch {
+    Write-ClaudeDebuggerLog "Ignoring Claude window activation failure: $($_.Exception.Message)"
+  }
+
+  $window
 }
 
 function Test-ClaudeInspectorPromptCandidate([string]$title, [int]$width, [int]$height) {
@@ -1254,6 +1347,7 @@ function Find-ClaudeMenuButton($window) {
 }
 
 function Open-ClaudeMenu($window, [string[]]$developerNames) {
+  $window = Activate-ClaudeMainWindow $window
   if (Test-ClaudeMenuPopupOpen $window $developerNames) {
     Write-ClaudeDebuggerLog 'Claude menu popup already appears to be open.'
     return $true
@@ -1744,6 +1838,7 @@ if (-not $window) {
   throw 'Claude main window was not found after launch.'
 }
 
+$window = Activate-ClaudeMainWindow $window
 Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null
 $developerNames = @('Developer', '开发者', '開發者')
 $debuggerNames = @(
@@ -4345,6 +4440,7 @@ const TRANSLATION_RUNTIME: &str = r##"(() => {
     "Chat": "\u804a\u5929",
     "Code": "\u4ee3\u7801",
     "Turn on memory": "\u5f00\u542f\u8bb0\u5fc6",
+    "Get Pro plan": "\u83b7\u53d6 Pro \u8ba1\u5212",
     "Get started with Claude": "\u5f00\u59cb\u4f7f\u7528 Claude",
     "Upgrade to let Claude take on real tasks for you": "\u5347\u7ea7\uff0c\u8ba9 Claude \u4e3a\u4f60\u5904\u7406\u771f\u6b63\u7684\u4efb\u52a1",
     "Currently unavailable": "\u5f53\u524d\u4e0d\u53ef\u7528",

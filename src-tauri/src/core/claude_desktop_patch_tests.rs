@@ -995,6 +995,49 @@ fn windows_debugger_automation_uses_in_window_menu_not_alt_top_menu() {
 }
 
 #[test]
+fn windows_debugger_automation_restores_and_activates_window_before_menu_scan() {
+    let request_body = windows_debugger_request_body();
+
+    assert_contains_all(
+        request_body,
+        &[
+            "function Activate-ClaudeMainWindow",
+            "IsIconic($window.Hwnd)",
+            "if (-not $isIconic -and ($width -lt 320 -or $height -lt 240)) { return $null }",
+            "ShowWindow($window.Hwnd, $SW_RESTORE)",
+            "SetForegroundWindow($window.Hwnd)",
+            "BringWindowToTop($window.Hwnd)",
+            "AttachThreadInput",
+            "GetForegroundWindow",
+            "GetCurrentThreadId",
+            "$window = Activate-ClaudeMainWindow $window",
+            "Wait-ClaudeCondition 20 100",
+        ],
+    );
+    assert_order(
+        request_body,
+        "$window = Activate-ClaudeMainWindow $window",
+        "Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null",
+        "Claude should be restored and foregrounded before native prompt cleanup",
+    );
+    assert_order(
+        request_body,
+        "Wait-CloseClaudeInspectorPromptWindows $window 2 | Out-Null",
+        "$menuReady = $false",
+        "menu readiness polling should run after the activation preflight",
+    );
+    assert_contains_in_order(
+        request_body,
+        &[
+            "function Open-ClaudeMenu",
+            "$window = Activate-ClaudeMainWindow $window",
+            "Test-ClaudeMenuPopupOpen $window $developerNames",
+        ],
+        "Open-ClaudeMenu should refresh focus before probing popup/menu elements",
+    );
+}
+
+#[test]
 fn windows_debugger_automation_searches_same_claude_process_popup_menus() {
     let request_body = windows_debugger_request_body();
 
@@ -1948,6 +1991,7 @@ fn patch_assets_intercept_native_locale_requests_without_dom_translation() {
     assert!(TRANSLATION_RUNTIME.contains("localeRequestBodySync"));
     assert!(TRANSLATION_RUNTIME.contains(r#""Home": "\u9996\u9875""#));
     assert!(TRANSLATION_RUNTIME.contains(r#""Chat": "\u804a\u5929""#));
+    assert!(TRANSLATION_RUNTIME.contains(r#""Get Pro plan": "\u83b7\u53d6 Pro \u8ba1\u5212""#));
     assert!(TRANSLATION_RUNTIME.contains(r#""About Claude": "\u5173\u4e8eClaude""#));
     assert!(TRANSLATION_RUNTIME.contains(r#""Get support": "\u83b7\u53d6\u652f\u6301""#));
     assert!(TRANSLATION_RUNTIME.contains(r#""Version ": "\u7248\u672c""#));
@@ -2291,6 +2335,12 @@ fn bundled_zh_locale_uses_curated_terms_for_known_machine_translation_regression
             label: "home nav label",
             expected: "首页",
             forbidden: &["Home"],
+        },
+        LocaleExpectation {
+            key: "zZtKixgRbu",
+            label: "get Pro plan CTA",
+            expected: "获取 Pro 计划",
+            forbidden: &["Get"],
         },
         LocaleExpectation {
             key: "5vDuzZxMbU",
