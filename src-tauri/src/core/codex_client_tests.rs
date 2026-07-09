@@ -46,6 +46,37 @@ fn default_windows_install_stays_msix_without_capability_fallback() {
 }
 
 #[test]
+fn latest_version_cache_failure_preserves_previous_version() {
+    let mut cache = CodexClientLatestCache {
+        version: Some("26.616.9593".to_string()),
+        checked_at: Some(Instant::now() - CODEX_CLIENT_LATEST_CACHE_TTL - Duration::from_secs(1)),
+        in_progress: true,
+    };
+    let checked_at = cache.checked_at;
+
+    finish_latest_cache(&mut cache, None);
+
+    assert_eq!(cache.version.as_deref(), Some("26.616.9593"));
+    assert_eq!(cache.checked_at, checked_at);
+    assert!(!cache.in_progress);
+}
+
+#[test]
+fn latest_version_cache_success_updates_timestamp_and_value() {
+    let mut cache = CodexClientLatestCache {
+        version: Some("26.616.9593".to_string()),
+        checked_at: None,
+        in_progress: true,
+    };
+
+    finish_latest_cache(&mut cache, Some("26.630.12135".to_string()));
+
+    assert_eq!(cache.version.as_deref(), Some("26.630.12135"));
+    assert!(cache.checked_at.is_some());
+    assert!(!cache.in_progress);
+}
+
+#[test]
 fn windows_checksum_matches_package_moniker_not_first_msix() {
     let checksums = "\
 744d1b7500ae59ddb24c60aeaa9a861b33aaf0a72fa4f90f5a26e3017d6cd408  OpenAI.Codex_26.616.9593.0_arm64__2p2nqsd0c76g0.Msix

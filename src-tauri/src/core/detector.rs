@@ -1255,13 +1255,22 @@ fn cached_claude_desktop_latest(wait_budget: Duration) -> Option<String> {
         thread::spawn(|| {
             let version = read_claude_desktop_latest_version();
             let mut cache = claude_desktop_update_cache().lock().unwrap();
-            cache.version = version;
-            cache.checked_at = Some(Instant::now());
-            cache.in_progress = false;
+            finish_claude_desktop_update_cache(&mut cache, version);
         });
     }
 
     wait_for_claude_desktop_update_cache(wait_budget)
+}
+
+fn finish_claude_desktop_update_cache(
+    cache: &mut ClaudeDesktopUpdateCache,
+    version: Option<String>,
+) {
+    if let Some(version) = version {
+        cache.version = Some(version);
+        cache.checked_at = Some(Instant::now());
+    }
+    cache.in_progress = false;
 }
 
 fn wait_for_claude_desktop_update_cache(wait_budget: Duration) -> Option<String> {
@@ -1385,9 +1394,7 @@ fn cached_npm_global_outdated(wait_budget: Duration) -> HashMap<String, NpmOutda
         thread::spawn(|| {
             let packages = read_npm_global_outdated();
             let mut cache = npm_update_cache().lock().unwrap();
-            cache.packages = packages;
-            cache.checked_at = Some(Instant::now());
-            cache.in_progress = false;
+            finish_npm_update_cache(&mut cache, packages);
         });
     }
 
@@ -1420,13 +1427,33 @@ fn cached_winget_outdated(wait_budget: Duration) -> HashMap<String, String> {
         thread::spawn(|| {
             let packages = read_winget_outdated();
             let mut cache = winget_update_cache().lock().unwrap();
-            cache.packages = packages;
-            cache.checked_at = Some(Instant::now());
-            cache.in_progress = false;
+            finish_winget_update_cache(&mut cache, packages);
         });
     }
 
     wait_for_winget_update_cache(wait_budget)
+}
+
+fn finish_npm_update_cache(
+    cache: &mut NpmUpdateCache,
+    packages: Option<HashMap<String, NpmOutdatedPackage>>,
+) {
+    if let Some(packages) = packages {
+        cache.packages = packages;
+        cache.checked_at = Some(Instant::now());
+    }
+    cache.in_progress = false;
+}
+
+fn finish_winget_update_cache(
+    cache: &mut WingetUpdateCache,
+    packages: Option<HashMap<String, String>>,
+) {
+    if let Some(packages) = packages {
+        cache.packages = packages;
+        cache.checked_at = Some(Instant::now());
+    }
+    cache.in_progress = false;
 }
 
 fn wait_for_npm_update_cache(wait_budget: Duration) -> HashMap<String, NpmOutdatedPackage> {
@@ -1567,39 +1594,45 @@ fn npm_global_update_command(package: &str) -> String {
     format!("{} {command}", npm_global::shell_prefix_assignment(&prefix))
 }
 
-fn read_npm_global_outdated() -> HashMap<String, NpmOutdatedPackage> {
+fn read_npm_global_outdated() -> Option<HashMap<String, NpmOutdatedPackage>> {
     let Some(npm) = resolve_command("npm") else {
-        return HashMap::new();
+        return Some(HashMap::new());
     };
     let mut command = hidden_command_with_args(&npm, &["outdated", "-g", "--json", "--depth=0"]);
     if npm_global::configure_command_for_global_packages(&mut command, &npm).is_err() {
-        return HashMap::new();
+        return None;
     }
     let Some(output) = run_command_with_timeout(command, UPDATE_CHECK_TIMEOUT) else {
-        return HashMap::new();
+        return None;
     };
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if stdout.is_empty() {
-        return HashMap::new();
+        return if output.status.success() {
+            Some(HashMap::new())
+        } else {
+            None
+        };
     }
 
     let Ok(Value::Object(packages)) = serde_json::from_str::<Value>(&stdout) else {
-        return HashMap::new();
+        return None;
     };
 
-    packages
-        .into_iter()
-        .filter_map(|(package, value)| {
-            let latest = value
-                .get("latest")
-                .or_else(|| value.get("wanted"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|latest| !latest.is_empty())?
-                .to_string();
-            Some((package, NpmOutdatedPackage { latest }))
-        })
-        .collect()
+    Some(
+        packages
+            .into_iter()
+            .filter_map(|(package, value)| {
+                let latest = value
+                    .get("latest")
+                    .or_else(|| value.get("wanted"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|latest| !latest.is_empty())?
+                    .to_string();
+                Some((package, NpmOutdatedPackage { latest }))
+            })
+            .collect(),
+    )
 }
 
 fn read_npm_global_package_version(package: &str) -> Option<String> {
@@ -1685,18 +1718,31 @@ fn npm_global_root_from_command(npm: &str) -> Option<PathBuf> {
     }
 }
 
-fn read_winget_outdated() -> HashMap<String, String> {
+fn read_winget_outdated() -> Option<HashMap<String, String>> {
     let Some(winget) = resolve_command("winget") else {
-        return HashMap::new();
+        return Some(HashMap::new());
     };
     let output_command = hidden_command_with_args(
         &winget,
         &["upgrade", "--source", "winget", "--disable-interactivity"],
     );
     let Some(output) = run_command_with_timeout(output_command, UPDATE_CHECK_TIMEOUT) else {
-        return HashMap::new();
+        return None;
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
+    winget_outdated_from_output(output.status.success(), &stdout)
+}
+
+fn winget_outdated_from_output(success: bool, stdout: &str) -> Option<HashMap<String, String>> {
+    let packages = parse_winget_outdated(stdout);
+    if success || !packages.is_empty() {
+        Some(packages)
+    } else {
+        None
+    }
+}
+
+fn parse_winget_outdated(stdout: &str) -> HashMap<String, String> {
     let package_ids = [
         "Anthropic.Claude",
         "OpenJS.NodeJS.LTS",
@@ -2305,6 +2351,125 @@ mod tests {
         assert!(tools[0].update_available);
         assert_eq!(tools[1].latest_version.as_deref(), Some("2.1.199"));
         assert!(tools[1].update_available);
+    }
+
+    #[test]
+    fn update_cache_failures_preserve_previous_tool_updates() {
+        let mut npm_cache = NpmUpdateCache {
+            packages: HashMap::from([(
+                "@openai/codex".to_string(),
+                NpmOutdatedPackage {
+                    latest: "0.142.5".to_string(),
+                },
+            )]),
+            checked_at: Some(Instant::now() - UPDATE_CACHE_TTL - Duration::from_secs(1)),
+            in_progress: true,
+        };
+        let npm_checked_at = npm_cache.checked_at;
+
+        finish_npm_update_cache(&mut npm_cache, None);
+
+        assert_eq!(
+            npm_cache
+                .packages
+                .get("@openai/codex")
+                .map(|package| package.latest.as_str()),
+            Some("0.142.5")
+        );
+        assert_eq!(npm_cache.checked_at, npm_checked_at);
+        assert!(!npm_cache.in_progress);
+
+        let mut winget_cache = WingetUpdateCache {
+            packages: HashMap::from([("Git.Git".to_string(), "2.51.0".to_string())]),
+            checked_at: Some(Instant::now() - UPDATE_CACHE_TTL - Duration::from_secs(1)),
+            in_progress: true,
+        };
+        let winget_checked_at = winget_cache.checked_at;
+
+        finish_winget_update_cache(&mut winget_cache, None);
+
+        assert_eq!(
+            winget_cache.packages.get("Git.Git").map(String::as_str),
+            Some("2.51.0")
+        );
+        assert_eq!(winget_cache.checked_at, winget_checked_at);
+        assert!(!winget_cache.in_progress);
+    }
+
+    #[test]
+    fn successful_empty_update_checks_clear_previous_tool_updates() {
+        let mut npm_cache = NpmUpdateCache {
+            packages: HashMap::from([(
+                "@openai/codex".to_string(),
+                NpmOutdatedPackage {
+                    latest: "0.142.5".to_string(),
+                },
+            )]),
+            checked_at: None,
+            in_progress: true,
+        };
+        finish_npm_update_cache(&mut npm_cache, Some(HashMap::new()));
+
+        assert!(npm_cache.packages.is_empty());
+        assert!(npm_cache.checked_at.is_some());
+        assert!(!npm_cache.in_progress);
+
+        let mut winget_cache = WingetUpdateCache {
+            packages: HashMap::from([("Git.Git".to_string(), "2.51.0".to_string())]),
+            checked_at: None,
+            in_progress: true,
+        };
+        finish_winget_update_cache(&mut winget_cache, Some(HashMap::new()));
+
+        assert!(winget_cache.packages.is_empty());
+        assert!(winget_cache.checked_at.is_some());
+        assert!(!winget_cache.in_progress);
+    }
+
+    #[test]
+    fn winget_failed_output_without_packages_is_unknown() {
+        let packages =
+            winget_outdated_from_output(false, "Failed when opening source; try again later.");
+
+        assert!(packages.is_none());
+    }
+
+    #[test]
+    fn winget_failed_output_with_package_updates_is_accepted() {
+        let packages = winget_outdated_from_output(
+            false,
+            "Name    Id      Version Available Source\nGit     Git.Git 2.50.1  2.51.0    winget",
+        )
+        .expect("winget output with parsed package updates should be usable");
+
+        assert_eq!(packages.get("Git.Git").map(String::as_str), Some("2.51.0"));
+    }
+
+    #[test]
+    fn winget_successful_empty_output_clears_cached_updates() {
+        let packages = winget_outdated_from_output(
+            true,
+            "No installed package found matching input criteria.",
+        )
+        .expect("successful winget output should be definitive");
+
+        assert!(packages.is_empty());
+    }
+
+    #[test]
+    fn claude_desktop_latest_failure_preserves_cached_version() {
+        let mut cache = ClaudeDesktopUpdateCache {
+            version: Some("1.14271.0".to_string()),
+            checked_at: Some(Instant::now() - UPDATE_CACHE_TTL - Duration::from_secs(1)),
+            in_progress: true,
+        };
+        let checked_at = cache.checked_at;
+
+        finish_claude_desktop_update_cache(&mut cache, None);
+
+        assert_eq!(cache.version.as_deref(), Some("1.14271.0"));
+        assert_eq!(cache.checked_at, checked_at);
+        assert!(!cache.in_progress);
     }
 
     #[test]

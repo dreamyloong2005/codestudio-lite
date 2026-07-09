@@ -407,9 +407,7 @@ pub fn latest_version_cached(wait_budget: Duration) -> Option<String> {
                 load_release(&settings).ok().map(|release| release.version)
             })();
             let mut cache = codex_client_latest_cache().lock().unwrap();
-            cache.version = version;
-            cache.checked_at = Some(Instant::now());
-            cache.in_progress = false;
+            finish_latest_cache(&mut cache, version);
         });
     }
 
@@ -431,6 +429,14 @@ pub fn latest_version_cached(wait_budget: Duration) -> Option<String> {
         }
         thread::sleep(CODEX_CLIENT_LATEST_POLL_INTERVAL);
     }
+}
+
+fn finish_latest_cache(cache: &mut CodexClientLatestCache, version: Option<String>) {
+    if let Some(version) = version {
+        cache.version = Some(version);
+        cache.checked_at = Some(Instant::now());
+    }
+    cache.in_progress = false;
 }
 
 /// Load the most recent Codex state cached to disk by inspect_state(true).
