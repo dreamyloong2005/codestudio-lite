@@ -110,14 +110,29 @@ HYBRID_DMG_PATH="$WORK_DIR/hybrid.$(basename "$DMG_PATH")"
 ACTIVE_DMG_DEVICE=""
 
 detach_active_device() {
-  if [[ -n "$ACTIVE_DMG_DEVICE" ]]; then
-    /usr/bin/hdiutil detach "$ACTIVE_DMG_DEVICE" >/dev/null 2>&1 || true
-    ACTIVE_DMG_DEVICE=""
+  local device="$ACTIVE_DMG_DEVICE"
+  if [[ -z "$device" ]]; then
+    return 0
   fi
+
+  if /usr/bin/hdiutil detach "$device"; then
+    ACTIVE_DMG_DEVICE=""
+    return 0
+  fi
+
+  echo "Normal detach failed for $device; retrying with force." >&2
+  /bin/sleep 1
+  if /usr/bin/hdiutil detach -force "$device"; then
+    ACTIVE_DMG_DEVICE=""
+    return 0
+  fi
+
+  echo "Failed to detach temporary DMG device: $device" >&2
+  return 1
 }
 
 cleanup() {
-  detach_active_device
+  detach_active_device || true
   rm -rf "$STAGING_DIR"
   rm -rf "$WORK_DIR"
 }
@@ -290,8 +305,7 @@ create_tauri_style_dmg() {
   /bin/chmod -Rf go-w "$mount_dir" >/dev/null 2>&1 || true
   /bin/rm -rf "$mount_dir/.fseventsd" || true
 
-  /usr/bin/hdiutil detach "$ACTIVE_DMG_DEVICE"
-  ACTIVE_DMG_DEVICE=""
+  detach_active_device
 
   /usr/bin/hdiutil convert \
     "$RW_DMG_PATH" \
