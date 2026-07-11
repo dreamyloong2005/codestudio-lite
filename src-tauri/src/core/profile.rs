@@ -152,6 +152,10 @@ const PROTOCOL_OPENAI_RESPONSES: &str = "openai-responses";
 const PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
 const PROTOCOL_GOOGLE_GEMINI: &str = "google-gemini";
 const GATEWAY_FALLBACK_MODEL: &str = "default";
+const CODEX_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
+const CODEX_ACTOR_AUTHORIZATION_VALUE: &str = "codestudio-lite";
+const CODEX_ACTOR_AUTHORIZATION_INLINE_TOML: &str =
+    r#"{ "x-openai-actor-authorization" = "codestudio-lite" }"#;
 const CLAUDE_VSCODE_PLUGIN_PRIMARY_API_KEY: &str = "any";
 const GEMINI_CODE_ASSIST_API_KEY_SETTING: &str = "geminicodeassist.geminiApiKey";
 const CLAUDE_DESKTOP_PROFILE_ID: &str = "00000000-0000-4000-8000-000000157210";
@@ -3366,7 +3370,7 @@ fn codex_direct_config_matches_profile_with_secret_match(
     let token_matches = auth
         .and_then(codex_auth_api_key_from_value)
         .map(|token| profile_api_key_matches_config(profile, &token, secret_match))
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     read_toml_string(value, "model_provider").as_deref() == Some(provider_id.as_str())
         && model_matches
@@ -3380,12 +3384,7 @@ fn codex_direct_config_matches_profile_with_secret_match(
         && toml_lookup(value, &format!("model_providers.{provider_id}.wire_api"))
             .and_then(|item| item.as_str())
             == Some(wire_api)
-        && toml_lookup(
-            value,
-            &format!("model_providers.{provider_id}.requires_openai_auth"),
-        )
-        .and_then(|item| item.as_bool())
-            == Some(true)
+        && codex_managed_provider_auth_matches_legacy_or_current(value, &provider_id)
 }
 
 fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileDraft) -> bool {
@@ -3402,11 +3401,40 @@ fn codex_official_config_matches_profile(value: &toml::Value, profile: &ProfileD
         .and_then(|item| item.as_str())
         .map(|base_url| base_url.trim().is_empty())
         .unwrap_or(true);
-    let auth_required = toml_lookup(value, "model_providers.openai.requires_openai_auth")
-        .and_then(|item| item.as_bool())
-        .unwrap_or(true);
+    let auth_matches = toml_lookup(value, "model_providers.openai.requires_openai_auth").is_none()
+        || codex_managed_provider_auth_matches_legacy_or_current(value, "openai");
 
-    provider_matches && model_matches && base_url_is_absent && auth_required
+    provider_matches && model_matches && base_url_is_absent && auth_matches
+}
+
+fn codex_managed_provider_auth_contract_matches(value: &toml::Value, provider_id: &str) -> bool {
+    toml_lookup(
+        value,
+        &format!("model_providers.{provider_id}.requires_openai_auth"),
+    )
+    .and_then(|item| item.as_bool())
+        == Some(false)
+        && toml_lookup(
+            value,
+            &format!(
+                "model_providers.{provider_id}.http_headers.{CODEX_ACTOR_AUTHORIZATION_HEADER}"
+            ),
+        )
+        .and_then(|item| item.as_str())
+            == Some(CODEX_ACTOR_AUTHORIZATION_VALUE)
+}
+
+fn codex_managed_provider_auth_matches_legacy_or_current(
+    value: &toml::Value,
+    provider_id: &str,
+) -> bool {
+    codex_managed_provider_auth_contract_matches(value, provider_id)
+        || toml_lookup(
+            value,
+            &format!("model_providers.{provider_id}.requires_openai_auth"),
+        )
+        .and_then(|item| item.as_bool())
+            == Some(true)
 }
 
 fn codex_active_provider_id_for_profile(
@@ -4628,11 +4656,113 @@ fn load_codex_oauth_profile_content(profile: &ProfileDraft) -> Result<String, St
     })
 }
 
-fn verify_codex_auth_json_write(path: &Path, profile: &ProfileDraft) -> Result<bool, String> {
-    if !is_custom_codex_oauth_profile(profile) {
-        return Ok(true);
+fn parse_codex_auth_json_content(content: &str) -> Result<serde_json::Value, String> {
+    let value = if content.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str::<serde_json::Value>(content)
+            .map_err(|err| format!("Existing Codex auth.json could not be parsed: {err}"))?
+    };
+    if !value.is_object() {
+        return Err("Existing Codex auth.json must contain a JSON object.".to_string());
     }
-    let expected = load_codex_oauth_profile_content(profile)?;
+    Ok(value)
+}
+
+fn render_codex_auth_json_content(value: &serde_json::Value) -> Result<String, String> {
+    serde_json::to_string_pretty(value)
+        .map(|content| format!("{content}\n"))
+        .map_err(|err| format!("Generated Codex auth.json is invalid: {err}"))
+}
+
+fn codex_auth_json_content_with_api_key(current: &str, api_key: &str) -> Result<String, String> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err("Codex auth.json requires a non-empty API key.".to_string());
+    }
+
+    let mut value = parse_codex_auth_json_content(current)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Existing Codex auth.json must contain a JSON object.".to_string())?;
+    object.insert(
+        "auth_mode".to_string(),
+        serde_json::Value::String("apikey".to_string()),
+    );
+    object.insert(
+        "OPENAI_API_KEY".to_string(),
+        serde_json::Value::String(api_key.to_string()),
+    );
+    object.remove("openai_api_key");
+    object.remove("api_key");
+    render_codex_auth_json_content(&value)
+}
+
+fn codex_official_auth_json_content(current: &str) -> Result<Option<String>, String> {
+    if current.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut value = parse_codex_auth_json_content(current)?;
+    if !codex_auth_json_has_chatgpt_markers(&value) {
+        return Ok(None);
+    }
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Existing Codex auth.json must contain a JSON object.".to_string())?;
+    object.insert(
+        "auth_mode".to_string(),
+        serde_json::Value::String("chatgpt".to_string()),
+    );
+    object.remove("OPENAI_API_KEY");
+    object.remove("openai_api_key");
+    object.remove("api_key");
+    render_codex_auth_json_content(&value).map(Some)
+}
+
+fn build_codex_auth_json_write_plan(
+    profile: &ProfileDraft,
+    paths: &crate::core::app_paths::AppPaths,
+    mode: &ProviderApplyMode,
+) -> Result<Option<NativeConfigWritePlan>, String> {
+    if canonical_profile_app(&profile.app) != "codex" {
+        return Ok(None);
+    }
+
+    let path = codex_auth_json_path(paths);
+    let current = if path.exists() {
+        fs::read_to_string(&path).map_err(|err| {
+            format!(
+                "Codex auth.json could not be read at {}: {err}",
+                display_path(&path)
+            )
+        })?
+    } else {
+        String::new()
+    };
+    let content = match mode {
+        ProviderApplyMode::Config if is_custom_codex_oauth_profile(profile) => {
+            Some(load_codex_oauth_profile_content(profile)?)
+        }
+        ProviderApplyMode::Config if provider_is_official(&profile.provider) => {
+            codex_official_auth_json_content(&current)?
+        }
+        ProviderApplyMode::Config => Some(codex_auth_json_content_with_api_key(
+            &current,
+            &load_provider_api_key_for_direct_config(profile)?,
+        )?),
+        ProviderApplyMode::Gateway => Some(codex_auth_json_content_with_api_key(
+            &current,
+            &gateway::client_config_for_tool(&profile.app)?.token,
+        )?),
+    };
+
+    Ok(content.map(|content| {
+        NativeConfigWritePlan::write(path, content, NativeConfigWriteKind::CodexAuthJson)
+    }))
+}
+
+fn verify_codex_auth_json_write(path: &Path, expected: &str) -> Result<bool, String> {
     let actual = fs::read_to_string(path).map_err(|err| err.to_string())?;
     Ok(actual == expected)
 }
@@ -4717,18 +4847,27 @@ fn codex_credentials_store_from_str(value: Option<&str>) -> Option<CodexAuthStor
 }
 
 fn infer_codex_auth_method(value: &serde_json::Value) -> CodexAuthMethod {
-    let mut keys = Vec::new();
-    collect_json_key_paths(value, String::new(), &mut keys);
-
-    if keys.iter().any(|key| {
-        key.contains("chatgpt")
-            || key.contains("refresh_token")
-            || key.contains("id_token")
-            || key.contains("account_id")
-            || key.contains("expires_at")
-    }) {
+    let auth_mode = value
+        .get("auth_mode")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if auth_mode.eq_ignore_ascii_case("apikey") || auth_mode.eq_ignore_ascii_case("api_key") {
+        return CodexAuthMethod::ApiKey;
+    }
+    if auth_mode.eq_ignore_ascii_case("chatgpt") {
         return CodexAuthMethod::ChatGpt;
     }
+    if auth_mode.eq_ignore_ascii_case("access_token") {
+        return CodexAuthMethod::AccessToken;
+    }
+
+    if codex_auth_json_has_chatgpt_markers(value) {
+        return CodexAuthMethod::ChatGpt;
+    }
+
+    let mut keys = Vec::new();
+    collect_json_key_paths(value, String::new(), &mut keys);
 
     if keys.iter().any(|key| key.contains("access_token")) {
         return CodexAuthMethod::AccessToken;
@@ -4746,6 +4885,18 @@ fn infer_codex_auth_method(value: &serde_json::Value) -> CodexAuthMethod {
     } else {
         CodexAuthMethod::Unknown
     }
+}
+
+fn codex_auth_json_has_chatgpt_markers(value: &serde_json::Value) -> bool {
+    let mut keys = Vec::new();
+    collect_json_key_paths(value, String::new(), &mut keys);
+    keys.iter().any(|key| {
+        key.contains("chatgpt")
+            || key.contains("refresh_token")
+            || key.contains("id_token")
+            || key.contains("account_id")
+            || key.contains("expires_at")
+    })
 }
 
 fn codex_auth_api_key_from_value(value: &serde_json::Value) -> Option<String> {
@@ -5660,22 +5811,20 @@ fn build_native_apply_plan(
         },
     };
 
-    let mut plans = vec![NativeConfigWritePlan::write(
+    let config_plan = NativeConfigWritePlan::write(
         path,
         content,
         match canonical_profile_app(&profile.app).as_str() {
             "gemini-code-assist" => NativeConfigWriteKind::GeminiCodeAssistSettings,
             _ => NativeConfigWriteKind::ProfileConfig,
         },
-    )];
+    );
+    let mut plans = Vec::new();
 
-    if *mode == ProviderApplyMode::Config && is_custom_codex_oauth_profile(profile) {
-        plans.push(NativeConfigWritePlan::write(
-            paths.home_dir.join(".codex").join("auth.json"),
-            load_codex_oauth_profile_content(profile)?,
-            NativeConfigWriteKind::CodexAuthJson,
-        ));
+    if let Some(auth_plan) = build_codex_auth_json_write_plan(profile, paths, mode)? {
+        plans.push(auth_plan);
     }
+    plans.push(config_plan);
 
     if *mode == ProviderApplyMode::Config
         && canonical_profile_app(&profile.app) == "claude"
@@ -5924,6 +6073,7 @@ fn codex_gateway_config_content(current: &str, profile: &ProfileDraft) -> Result
     let provider_name = client.provider_name;
     let model = gateway_config_model_for_profile(profile);
 
+    document["cli_auth_credentials_store"] = toml_edit::value("file");
     document["model_provider"] = toml_edit::value(provider_id.clone());
     document["model"] = toml_edit::value(model);
     remove_codex_provider_entry(&mut document, &provider_id);
@@ -5931,7 +6081,7 @@ fn codex_gateway_config_content(current: &str, profile: &ProfileDraft) -> Result
     document["model_providers"][&provider_id]["name"] = toml_edit::value(provider_name);
     document["model_providers"][&provider_id]["wire_api"] = toml_edit::value("responses");
     document["model_providers"][&provider_id]["base_url"] = toml_edit::value(client.base_url);
-    document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(false);
+    set_codex_managed_provider_auth(&mut document, &provider_id);
     repair_codex_preserved_auth_config(&mut document);
 
     let updated = document.to_string();
@@ -5956,6 +6106,7 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
     let runtime_base_url =
         profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
 
+    document["cli_auth_credentials_store"] = toml_edit::value("file");
     document["model_provider"] = toml_edit::value(provider_id.clone());
     if model.is_empty() {
         document.as_table_mut().remove("model");
@@ -5967,7 +6118,7 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
     document["model_providers"][&provider_id]["name"] = toml_edit::value(provider_name);
     document["model_providers"][&provider_id]["wire_api"] = toml_edit::value(wire_api);
     document["model_providers"][&provider_id]["base_url"] = toml_edit::value(runtime_base_url);
-    document["model_providers"][&provider_id]["requires_openai_auth"] = toml_edit::value(true);
+    set_codex_managed_provider_auth(&mut document, &provider_id);
     repair_codex_preserved_auth_config(&mut document);
 
     let updated = document.to_string();
@@ -5977,14 +6128,17 @@ fn codex_direct_config_content(current: &str, profile: &ProfileDraft) -> Result<
 }
 
 fn normalize_codex_model_providers_table(document: &mut toml_edit::DocumentMut) {
-    let Some(item) = document.as_table_mut().remove("model_providers") else {
-        return;
-    };
-    let table = item.into_table().unwrap_or_else(|item| {
-        item.as_table_like()
-            .map(table_like_to_table)
-            .unwrap_or_default()
-    });
+    let table = document
+        .as_table_mut()
+        .remove("model_providers")
+        .map(|item| {
+            item.into_table().unwrap_or_else(|item| {
+                item.as_table_like()
+                    .map(table_like_to_table)
+                    .unwrap_or_default()
+            })
+        })
+        .unwrap_or_default();
     document["model_providers"] = toml_edit::Item::Table(table);
 }
 
@@ -6019,6 +6173,20 @@ fn remove_codex_provider_entry(document: &mut toml_edit::DocumentMut, provider_i
     {
         table.remove(provider_id);
     }
+}
+
+fn set_codex_managed_provider_auth(document: &mut toml_edit::DocumentMut, provider_id: &str) {
+    document["model_providers"][provider_id]["requires_openai_auth"] = toml_edit::value(false);
+
+    let mut headers = toml_edit::InlineTable::new();
+    let header_key = format!("\"{CODEX_ACTOR_AUTHORIZATION_HEADER}\"")
+        .parse::<toml_edit::Key>()
+        .expect("Codex actor-authorization header key should be valid TOML");
+    headers.insert_formatted(
+        &header_key,
+        toml_edit::Value::from(CODEX_ACTOR_AUTHORIZATION_VALUE),
+    );
+    document["model_providers"][provider_id]["http_headers"] = toml_edit::value(headers);
 }
 
 fn repair_codex_preserved_auth_config(document: &mut toml_edit::DocumentMut) {
@@ -6058,6 +6226,7 @@ fn codex_official_config_content(current: &str, profile: &ProfileDraft) -> Resul
     let provider_id = "openai";
 
     normalize_codex_model_providers_table(&mut document);
+    document["cli_auth_credentials_store"] = toml_edit::value("file");
     document["model_provider"] = toml_edit::value(provider_id);
     if profile.model.trim().is_empty() {
         document.remove("model");
@@ -6066,7 +6235,7 @@ fn codex_official_config_content(current: &str, profile: &ProfileDraft) -> Resul
     }
     remove_codex_provider_entry(&mut document, provider_id);
     document["model_providers"][provider_id] = toml_edit::Item::Table(toml_edit::Table::new());
-    document["model_providers"][provider_id]["requires_openai_auth"] = toml_edit::value(true);
+    set_codex_managed_provider_auth(&mut document, provider_id);
     repair_codex_preserved_auth_config(&mut document);
 
     let updated = document.to_string();
@@ -6986,18 +7155,13 @@ fn verify_codex_native_config(path: &Path, profile: &ProfileDraft) -> Result<boo
     let model = gateway_config_model_for_profile(profile);
 
     Ok(
-        read_toml_string(&value, "model_provider").as_deref() == Some(provider_id.as_str())
+        read_toml_string(&value, "cli_auth_credentials_store").as_deref() == Some("file")
+            && read_toml_string(&value, "model_provider").as_deref() == Some(provider_id.as_str())
             && read_toml_string(&value, "model").as_deref() == Some(model)
             && toml_lookup(&value, &format!("model_providers.{provider_id}.base_url"))
-                .map(redacted_toml_value)
-                .as_deref()
+                .and_then(|item| item.as_str())
                 == Some(client.base_url.as_str())
-            && toml_lookup(
-                &value,
-                &format!("model_providers.{provider_id}.requires_openai_auth"),
-            )
-            .and_then(|item| item.as_bool())
-                == Some(false),
+            && codex_managed_provider_auth_contract_matches(&value, &provider_id),
     )
 }
 
@@ -7012,12 +7176,11 @@ fn verify_codex_direct_config(path: &Path, profile: &ProfileDraft) -> Result<boo
         };
 
         return Ok(
-            read_toml_string(&value, "model_provider").as_deref() == Some("openai")
+            read_toml_string(&value, "cli_auth_credentials_store").as_deref() == Some("file")
+                && read_toml_string(&value, "model_provider").as_deref() == Some("openai")
                 && model_matches
                 && toml_lookup(&value, "model_providers.openai.base_url").is_none()
-                && toml_lookup(&value, "model_providers.openai.requires_openai_auth")
-                    .and_then(|item| item.as_bool())
-                    == Some(true),
+                && codex_managed_provider_auth_contract_matches(&value, "openai"),
         );
     }
 
@@ -7030,24 +7193,19 @@ fn verify_codex_direct_config(path: &Path, profile: &ProfileDraft) -> Result<boo
     };
 
     Ok(
-        read_toml_string(&value, "model_provider").as_deref() == Some(provider_id.as_str())
+        read_toml_string(&value, "cli_auth_credentials_store").as_deref() == Some("file")
+            && read_toml_string(&value, "model_provider").as_deref() == Some(provider_id.as_str())
             && model_matches
             && toml_lookup(&value, &format!("model_providers.{provider_id}.wire_api"))
                 .and_then(|item| item.as_str())
                 == Some(wire_api)
             && toml_lookup(&value, &format!("model_providers.{provider_id}.base_url"))
-                .map(redacted_toml_value)
-                .as_deref()
+                .and_then(|item| item.as_str())
                 == Some(
                     profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url)
                         .as_str(),
                 )
-            && toml_lookup(
-                &value,
-                &format!("model_providers.{provider_id}.requires_openai_auth"),
-            )
-            .and_then(|item| item.as_bool())
-                == Some(true),
+            && codex_managed_provider_auth_contract_matches(&value, &provider_id),
     )
 }
 
@@ -7332,7 +7490,9 @@ fn verify_native_config_write(
 
     match plan.kind {
         NativeConfigWriteKind::ProfileConfig => verify_native_config(&plan.path, profile, mode),
-        NativeConfigWriteKind::CodexAuthJson => verify_codex_auth_json_write(&plan.path, profile),
+        NativeConfigWriteKind::CodexAuthJson => {
+            verify_codex_auth_json_write(&plan.path, &plan.content)
+        }
         NativeConfigWriteKind::ClaudeVsCodePluginConfig => {
             verify_claude_vscode_plugin_config(&plan.path)
         }
@@ -7889,13 +8049,13 @@ fn build_native_config_preview(
         ],
         ProviderApplyMode::Config => vec![
             "Config profiles write Codex's provider entry directly to the selected upstream Provider.".to_string(),
-            "The preview masks the Provider API key. The actual key is loaded from the system keychain during apply.".to_string(),
+            "The preview masks the Provider API key. Apply writes the actual key from the system keychain to Codex auth.json.".to_string(),
             "Changing Codex config usually requires restarting Codex or opening a new Codex session.".to_string(),
         ],
         ProviderApplyMode::Gateway => vec![
             "Gateway profiles are a one-time relay injection target, not a direct Provider switch.".to_string(),
             "Switching profiles later changes only the Gateway active profile for this tool.".to_string(),
-            "The preview masks the local CodeStudio token. Real Provider API keys are never written to Codex config.".to_string(),
+            "The preview masks the local CodeStudio token. Apply writes only this local token to Codex auth.json; upstream Provider keys stay in the system keychain.".to_string(),
             "Codex official login is still required for the desktop app; the Local Gateway only takes over model requests.".to_string(),
             "If Codex is already running, restart Codex or open a new Codex session after bootstrap so it reloads config.toml.".to_string(),
         ],
@@ -7933,6 +8093,12 @@ fn build_native_config_preview(
                         "openai",
                         "Selects Codex's official OpenAI provider.",
                     ),
+                    diff_line(
+                        &value,
+                        "cli_auth_credentials_store",
+                        "file",
+                        "Uses file-backed Codex authentication so managed credentials are read from auth.json.",
+                    ),
                     diff_remove_line(
                         &value,
                         "model_providers.openai.base_url",
@@ -7941,8 +8107,14 @@ fn build_native_config_preview(
                     diff_line(
                         &value,
                         "model_providers.openai.requires_openai_auth",
-                        "true",
-                        "Uses Codex OAuth/OpenAI auth for the official provider.",
+                        "false",
+                        "Disables Codex's built-in OpenAI auth requirement for this managed provider.",
+                    ),
+                    diff_line(
+                        &value,
+                        "model_providers.openai.http_headers",
+                        CODEX_ACTOR_AUTHORIZATION_INLINE_TOML,
+                        "Adds the CodeStudio Lite actor-authorization header to this managed provider.",
                     ),
                 ];
                 if profile.model.trim().is_empty() {
@@ -7976,6 +8148,12 @@ fn build_native_config_preview(
                     ),
                     diff_line(
                         &value,
+                        "cli_auth_credentials_store",
+                        "file",
+                        "Uses file-backed Codex authentication so managed credentials are read from auth.json.",
+                    ),
+                    diff_line(
+                        &value,
                         &format!("model_providers.{provider_id}.name"),
                         &provider_name,
                         "Adds a readable provider label for this upstream Provider.",
@@ -7995,8 +8173,14 @@ fn build_native_config_preview(
                     diff_line(
                         &value,
                         &format!("model_providers.{provider_id}.requires_openai_auth"),
-                        "true",
-                        "Uses Codex OAuth/OpenAI auth for this direct upstream entry.",
+                        "false",
+                        "Disables Codex's built-in OpenAI auth requirement for this managed provider.",
+                    ),
+                    diff_line(
+                        &value,
+                        &format!("model_providers.{provider_id}.http_headers"),
+                        CODEX_ACTOR_AUTHORIZATION_INLINE_TOML,
+                        "Adds the CodeStudio Lite actor-authorization header to this managed provider.",
                     ),
                 ];
                 changes.extend(codex_preserved_auth_repair_diff_lines(&value));
@@ -8029,6 +8213,12 @@ fn build_native_config_preview(
                 ),
                 diff_line(
                     &value,
+                    "cli_auth_credentials_store",
+                    "file",
+                    "Uses file-backed Codex authentication so managed credentials are read from auth.json.",
+                ),
+                diff_line(
+                    &value,
                     "model",
                     &client.model,
                     "Sets Codex to the virtual model name resolved by the Local Gateway.",
@@ -8055,7 +8245,13 @@ fn build_native_config_preview(
                     &value,
                     &format!("model_providers.{provider_id}.requires_openai_auth"),
                     "false",
-                    "Disables Codex official OpenAI auth for the Local Gateway provider entry.",
+                    "Disables Codex's built-in OpenAI auth requirement for this managed provider.",
+                ),
+                diff_line(
+                    &value,
+                    &format!("model_providers.{provider_id}.http_headers"),
+                    CODEX_ACTOR_AUTHORIZATION_INLINE_TOML,
+                    "Adds the CodeStudio Lite actor-authorization header to this managed provider.",
                 ),
             ];
             changes.extend(codex_preserved_auth_repair_diff_lines(&value));

@@ -3283,6 +3283,13 @@ function mockNativeConfigPreview(
             detail: "Selects Codex's official OpenAI provider."
           },
           {
+            key: "cli_auth_credentials_store",
+            action: "update",
+            before: null,
+            after: "file",
+            detail: "Uses file-backed Codex authentication so managed credentials are read from auth.json."
+          },
+          {
             key: "model",
             action: profile.model ? "update" : "remove",
             before: "gpt-5-codex",
@@ -3300,8 +3307,15 @@ function mockNativeConfigPreview(
             key: "model_providers.openai.requires_openai_auth",
             action: "add",
             before: null,
-            after: "true",
-            detail: "Uses Codex OAuth/OpenAI auth for the official provider."
+            after: "false",
+            detail: "Disables Codex's built-in OpenAI auth requirement for this managed provider."
+          },
+          {
+            key: "model_providers.openai.http_headers",
+            action: "add",
+            before: null,
+            after: '{ "x-openai-actor-authorization" = "codestudio-lite" }',
+            detail: "Adds the CodeStudio Lite actor-authorization header to this managed provider."
           }
         ],
         warnings: [
@@ -3321,6 +3335,13 @@ function mockNativeConfigPreview(
         detail: "Selects the direct provider entry managed by CodeStudio Lite."
       },
       {
+        key: "cli_auth_credentials_store",
+        action: "update",
+        before: null,
+        after: "file",
+        detail: "Uses file-backed Codex authentication so managed credentials are read from auth.json."
+      },
+      {
         key: `model_providers.${providerId}.wire_api`,
         action: "add",
         before: null,
@@ -3338,8 +3359,15 @@ function mockNativeConfigPreview(
         key: `model_providers.${providerId}.requires_openai_auth`,
         action: "add",
         before: null,
-        after: "true",
-        detail: "Uses Codex OAuth/OpenAI auth for this direct upstream entry."
+        after: "false",
+        detail: "Disables Codex's built-in OpenAI auth requirement for this managed provider."
+      },
+      {
+        key: `model_providers.${providerId}.http_headers`,
+        action: "add",
+        before: null,
+        after: '{ "x-openai-actor-authorization" = "codestudio-lite" }',
+        detail: "Adds the CodeStudio Lite actor-authorization header to this managed provider."
       }
     ];
     if (profile.model) {
@@ -3367,6 +3395,7 @@ function mockNativeConfigPreview(
       changes: directChanges,
       warnings: [
         "Config profiles write Codex's provider entry directly to the selected upstream Provider.",
+        "The preview masks the Provider API key. Apply writes the actual key from the system keychain to Codex auth.json.",
         "Changing Codex config usually requires restarting Codex or opening a new Codex session."
       ]
     });
@@ -3388,6 +3417,13 @@ function mockNativeConfigPreview(
         detail: "Selects the CodeStudio Lite localhost provider."
       },
       {
+        key: "cli_auth_credentials_store",
+        action: "update",
+        before: null,
+        after: "file",
+        detail: "Uses file-backed Codex authentication so managed credentials are read from auth.json."
+      },
+      {
         key: "model",
         action: "update",
         before: "gpt-5-codex",
@@ -3406,12 +3442,20 @@ function mockNativeConfigPreview(
         action: "add",
         before: null,
         after: "false",
-        detail: "Disables Codex official OpenAI auth for the Local Gateway provider entry."
+        detail: "Disables Codex's built-in OpenAI auth requirement for this managed provider."
+      },
+      {
+        key: "model_providers.custom.http_headers",
+        action: "add",
+        before: null,
+        after: '{ "x-openai-actor-authorization" = "codestudio-lite" }',
+        detail: "Adds the CodeStudio Lite actor-authorization header to this managed provider."
       }
     ],
     warnings: [
       "Gateway profiles are a one-time relay injection target, not a direct Provider switch.",
       "Switching profiles later changes only the Gateway active profile for this tool.",
+      "The preview masks the local CodeStudio token. Apply writes only this local token to Codex auth.json; upstream Provider keys stay in the system keychain.",
       "Codex official login is still required for the desktop app; the Local Gateway only takes over model requests.",
       "If Codex is already running, restart Codex or open a new Codex session after bootstrap so it reloads config.toml."
     ]

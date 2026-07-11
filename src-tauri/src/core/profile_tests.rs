@@ -17,6 +17,33 @@ fn test_app_config() -> AppConfig {
     }
 }
 
+fn assert_codex_managed_provider_contract(value: &toml::Value, provider_id: &str) {
+    assert_eq!(
+        toml_lookup(
+            value,
+            &format!("model_providers.{provider_id}.requires_openai_auth")
+        )
+        .and_then(|item| item.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        toml_lookup(
+            value,
+            &format!(
+                "model_providers.{provider_id}.http_headers.{CODEX_ACTOR_AUTHORIZATION_HEADER}"
+            )
+        )
+        .and_then(|item| item.as_str()),
+        Some(CODEX_ACTOR_AUTHORIZATION_VALUE)
+    );
+}
+
+fn assert_codex_managed_provider_contract_lines(content: &str) {
+    assert!(content.contains(
+        "requires_openai_auth = false\nhttp_headers = { \"x-openai-actor-authorization\" = \"codestudio-lite\" }\n"
+    ), "generated config did not preserve the expected adjacent contract lines:\n{content}");
+}
+
 #[test]
 fn sync_codex_config_profile_marks_matching_official_profile_active() {
     let mut config = test_app_config();
@@ -27,7 +54,8 @@ model_provider = "openai"
 
 [model_providers.openai]
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
+http_headers = { "x-openai-actor-authorization" = "codestudio-lite" }
 "#,
     )
     .expect("config should parse");
@@ -100,7 +128,8 @@ model_provider = "openai"
 
 [model_providers.openai]
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
+http_headers = { "x-openai-actor-authorization" = "codestudio-lite" }
 base_url = "https://example.test/v1"
 "#,
     )
@@ -424,7 +453,8 @@ model = "gpt-5.5"
 name = "APIKEY.FUN"
 base_url = "https://api.apikey.fun/v1"
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
+http_headers = { "x-openai-actor-authorization" = "codestudio-lite" }
 "#,
     )
     .expect("config should parse");
@@ -483,7 +513,8 @@ model = "gpt-5.5"
 name = "APIKEY.FUN"
 base_url = "https://api.apikey.fun/v1"
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
+http_headers = { "x-openai-actor-authorization" = "codestudio-lite" }
 "#,
     )
     .expect("config should parse");
@@ -524,7 +555,7 @@ requires_openai_auth = true
 }
 
 #[test]
-fn native_profile_matching_does_not_require_reading_keychain_secret() {
+fn native_profile_matching_requires_auth_json_without_reading_keychain_secret() {
     let value: toml::Value = toml::from_str(
         r#"
 model_provider = "codestudio-openrouter"
@@ -559,7 +590,12 @@ requires_openai_auth = true
         sort_order: 0,
     };
 
-    assert!(codex_direct_config_matches_profile(&value, None, &profile));
+    assert!(!codex_direct_config_matches_profile(&value, None, &profile));
+    assert!(codex_direct_config_matches_profile_without_keychain(
+        &value,
+        Some(&serde_json::json!({ "OPENAI_API_KEY": "sk-present" })),
+        &profile,
+    ));
 }
 
 #[test]
@@ -899,15 +935,17 @@ model_reasoning_effort = "xhigh"
         toml_lookup(&value, "model_providers.custom.wire_api").and_then(|item| item.as_str()),
         Some("responses")
     );
+    assert_codex_managed_provider_contract(&value, "custom");
     assert_eq!(
-        toml_lookup(&value, "model_providers.custom.requires_openai_auth")
-            .and_then(|item| item.as_bool()),
-        Some(true)
+        read_toml_string(&value, "cli_auth_credentials_store").as_deref(),
+        Some("file")
     );
     assert!(config.contains("[model_providers]\n"));
     assert!(config.contains("[model_providers.custom]\n"));
     assert!(!config.contains("model_providers = {"));
-    assert!(!config.contains("codestudio-"));
+    assert!(!config.contains("model_provider = \"codestudio-"));
+    assert!(!config.contains("[model_providers.codestudio-"));
+    assert_codex_managed_provider_contract_lines(&config);
 }
 
 #[test]
@@ -926,7 +964,11 @@ fn direct_config_runtime_base_url_adds_v1_without_changing_profile_value() {
         toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
         Some("https://api.apikey.fun/v1")
     );
-    assert!(codex_direct_config_matches_profile(&value, None, &profile));
+    assert!(codex_direct_config_matches_profile_without_keychain(
+        &value,
+        Some(&serde_json::json!({ "OPENAI_API_KEY": "sk-present" })),
+        &profile,
+    ));
 }
 
 #[test]
@@ -983,10 +1025,10 @@ model_providers = { codestudio-local = { name = "CodeStudio Lite Local Gateway",
         toml_lookup(&value, "model_providers.custom.wire_api").and_then(|item| item.as_str()),
         Some("responses")
     );
+    assert_codex_managed_provider_contract(&value, "custom");
     assert_eq!(
-        toml_lookup(&value, "model_providers.custom.requires_openai_auth")
-            .and_then(|item| item.as_bool()),
-        Some(false)
+        read_toml_string(&value, "cli_auth_credentials_store").as_deref(),
+        Some("file")
     );
     assert_eq!(
         toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
@@ -996,6 +1038,7 @@ model_providers = { codestudio-local = { name = "CodeStudio Lite Local Gateway",
     assert!(config.contains("[model_providers.custom]\n"));
     assert!(!config.contains("model_providers.codestudio-local"));
     assert!(!config.contains("model_providers = {"));
+    assert_codex_managed_provider_contract_lines(&config);
 }
 
 #[test]
@@ -1245,7 +1288,7 @@ model:
 }
 
 #[test]
-fn codex_native_config_uses_relay_injection_without_official_auth() {
+fn codex_native_config_uses_auth_json_for_relay_injection() {
     let profile = test_profile("codex", ProviderApplyMode::Gateway);
     let config = codex_gateway_config_content("", &profile).expect("config should render");
     let value: toml::Value = toml::from_str(&config).expect("config should parse");
@@ -1258,19 +1301,20 @@ fn codex_native_config_uses_relay_injection_without_official_auth() {
         toml_lookup(&value, "model_providers.custom.wire_api").and_then(|item| item.as_str()),
         Some("responses")
     );
+    assert_codex_managed_provider_contract(&value, "custom");
     assert_eq!(
-        toml_lookup(&value, "model_providers.custom.requires_openai_auth")
-            .and_then(|item| item.as_bool()),
-        Some(false)
+        read_toml_string(&value, "cli_auth_credentials_store").as_deref(),
+        Some("file")
     );
     assert_eq!(
         toml_lookup(&value, "model_providers.custom.base_url").and_then(|item| item.as_str()),
         Some("http://127.0.0.1:43112/tools/codex/v1")
     );
+    assert_codex_managed_provider_contract_lines(&config);
 }
 
 #[test]
-fn codex_official_config_requires_openai_auth_without_base_url_override() {
+fn codex_official_config_uses_managed_auth_contract_without_base_url_override() {
     let profile = builtin_official_profiles()
         .into_iter()
         .find(|profile| profile.app == "codex")
@@ -1292,15 +1336,16 @@ base_url = "https://example.invalid/v1"
         read_toml_string(&value, "model_provider").as_deref(),
         Some("openai")
     );
+    assert_codex_managed_provider_contract(&value, "openai");
     assert_eq!(
-        toml_lookup(&value, "model_providers.openai.requires_openai_auth")
-            .and_then(|item| item.as_bool()),
-        Some(true)
+        read_toml_string(&value, "cli_auth_credentials_store").as_deref(),
+        Some("file")
     );
     assert!(toml_lookup(&value, "model_providers.openai.base_url").is_none());
     assert!(toml_lookup(&value, "auth.api_key").is_none());
     assert!(config.contains("[model_providers.openai]"));
     assert!(!config.contains("base_url ="));
+    assert_codex_managed_provider_contract_lines(&config);
 }
 
 #[test]
@@ -1351,6 +1396,101 @@ fn codex_auth_status_infers_api_key_cache_without_exposing_values() {
     assert!(upper_status.available);
     assert!(matches!(upper_status.method, CodexAuthMethod::ApiKey));
     assert!(!upper_status.detail.contains("sk-secret"));
+}
+
+#[test]
+fn codex_auth_status_prefers_explicit_api_key_mode_with_preserved_oauth_tokens() {
+    let status = codex_auth_status_from_file_content(
+        Path::new("auth.json"),
+        "file",
+        r#"{
+  "auth_mode": "apikey",
+  "OPENAI_API_KEY": "sk-secret",
+  "tokens": {
+    "access_token": "oauth-access",
+    "refresh_token": "oauth-refresh"
+  }
+}"#,
+    );
+
+    assert!(status.available);
+    assert!(matches!(status.method, CodexAuthMethod::ApiKey));
+}
+
+#[test]
+fn codex_auth_json_api_key_content_matches_cli_format_and_preserves_oauth_tokens() {
+    let content = codex_auth_json_content_with_api_key(
+        r#"{
+  "auth_mode": "chatgpt",
+  "openai_api_key": "stale-lowercase-key",
+  "api_key": "stale-legacy-key",
+  "tokens": {
+    "access_token": "oauth-access",
+    "refresh_token": "oauth-refresh"
+  },
+  "other": "keep"
+}"#,
+        "sk-current",
+    )
+    .expect("auth json should render");
+    let value: serde_json::Value = serde_json::from_str(&content).expect("auth json should parse");
+
+    assert_eq!(
+        value.get("auth_mode").and_then(serde_json::Value::as_str),
+        Some("apikey")
+    );
+    assert_eq!(
+        value
+            .get("OPENAI_API_KEY")
+            .and_then(serde_json::Value::as_str),
+        Some("sk-current")
+    );
+    assert!(value.get("openai_api_key").is_none());
+    assert!(value.get("api_key").is_none());
+    assert_eq!(
+        value
+            .pointer("/tokens/refresh_token")
+            .and_then(serde_json::Value::as_str),
+        Some("oauth-refresh")
+    );
+    assert_eq!(
+        value.get("other").and_then(serde_json::Value::as_str),
+        Some("keep")
+    );
+}
+
+#[test]
+fn codex_official_auth_json_restores_preserved_oauth_mode() {
+    let content = codex_official_auth_json_content(
+        r#"{
+  "auth_mode": "apikey",
+  "OPENAI_API_KEY": "codestudio-local-test",
+  "tokens": {
+    "access_token": "oauth-access",
+    "refresh_token": "oauth-refresh"
+  },
+  "other": "keep"
+}"#,
+    )
+    .expect("official auth json should render")
+    .expect("oauth markers should produce a restored payload");
+    let value: serde_json::Value = serde_json::from_str(&content).expect("auth json should parse");
+
+    assert_eq!(
+        value.get("auth_mode").and_then(serde_json::Value::as_str),
+        Some("chatgpt")
+    );
+    assert!(value.get("OPENAI_API_KEY").is_none());
+    assert_eq!(
+        value
+            .pointer("/tokens/access_token")
+            .and_then(serde_json::Value::as_str),
+        Some("oauth-access")
+    );
+    assert_eq!(
+        value.get("other").and_then(serde_json::Value::as_str),
+        Some("keep")
+    );
 }
 
 #[test]
@@ -1714,6 +1854,51 @@ fn official_cleanup_removes_only_gateway_fields() {
 }
 
 #[test]
+fn codex_native_previews_use_managed_actor_authorization_contract() {
+    let paths = test_paths();
+    let direct = test_profile("codex", ProviderApplyMode::Config);
+    let direct_provider_id = codex_provider_id_for_profile(&direct);
+    let gateway = test_profile("codex", ProviderApplyMode::Gateway);
+    let official = builtin_official_profiles()
+        .into_iter()
+        .find(|profile| profile.app == "codex")
+        .expect("codex official profile");
+    let cases = [
+        (direct, ProviderApplyMode::Config, direct_provider_id),
+        (gateway, ProviderApplyMode::Gateway, "custom".to_string()),
+        (official, ProviderApplyMode::Config, "openai".to_string()),
+    ];
+
+    for (profile, mode, provider_id) in cases {
+        let preview = build_native_config_preview(&profile, None, &paths, mode)
+            .expect("preview should build")
+            .expect("Codex preview should be available");
+        let requires_key = format!("model_providers.{provider_id}.requires_openai_auth");
+        let headers_key = format!("model_providers.{provider_id}.http_headers");
+        let requires_index = preview
+            .changes
+            .iter()
+            .position(|change| change.key == requires_key)
+            .expect("auth requirement diff should exist");
+        let headers_index = preview
+            .changes
+            .iter()
+            .position(|change| change.key == headers_key)
+            .expect("actor header diff should exist");
+
+        assert_eq!(headers_index, requires_index + 1);
+        assert_eq!(
+            preview.changes[requires_index].after.as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            preview.changes[headers_index].after.as_deref(),
+            Some(CODEX_ACTOR_AUTHORIZATION_INLINE_TOML)
+        );
+    }
+}
+
+#[test]
 fn non_codex_native_preview_includes_redacted_content() {
     let paths = test_paths();
     let profile = test_profile("claude", ProviderApplyMode::Gateway);
@@ -1822,6 +2007,182 @@ fn unchanged_native_apply_plan_is_filtered_out() {
     )
     .expect("plans should filter");
     assert!(plans.is_empty());
+}
+
+#[test]
+fn codex_direct_apply_plan_writes_auth_json_before_config() {
+    let paths = test_paths();
+    let auth_path = codex_auth_json_path(&paths);
+    fs::create_dir_all(auth_path.parent().expect("auth parent"))
+        .expect("auth parent should be created");
+    fs::write(
+        &auth_path,
+        r#"{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "oauth-access",
+    "refresh_token": "oauth-refresh"
+  }
+}"#,
+    )
+    .expect("existing auth should be written");
+
+    let mut profile = test_profile("codex", ProviderApplyMode::Config);
+    profile.provider = "compatible".to_string();
+    profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    profile.model = "gpt-5.5".to_string();
+    profile.base_url = "https://api.apikey.fun/v1".to_string();
+    profile.auth_ref = Some(format!(
+        "keychain:test/codex-direct-auth-plan-{}/api_key",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    store_test_profile_secret(&profile, "sk-direct-profile");
+
+    let plans = build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Config, false)
+        .expect("direct plan should build");
+    assert_eq!(plans.len(), 2);
+    assert!(matches!(
+        plans[0].kind,
+        NativeConfigWriteKind::CodexAuthJson
+    ));
+    assert_eq!(plans[0].path, auth_path);
+    assert!(matches!(
+        plans[1].kind,
+        NativeConfigWriteKind::ProfileConfig
+    ));
+
+    let auth: serde_json::Value =
+        serde_json::from_str(&plans[0].content).expect("planned auth should parse");
+    assert_eq!(
+        auth.get("auth_mode").and_then(serde_json::Value::as_str),
+        Some("apikey")
+    );
+    assert_eq!(
+        auth.get("OPENAI_API_KEY")
+            .and_then(serde_json::Value::as_str),
+        Some("sk-direct-profile")
+    );
+    assert_eq!(
+        auth.pointer("/tokens/refresh_token")
+            .and_then(serde_json::Value::as_str),
+        Some("oauth-refresh")
+    );
+
+    let config: toml::Value =
+        toml::from_str(&plans[1].content).expect("planned config should parse");
+    assert_eq!(
+        read_toml_string(&config, "cli_auth_credentials_store").as_deref(),
+        Some("file")
+    );
+    assert_codex_managed_provider_contract(&config, "custom");
+    assert_codex_managed_provider_contract_lines(&plans[1].content);
+    assert!(!plans[1].content.contains("sk-direct-profile"));
+
+    apply_native_config_write_plan(&plans[0]).expect("auth plan should apply");
+    assert!(
+        verify_native_config_write(&plans[0], &profile, &ProviderApplyMode::Config)
+            .expect("auth plan should verify")
+    );
+    fs::write(&plans[0].path, "{}\n").expect("auth plan should be tampered");
+    assert!(
+        !verify_native_config_write(&plans[0], &profile, &ProviderApplyMode::Config)
+            .expect("tampered auth plan should be rejected")
+    );
+
+    apply_native_config_write_plan(&plans[1]).expect("config plan should apply");
+    assert!(
+        verify_native_config_write(&plans[1], &profile, &ProviderApplyMode::Config)
+            .expect("config plan should verify")
+    );
+    fs::write(
+        &plans[1].path,
+        plans[1]
+            .content
+            .replace(CODEX_ACTOR_AUTHORIZATION_VALUE, "unexpected-actor"),
+    )
+    .expect("config header should be tampered");
+    assert!(
+        !verify_native_config_write(&plans[1], &profile, &ProviderApplyMode::Config)
+            .expect("tampered config header should be rejected")
+    );
+}
+
+#[test]
+fn codex_gateway_apply_plan_writes_local_token_to_auth_json_before_config() {
+    let paths = test_paths();
+    let auth_path = codex_auth_json_path(&paths);
+    fs::create_dir_all(auth_path.parent().expect("auth parent"))
+        .expect("auth parent should be created");
+    fs::write(
+        &auth_path,
+        r#"{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "oauth-access",
+    "refresh_token": "oauth-refresh"
+  }
+}"#,
+    )
+    .expect("existing auth should be written");
+
+    let profile = test_profile("codex", ProviderApplyMode::Gateway);
+    let client = gateway::client_config_for_tool("codex").expect("gateway client config");
+    let plans = build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Gateway, false)
+        .expect("gateway plan should build");
+    assert_eq!(plans.len(), 2);
+    assert!(matches!(
+        plans[0].kind,
+        NativeConfigWriteKind::CodexAuthJson
+    ));
+    assert_eq!(plans[0].path, auth_path);
+    assert!(matches!(
+        plans[1].kind,
+        NativeConfigWriteKind::ProfileConfig
+    ));
+
+    let auth: serde_json::Value =
+        serde_json::from_str(&plans[0].content).expect("planned auth should parse");
+    assert_eq!(
+        auth.get("auth_mode").and_then(serde_json::Value::as_str),
+        Some("apikey")
+    );
+    assert_eq!(
+        auth.get("OPENAI_API_KEY")
+            .and_then(serde_json::Value::as_str),
+        Some(client.token.as_str())
+    );
+    assert_eq!(
+        auth.pointer("/tokens/access_token")
+            .and_then(serde_json::Value::as_str),
+        Some("oauth-access")
+    );
+
+    let config: toml::Value =
+        toml::from_str(&plans[1].content).expect("planned config should parse");
+    assert_eq!(
+        read_toml_string(&config, "cli_auth_credentials_store").as_deref(),
+        Some("file")
+    );
+    assert_codex_managed_provider_contract(&config, "custom");
+    assert_codex_managed_provider_contract_lines(&plans[1].content);
+    assert!(!plans[1].content.contains(&client.token));
+
+    apply_native_config_write_plan(&plans[1]).expect("config plan should apply");
+    assert!(
+        verify_native_config_write(&plans[1], &profile, &ProviderApplyMode::Gateway)
+            .expect("config plan should verify")
+    );
+    fs::write(
+        &plans[1].path,
+        plans[1]
+            .content
+            .replace(CODEX_ACTOR_AUTHORIZATION_VALUE, "unexpected-actor"),
+    )
+    .expect("config header should be tampered");
+    assert!(
+        !verify_native_config_write(&plans[1], &profile, &ProviderApplyMode::Gateway)
+            .expect("tampered config header should be rejected")
+    );
 }
 
 #[test]
