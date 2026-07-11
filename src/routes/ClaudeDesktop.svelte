@@ -87,14 +87,14 @@
   $: activePlanUpToDate = Boolean(installed && activePlanDetails && !status?.updateAvailable);
   $: activePlanBlocker = activePlan?.blocker && !activePlanUpToDate ? activePlan.blocker : null;
   $: activePlanStatus = !activePlanDetails
-    ? $t("codexClient.planNotLoaded")
+      ? $t("desktopClient.planNotLoaded")
     : activePlanBlocker
       ? activePlanBlocker
       : activePlanAvailable
         ? versionStatusHint
         : activePlanUpToDate
-          ? $t("codexClient.upToDate")
-          : $t("codexClient.planNotLoaded");
+      ? $t("desktopClient.upToDate")
+      : $t("desktopClient.planNotLoaded");
   $: liveLogGroups = groupedProgressLogs(kindView.progressLogs);
   $: hasLogs = liveLogGroups.length > 0;
   // Only call it "up to date" when the app is actually installed and we know
@@ -102,10 +102,10 @@
   // to show the latest version as available-to-install, not "up to date"; when
   // the latest is unknown we show unknown rather than a misleading up-to-date.
   $: versionStatusHint = !installed
-    ? (status?.latestVersion ? $t("codexClient.updateAvailable") : $t("common.unknown"))
+      ? (status?.latestVersion ? $t("desktopClient.updateAvailable") : $t("common.unknown"))
     : status?.updateAvailable
-      ? $t("codexClient.updateAvailable")
-      : (status?.latestVersion ? $t("codexClient.upToDate") : $t("common.unknown"));
+      ? $t("desktopClient.updateAvailable")
+      : (status?.latestVersion ? $t("desktopClient.upToDate") : $t("common.unknown"));
 
   $: localizeClaudeLaunch = view.localizeLaunch;
   $: exeInstallDetected = installed && status?.installKind === "exe";
@@ -451,22 +451,22 @@
 
     <div class={desktopClientMetricsRecipe()}>
       <div>
-        <span>{$t("codexClient.currentVersion")}</span>
+                  <span>{$t("desktopClient.currentVersion")}</span>
         <strong>{status?.version ?? $t("common.none")}</strong>
         <small>{status?.command ?? "Claude"}</small>
       </div>
       <div>
-        <span>{$t("codexClient.latestVersion")}</span>
+                  <span>{$t("desktopClient.latestVersion")}</span>
         <strong>{status?.latestVersion ?? $t("common.unknown")}</strong>
         <small>{versionStatusHint}</small>
       </div>
       <div>
-        <span>{$t("codexClient.installRoot")}</span>
+                  <span>{$t("desktopClient.installRoot")}</span>
         <strong>{status?.installPath ?? $t("common.unknown")}</strong>
         <small>{$t("claudeDesktop.managedByToolInstaller")}</small>
       </div>
       <div>
-        <span>{$t("codexClient.configRoot")}</span>
+                  <span>{$t("desktopClient.configRoot")}</span>
         <strong>{status?.configPath ?? $t("common.unknown")}</strong>
         <small>{$t("claudeDesktop.managedByToolInstaller")}</small>
       </div>
@@ -531,14 +531,14 @@
   <section class={panelRecipe()}>
     <div class={sectionHeadingRecipe()}>
       <div class={headingCopyClass}>
-        <h2>{$t("codexClient.planTitle")}</h2>
+            <h2>{$t("desktopClient.planTitle")}</h2>
         <p>{activePlanStatus}</p>
       </div>
       <div class={sectionActionsClass}>
         {#if activePlanDetails}
           <StatusPill
             status={activePlanAvailable ? "warning" : activePlanBlocker ? "warning" : "ok"}
-            label={activePlanAvailable ? $t("codexClient.updateAvailable") : activePlanBlocker ? $t("status.warning") : $t("codexClient.upToDate")}
+              label={activePlanAvailable ? $t("desktopClient.updateAvailable") : activePlanBlocker ? $t("status.warning") : $t("desktopClient.upToDate")}
           />
         {/if}
       </div>
@@ -546,7 +546,7 @@
     <div class={desktopClientPreviewListRecipe()}>
       {#if activePlanDetails}
         <div>
-          <strong>{$t("codexClient.downloadUrl")}</strong>
+                  <strong>{$t("desktopClient.downloadUrl")}</strong>
           <span>{activePlanDetails.downloadUrl}</span>
         </div>
         <div>
@@ -554,11 +554,11 @@
           <span>{activePlanDetails.sha256}</span>
         </div>
         <div>
-          <strong>{$t("codexClient.installRoot")}</strong>
+                  <strong>{$t("desktopClient.installRoot")}</strong>
           <span>{activePlanDetails.installLocation}</span>
         </div>
       {:else}
-        <div class={emptyRowRecipe()}>{$t("codexClient.planNotLoaded")}</div>
+            <div class={emptyRowRecipe()}>{$t("desktopClient.planNotLoaded")}</div>
       {/if}
     </div>
   </section>
@@ -652,11 +652,11 @@
         </div>
         <div class={desktopClientPreviewListRecipe()}>
           <div>
-            <strong>{$t("codexClient.currentVersion")}</strong>
+                  <strong>{$t("desktopClient.currentVersion")}</strong>
             <span>{status?.version ?? $t("common.none")}</span>
           </div>
           <div>
-            <strong>{$t("codexClient.installRoot")}</strong>
+                  <strong>{$t("desktopClient.installRoot")}</strong>
             <span>{status?.details ?? status?.command ?? $t("common.none")}</span>
           </div>
         </div>

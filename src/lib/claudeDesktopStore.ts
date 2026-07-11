@@ -15,7 +15,7 @@ import type {
   ClaudeDesktopLocalizationProgress,
   ClaudeDesktopPendingLaunch,
   ClaudeDesktopPlan,
-  CodexClientCapability,
+  DesktopClientCapability,
   DetectionSnapshot,
   ToolInstallPlan,
   ToolInstallProgress,
@@ -62,7 +62,7 @@ interface ClaudeDesktopViewState {
   // Which install-kind tab is selected: "msix" (Windows App) or "exe".
   selectedKind: ClaudeDesktopInstallKind;
   // Local MSIX-runtime capability checks for the Windows App tab.
-  capabilities: CodexClientCapability[];
+  capabilities: DesktopClientCapability[];
   pendingLaunchAfterRestart: ClaudeDesktopPendingLaunch | null;
 }
 
@@ -282,7 +282,7 @@ function applyKindStatusesFromSnapshot(
   snapshot: DetectionSnapshot,
   installPlan?: ToolInstallPlan | null,
   updatePlan?: ToolInstallPlan | null,
-  capabilities?: CodexClientCapability[]
+  capabilities?: DesktopClientCapability[]
 ) {
   const baseStatus = findClaudeDesktop(snapshot);
   const isWindows = snapshot.platform === "windows";

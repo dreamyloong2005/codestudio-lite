@@ -389,6 +389,14 @@ pub struct ClearEnvironmentVariablesResult {
     pub conflicts: Vec<EnvironmentVariableConflict>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatGptDesktopProductGeneration {
+    #[default]
+    Current,
+    Legacy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectionSnapshot {
@@ -405,14 +413,20 @@ pub struct DetectionSnapshot {
     pub problems: Vec<Problem>,
     #[serde(default)]
     pub env_conflicts: Vec<EnvironmentVariableConflict>,
+    #[serde(default)]
+    pub chatgpt_desktop_product_generation: ChatGptDesktopProductGeneration,
     /// Per-kind install detection for the Claude Desktop page tabs. Cached
     /// alongside the snapshot so the tabs render instantly from the on-disk
     /// detection cache before a fresh scan completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_install_kinds: Option<ClaudeDesktopInstallKinds>,
-    /// Per-kind install detection for the Codex desktop client page tabs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_install_kinds: Option<CodexClientInstallKinds>,
+    /// Per-kind install detection for the ChatGPT desktop client page tabs.
+    #[serde(
+        default,
+        alias = "codexInstallKinds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chatgpt_desktop_install_kinds: Option<ChatGptDesktopInstallKinds>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1077,12 +1091,12 @@ pub struct ClaudeDesktopPageState {
     pub install_plan: Option<ToolInstallPlan>,
     pub update_plan: Option<ToolInstallPlan>,
     pub plan: Option<ClaudeDesktopPlan>,
-    pub capabilities: Vec<crate::core::codex_client::CodexClientCapability>,
+    pub capabilities: Vec<crate::core::chatgpt_desktop::DesktopClientCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientInstallKinds {
+pub struct ChatGptDesktopInstallKinds {
     pub msix: DesktopInstallKindInfo,
     pub portable: DesktopInstallKindInfo,
 }

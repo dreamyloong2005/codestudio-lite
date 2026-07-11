@@ -1,5 +1,5 @@
 use crate::core::app_paths::{app_paths, ensure_dirs};
-use crate::core::codex_client::CodexClientState;
+use crate::core::chatgpt_desktop::ChatGptDesktopState;
 use crate::core::privacy_filter::{PrivacyFilterAction, PrivacyFilterMode};
 use crate::core::types::{
     ActiveProfilesByMode, ActivityEvent, BackupManifest, DetectionSnapshot, DetectionSource,
@@ -9,7 +9,7 @@ use crate::core::types::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone)]
 pub struct StoredAppConfig {
@@ -381,30 +381,30 @@ pub fn load_detection_cache() -> Result<Option<DetectionSnapshot>, String> {
     Ok(Some(snapshot))
 }
 
-pub fn store_codex_client_state(state: &CodexClientState) -> Result<(), String> {
+pub fn store_chatgpt_desktop_state(state: &ChatGptDesktopState) -> Result<(), String> {
     let conn = connection()?;
-    store_codex_client_state_with_conn(&conn, state)
+    store_chatgpt_desktop_state_with_conn(&conn, state)
 }
 
-pub fn load_codex_client_state() -> Result<Option<CodexClientState>, String> {
-    let states = load_codex_client_states()?;
+pub fn load_chatgpt_desktop_state() -> Result<Option<ChatGptDesktopState>, String> {
+    let states = load_chatgpt_desktop_states()?;
     Ok(states
         .into_values()
         .max_by(|left, right| left.generated_at.cmp(&right.generated_at)))
 }
 
-pub fn load_codex_client_states() -> Result<BTreeMap<String, CodexClientState>, String> {
+pub fn load_chatgpt_desktop_states() -> Result<BTreeMap<String, ChatGptDesktopState>, String> {
     let conn = connection()?;
-    load_codex_client_states_with_conn(&conn)
+    load_chatgpt_desktop_states_with_conn(&conn)
 }
 
-fn store_codex_client_state_with_conn(
+fn store_chatgpt_desktop_state_with_conn(
     conn: &Connection,
-    state: &CodexClientState,
+    state: &ChatGptDesktopState,
 ) -> Result<(), String> {
     let json = serde_json::to_string(state).map_err(|err| err.to_string())?;
     conn.execute(
-        "INSERT INTO codex_client_state (install_kind, generated_at, state_json)
+        "INSERT INTO chatgpt_desktop_state (install_kind, generated_at, state_json)
          VALUES (?1, ?2, ?3)
          ON CONFLICT(install_kind) DO UPDATE SET
             generated_at=excluded.generated_at,
@@ -419,12 +419,12 @@ fn store_codex_client_state_with_conn(
     Ok(())
 }
 
-fn load_codex_client_states_with_conn(
+fn load_chatgpt_desktop_states_with_conn(
     conn: &Connection,
-) -> Result<BTreeMap<String, CodexClientState>, String> {
+) -> Result<BTreeMap<String, ChatGptDesktopState>, String> {
     let mut statement = conn
         .prepare(
-            "SELECT install_kind, state_json FROM codex_client_state ORDER BY install_kind ASC",
+            "SELECT install_kind, state_json FROM chatgpt_desktop_state ORDER BY install_kind ASC",
         )
         .map_err(|err| err.to_string())?;
     let rows = statement
@@ -436,7 +436,7 @@ fn load_codex_client_states_with_conn(
     for row in rows {
         let (install_kind, json) = row.map_err(|err| err.to_string())?;
         let state =
-            serde_json::from_str::<CodexClientState>(&json).map_err(|err| err.to_string())?;
+            serde_json::from_str::<ChatGptDesktopState>(&json).map_err(|err| err.to_string())?;
         states.insert(install_kind, state);
     }
     Ok(states)
@@ -811,7 +811,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
           generated_at TEXT NOT NULL,
           snapshot_json TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS codex_client_state (
+        CREATE TABLE IF NOT EXISTS chatgpt_desktop_state (
           install_kind TEXT PRIMARY KEY,
           generated_at TEXT NOT NULL,
           state_json TEXT NOT NULL
@@ -887,26 +887,43 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     ensure_profiles_sort_order_column(conn)?;
     ensure_profiles_model_mappings_column(conn)?;
     ensure_gateway_request_privacy_columns(conn)?;
-    ensure_codex_client_state_table(conn)?;
+    ensure_chatgpt_desktop_state_table(conn)?;
     save_meta(conn, "schema_version", &SCHEMA_VERSION.to_string())?;
     Ok(())
 }
 
-fn ensure_codex_client_state_table(conn: &Connection) -> Result<(), String> {
-    if table_has_column(conn, "codex_client_state", "install_kind")? {
-        return Ok(());
-    }
-    conn.execute("DROP TABLE IF EXISTS codex_client_state", [])
+fn ensure_chatgpt_desktop_state_table(conn: &Connection) -> Result<(), String> {
+    if !table_has_column(conn, "chatgpt_desktop_state", "install_kind")? {
+        conn.execute("DROP TABLE IF EXISTS chatgpt_desktop_state", [])
+            .map_err(|err| err.to_string())?;
+        conn.execute(
+            "CREATE TABLE chatgpt_desktop_state (
+              install_kind TEXT PRIMARY KEY,
+              generated_at TEXT NOT NULL,
+              state_json TEXT NOT NULL
+            )",
+            [],
+        )
         .map_err(|err| err.to_string())?;
-    conn.execute(
-        "CREATE TABLE codex_client_state (
-          install_kind TEXT PRIMARY KEY,
-          generated_at TEXT NOT NULL,
-          state_json TEXT NOT NULL
-        )",
-        [],
-    )
-    .map_err(|err| err.to_string())?;
+    }
+    if table_has_column(conn, "codex_client_state", "install_kind")? {
+        let copy_result = conn.execute(
+            "INSERT OR IGNORE INTO chatgpt_desktop_state (install_kind, generated_at, state_json)
+             SELECT install_kind, generated_at, state_json FROM codex_client_state",
+            [],
+        );
+        match copy_result {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message == "no such table: codex_client_state" =>
+            {
+                return Ok(());
+            }
+            Err(err) => return Err(err.to_string()),
+        }
+        conn.execute("DROP TABLE IF EXISTS codex_client_state", [])
+            .map_err(|err| err.to_string())?;
+    }
     Ok(())
 }
 
@@ -1465,20 +1482,51 @@ mod tests {
     }
 
     #[test]
-    fn codex_client_state_cache_is_keyed_by_install_kind() {
+    fn chatgpt_desktop_state_cache_is_keyed_by_install_kind() {
         let conn = Connection::open_in_memory().expect("in-memory database should open");
         initialize_schema(&conn).expect("schema should initialize");
-        let msix = codex_client_state_for_test("msix", "2026-06-23T10:00:00Z");
-        let portable = codex_client_state_for_test("portable", "2026-06-23T10:01:00Z");
+        let msix = chatgpt_desktop_state_for_test("msix", "2026-06-23T10:00:00Z");
+        let portable = chatgpt_desktop_state_for_test("portable", "2026-06-23T10:01:00Z");
 
-        store_codex_client_state_with_conn(&conn, &msix).expect("msix state should save");
-        store_codex_client_state_with_conn(&conn, &portable).expect("portable state should save");
+        store_chatgpt_desktop_state_with_conn(&conn, &msix).expect("msix state should save");
+        store_chatgpt_desktop_state_with_conn(&conn, &portable)
+            .expect("portable state should save");
 
-        let states =
-            load_codex_client_states_with_conn(&conn).expect("codex state cache should load");
+        let states = load_chatgpt_desktop_states_with_conn(&conn)
+            .expect("ChatGPT Desktop state cache should load");
         assert_eq!(states.len(), 2);
         assert_eq!(states["msix"].install_kind, "msix");
         assert_eq!(states["portable"].install_kind, "portable");
+    }
+
+    #[test]
+    fn legacy_codex_client_state_cache_migrates_to_chatgpt_desktop() {
+        let conn = Connection::open_in_memory().expect("in-memory database should open");
+        conn.execute_batch(
+            "CREATE TABLE codex_client_state (
+              install_kind TEXT PRIMARY KEY,
+              generated_at TEXT NOT NULL,
+              state_json TEXT NOT NULL
+            );",
+        )
+        .expect("legacy table should initialize");
+        let legacy = chatgpt_desktop_state_for_test("portable", "2026-06-23T10:01:00Z");
+        let json = serde_json::to_string(&legacy).expect("legacy state should serialize");
+        conn.execute(
+            "INSERT INTO codex_client_state (install_kind, generated_at, state_json) VALUES (?1, ?2, ?3)",
+            params![legacy.install_kind, legacy.generated_at, json],
+        )
+        .expect("legacy state should save");
+
+        initialize_schema(&conn).expect("schema should migrate");
+
+        let states = load_chatgpt_desktop_states_with_conn(&conn)
+            .expect("migrated ChatGPT Desktop state should load");
+        assert_eq!(states["portable"].install_kind, "portable");
+        assert!(
+            !table_has_column(&conn, "codex_client_state", "install_kind")
+                .expect("legacy table lookup should succeed")
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1854,8 +1902,11 @@ mod tests {
             .collect()
     }
 
-    fn codex_client_state_for_test(install_kind: &str, generated_at: &str) -> CodexClientState {
-        CodexClientState {
+    fn chatgpt_desktop_state_for_test(
+        install_kind: &str,
+        generated_at: &str,
+    ) -> ChatGptDesktopState {
+        ChatGptDesktopState {
             install_kind: install_kind.to_string(),
             generated_at: generated_at.to_string(),
             platform: "windows".to_string(),
@@ -1864,7 +1915,7 @@ mod tests {
             install_class: "none".to_string(),
             release: None,
             plan: None,
-            staging_dir: "~/.codestudio-lite/downloads/codex-client".to_string(),
+            staging_dir: "~/.codestudio-lite/downloads/chatgpt-desktop".to_string(),
             notes: Vec::new(),
             running: false,
         }

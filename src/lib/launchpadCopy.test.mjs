@@ -26,7 +26,7 @@ test("launchpad and API profile navigation copy is localized consistently", () =
   assert.match(enUS, /"app\.nav\.profiles": "API Profiles"/);
   assert.match(enUS, /"app\.nav\.wizard": "New Configuration"/);
   assert.match(enUS, /"common\.createConfig": "New Configuration"/);
-  assert.match(enUS, /"gateway\.subtitle": "Control the gateway runtime and choose independent gateway configurations by tool\."/);
+  assert.match(enUS, /"gateway\.subtitle": "Manage gateway runtime, privacy filtering, and request logs\."/);
   assert.match(enUS, /"gateway\.profileTitle": "Gateway configurations"/);
   assert.match(enUS, /"profiles\.loading": "Loading API profiles\.\.\."/);
   assert.match(enUS, /"profiles\.noActiveForToolInMode": "No API profile enabled for this configuration type"/);

@@ -467,7 +467,7 @@
 
   function canonicalProfileToolId(toolId: string) {
     const normalized = toolId.trim().toLowerCase();
-    if (["codex-app", "codex-client", "codex-desktop", "codex-cli", "codex-vscode", "codex-code-vscode", "codex-vs-code"].includes(normalized)) {
+    if (["chatgpt-desktop", "codex-app", "codex-client", "codex-desktop", "codex-cli", "codex-vscode", "codex-code-vscode", "codex-vs-code"].includes(normalized)) {
       return "codex";
     }
     if (["claude-app", "claude-client"].includes(normalized)) {

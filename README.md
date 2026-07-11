@@ -9,7 +9,7 @@ CodeStudio Lite 是面向本机 AI 编程工具的桌面控制台。它把本地
 - **本地 AI 网关**：在 `127.0.0.1:43112` 提供 OpenAI / Anthropic / Gemini 风格接口，并用当前激活的 Provider Profile 转发请求。
 - **Provider Profile 管理**：按工具管理官方配置、自定义供应商、协议、模型、Base URL 和系统凭据中的 API Key。
 - **配置模式与网关模式**：配置模式直接写入目标工具的原生配置；网关模式把工具指向 CodeStudio Lite 的本地端点，后续只切换本应用内的激活档案。
-- **桌面端管理**：提供 Codex 桌面端与 Claude Desktop 的独立页面，用于检测、下载、校验、安装、更新、卸载和启动。
+- **桌面端管理**：提供 ChatGPT 桌面端与 Claude Desktop 的独立页面，用于检测、下载、校验、安装、更新、卸载和启动。
 - **Claude Desktop 汉化启动**：支持在 Windows / macOS 上以运行时注入方式启用 Claude Desktop 中文界面，不直接破坏官方安装目录。
 - **环境体检与修复**：检测工具安装状态、版本、配置状态、PATH 修复建议、环境变量冲突和系统依赖。
 - **请求监控与隐私过滤**：记录元数据级请求日志，支持关闭、检测、脱敏、阻断四种隐私过滤模式。
@@ -64,7 +64,7 @@ AI 工具检测与配置：
 
 - Codex CLI
 - Codex VS Code
-- Codex Desktop
+- ChatGPT Desktop
 - Claude Desktop
 - Claude Code
 - Claude VS Code
@@ -84,7 +84,7 @@ AI 工具检测与配置：
 
 桌面端专门页面当前覆盖：
 
-- **Codex Desktop**：Windows App / Portable 安装类型，macOS DMG 来源选择，下载进度、SHA-256 校验、安装、更新、卸载、启动、历史会话同步和插件入口解锁补丁开关。
+- **ChatGPT Desktop**：Windows App / Portable 安装类型，macOS DMG 来源选择，下载进度、SHA-256 校验、安装、更新、卸载、启动、历史会话同步和插件入口解锁补丁开关。
 - **Claude Desktop**：Windows App 为主，只有检测到旧 EXE 安装时才显示 EXE 页；支持官方下载、进度反馈、安装、更新、卸载、启动，以及中文运行时注入。
 
 ## 平台状态
@@ -177,7 +177,7 @@ src-tauri/src/
   core/profile.rs            Profile、配置写入、原生配置预览和备份流程
   core/detector.rs           工具与系统环境检测
   core/tool_installer.rs     通用工具安装、更新、卸载和进度事件
-  core/codex_client.rs       Codex Desktop 下载、校验、安装、启动与补丁选项
+  core/chatgpt_desktop.rs       ChatGPT Desktop 下载、校验、安装、启动与补丁选项
   core/claude_desktop_patch.rs Claude Desktop 运行时注入、调试器开启和汉化逻辑
   core/usage_query.rs        Profile 用量查询脚本和官方 OAuth 用量读取
   core/storage.rs            SQLite 状态、日志、备份和用量结果
@@ -204,7 +204,7 @@ CodeStudio Lite is a desktop control center for local AI coding tools. It brings
 - **Local AI Gateway**: serves OpenAI / Anthropic / Gemini style APIs on `127.0.0.1:43112` and forwards requests through the active Provider Profile.
 - **Provider Profile management**: stores official profiles, custom providers, protocols, models, base URLs, and API keys kept in the system credential store.
 - **Config mode and Gateway mode**: Config mode writes native tool configuration; Gateway mode points tools at CodeStudio Lite so future provider switches happen inside the app.
-- **Desktop client management**: dedicated Codex Desktop and Claude Desktop pages for detection, download, hash verification, install, update, uninstall, and launch.
+- **Desktop client management**: dedicated ChatGPT Desktop and Claude Desktop pages for detection, download, hash verification, install, update, uninstall, and launch.
 - **Claude Desktop localized launch**: enables Simplified Chinese for Claude Desktop on Windows / macOS through runtime injection without modifying the official installation in place.
 - **Environment checks and repair hints**: detects installation state, versions, config state, PATH repair opportunities, environment-variable conflicts, and system dependencies.
 - **Request monitor and privacy filter**: keeps metadata-only request logs and supports off, detect, redact, and block modes.
@@ -259,7 +259,7 @@ AI tool detection and configuration:
 
 - Codex CLI
 - Codex VS Code
-- Codex Desktop
+- ChatGPT Desktop
 - Claude Desktop
 - Claude Code
 - Claude VS Code
@@ -279,7 +279,7 @@ System dependency detection:
 
 Dedicated desktop-client pages currently cover:
 
-- **Codex Desktop**: Windows App / Portable install kinds, macOS DMG source selection, download progress, SHA-256 verification, install, update, uninstall, launch, history sync on launch, and force plugin-entry unlock patch toggle.
+- **ChatGPT Desktop**: Windows App / Portable install kinds, macOS DMG source selection, download progress, SHA-256 verification, install, update, uninstall, launch, history sync on launch, and force plugin-entry unlock patch toggle.
 - **Claude Desktop**: Windows App first; the deprecated EXE tab appears only when an old EXE install is detected. The page supports official download, progress reporting, install, update, uninstall, launch, and runtime Chinese localization.
 
 ## Platform Status
@@ -372,7 +372,7 @@ src-tauri/src/
   core/profile.rs            Profiles, config writes, native previews, backup flow
   core/detector.rs           Tool and environment detection
   core/tool_installer.rs     Generic install, update, uninstall, and progress events
-  core/codex_client.rs       Codex Desktop download, verification, install, launch, patch options
+  core/chatgpt_desktop.rs       ChatGPT Desktop download, verification, install, launch, patch options
   core/claude_desktop_patch.rs Claude Desktop runtime injection, debugger enabling, localization
   core/usage_query.rs        Profile usage-query scripts and official OAuth usage
   core/storage.rs            SQLite state, logs, backups, and usage results

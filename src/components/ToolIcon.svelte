@@ -1,5 +1,6 @@
 <script lang="ts">
   import AppIcon from "./AppIcon.svelte";
+  import { chatgptDesktopGeneration } from "../lib/chatgptDesktopBranding";
   import { toolIconRecipe } from "../../styled-system/recipes";
 
   export let toolId: string | null | undefined = null;
@@ -7,7 +8,7 @@
   export let category: "ai_tool" | "system" | string | null | undefined = null;
   export let variant: "card" | "choice" | "heading" = "card";
 
-  type ToolIconTone = "default" | "light" | "codex" | "claude" | "gemini" | "openclaw" | "vscode" | "codex-app" | "hermes";
+  type ToolIconTone = "default" | "light" | "codex" | "claude" | "gemini" | "openclaw" | "vscode" | "chatgpt-desktop-current" | "chatgpt-desktop-legacy" | "hermes";
 
   type IconDef = {
     src: string;
@@ -16,7 +17,6 @@
 
   const iconMap: Record<string, IconDef> = {
     codex: { src: "/tool-icons/codex.svg", tone: "codex" },
-    "codex-app": { src: "/tool-icons/codex-app.png", tone: "codex-app" },
     "codex-vscode": { src: "/tool-icons/codex-vscode.svg", tone: "vscode" },
     claude: { src: "/tool-icons/claude-code.svg", tone: "claude" },
     "claude-desktop": { src: "/tool-icons/claude-desktop.svg", tone: "claude" },
@@ -33,15 +33,19 @@
     bun: { src: "/tool-icons/bun.svg", tone: "light" }
   };
 
+  const chatgptDesktopIcons: Record<"current" | "legacy", IconDef> = {
+    current: { src: "/tool-icons/codex.svg", tone: "chatgpt-desktop-current" },
+    legacy: { src: "/tool-icons/chatgpt-desktop.png", tone: "chatgpt-desktop-legacy" }
+  };
+
   function canonicalIconId(id: string | null | undefined) {
     switch (id) {
       case "codex":
       case "codex-cli":
         return "codex";
-      case "codex-app":
-      case "codex-client":
+      case "chatgpt-desktop":
       case "codex-desktop":
-        return "codex-app";
+        return "chatgpt-desktop";
       case "codex-vscode":
       case "codex-code-vscode":
       case "codex-vs-code":
@@ -77,7 +81,9 @@
   }
 
   $: iconKey = canonicalIconId(toolId);
-  $: icon = iconMap[iconKey];
+  $: icon = iconKey === "chatgpt-desktop"
+    ? chatgptDesktopIcons[$chatgptDesktopGeneration]
+    : iconMap[iconKey];
   $: iconTone = icon?.tone ?? "default";
   $: accessibleLabel = label || iconKey || "Tool";
 </script>

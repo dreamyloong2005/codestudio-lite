@@ -4,14 +4,14 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 
-test("app exposes a dedicated Claude Desktop route below Codex Client", () => {
+test("app exposes a dedicated Claude Desktop route below ChatGPT Desktop", () => {
   const app = read("src/App.svelte");
 
   assert.match(app, /import ClaudeDesktop from "\.\/routes\/ClaudeDesktop\.svelte"/);
   assert.match(app, /type Route = [^;]*"claudeDesktop"/);
   assert.match(
     app,
-    /\{ id: "codexClient", labelKey: "app\.nav\.codexClient"[\s\S]*\{ id: "claudeDesktop", labelKey: "app\.nav\.claudeDesktop"/
+    /\{ id: "chatgptDesktop", labelKey: "app\.nav\.chatgptDesktop"[\s\S]*\{ id: "claudeDesktop", labelKey: "app\.nav\.claudeDesktop"/
   );
   assert.match(app, /route === "claudeDesktop"/);
   assert.match(app, /<ClaudeDesktop/);
@@ -21,21 +21,21 @@ test("desktop client pages are shown only on Windows and macOS", () => {
   const app = read("src/App.svelte");
 
   assert.match(app, /desktopClientPagesAvailable = \["windows", "macos"\]\.includes\(snapshot\?\.platform \?\? ""\)/);
-  assert.match(app, /!\["codexClient", "claudeDesktop"\]\.includes\(item\.id\) \|\| desktopClientPagesAvailable/);
+  assert.match(app, /!\["chatgptDesktop", "claudeDesktop"\]\.includes\(item\.id\) \|\| desktopClientPagesAvailable/);
   assert.match(app, /function desktopClientRouteAllowed\(currentRoute: Route\)/);
   assert.match(app, /desktopClientPagesAvailable \|\| \(currentRoute === "claudeDesktop" && pendingClaudeDesktopRouteRestore\)/);
-  assert.match(app, /\["codexClient", "claudeDesktop"\]\.includes\(route\) && !desktopClientRouteAllowed\(route\)/);
-  assert.doesNotMatch(app, /codexClientAvailable = snapshot\?\.platform !== "linux"/);
+  assert.match(app, /\["chatgptDesktop", "claudeDesktop"\]\.includes\(route\) && !desktopClientRouteAllowed\(route\)/);
+  assert.doesNotMatch(app, /chatgptDesktopAvailable = snapshot\?\.platform !== "linux"/);
 });
 
 test("dashboard desktop client install/update navigates to the client page to show progress", () => {
   const dashboard = read("src/routes/Dashboard.svelte");
 
-  assert.match(dashboard, /installOrUpdateCodexClient/);
+  assert.match(dashboard, /installOrUpdateChatGPTDesktop/);
   assert.match(dashboard, /installOrUpdateClaudeDesktop/);
-  assert.match(dashboard, /tool\.id === "codex-app"[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
+  assert.match(dashboard, /tool\.id === "chatgpt-desktop"[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
   assert.match(dashboard, /tool\.id === "claude-desktop"[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
-  assert.doesNotMatch(dashboard, /if \(tool\.id === "codex-app"\) \{\s*onOpenCodexClient\(\)/);
+  assert.doesNotMatch(dashboard, /if \(tool\.id === "chatgpt-desktop"\) \{\s*onOpenChatGPTDesktop\(\)/);
   // install/update must hand off to the dedicated client page so the user can
   // watch the download/progress stream that the page renders from the store.
   assert.match(dashboard, /triggerDesktopClientAction\(tool: ToolStatus, mode: "install" \| "update"\) \{[\s\S]*onNavigateToClient\(tool\.id\)/);
@@ -45,28 +45,28 @@ test("route switches refresh the active CodeStudio Lite page", () => {
   const app = read("src/App.svelte");
 
   assert.match(app, /ensureClaudeDesktopLoaded/);
-  assert.match(app, /import \{ ensureCodexClientLoaded \} from "\.\/lib\/codexClientStore"/);
+  assert.match(app, /import \{ ensureChatGPTDesktopLoaded \} from "\.\/lib\/chatgptDesktopStore"/);
   assert.match(app, /let lastRouteRefreshRoute: Route = route/);
   assert.match(app, /route !== lastRouteRefreshRoute[\s\S]*refreshCurrentRouteAfterSwitch\(route\)/);
   assert.match(
     app,
     /currentRoute === "dashboard"[\s\S]*refreshDashboard\(\{ quiet: true, scheduleFollowup: true, showRefreshIndicator: true, waitForUpdates: true \}\)/
   );
-  assert.match(app, /currentRoute === "codexClient"[\s\S]*ensureCodexClientLoaded\(\)/);
+  assert.match(app, /currentRoute === "chatgptDesktop"[\s\S]*ensureChatGPTDesktopLoaded\(\)/);
   assert.match(app, /currentRoute === "claudeDesktop"[\s\S]*ensureClaudeDesktopLoaded\(\)/);
-  assert.doesNotMatch(app, /currentRoute === "codexClient"[\s\S]*refreshCodexClient\(\)/);
+  assert.doesNotMatch(app, /currentRoute === "chatgptDesktop"[\s\S]*refreshChatGPTDesktop\(\)/);
   assert.doesNotMatch(app, /currentRoute === "claudeDesktop"[\s\S]*refreshClaudeDesktop\(\)/);
   assert.match(app, /currentRoute === "profiles" \|\| currentRoute === "gateway"[\s\S]*refreshAfterProfileChange\(\)/);
   assert.match(app, /currentRoute === "settings"[\s\S]*refreshSettings\(\)/);
 });
 
 test("desktop client page entry hydrates cache before background refresh", () => {
-  const codexStore = read("src/lib/codexClientStore.ts");
+  const codexStore = read("src/lib/chatgptDesktopStore.ts");
   const claudeStore = read("src/lib/claudeDesktopStore.ts");
 
   const codexEnsure = codexStore.slice(
-    codexStore.indexOf("export async function ensureCodexClientLoaded"),
-    codexStore.indexOf("export async function refreshCodexClient")
+    codexStore.indexOf("export async function ensureChatGPTDesktopLoaded"),
+    codexStore.indexOf("export async function refreshChatGPTDesktop")
   );
   const claudeEnsure = claudeStore.slice(
     claudeStore.indexOf("export async function ensureClaudeDesktopLoaded"),
@@ -74,12 +74,12 @@ test("desktop client page entry hydrates cache before background refresh", () =>
   );
 
   assert.doesNotMatch(codexEnsure, /snapshot\.loaded\s*\|\|\s*snapshot\.loading/);
-  assert.match(codexEnsure, /hydrateCodexClientFromCache\(\)/);
-  assert.match(codexEnsure, /loadPromise\s*=\s*refreshCodexClient/);
+  assert.match(codexEnsure, /hydrateChatGPTDesktopFromCache\(\)/);
+  assert.match(codexEnsure, /loadPromise\s*=\s*refreshChatGPTDesktop/);
   assert.ok(
-    codexEnsure.indexOf("hydrateCodexClientFromCache()") <
-      codexEnsure.indexOf("loadPromise = refreshCodexClient"),
-    "Codex Client route entry should hydrate cache before starting the background refresh"
+    codexEnsure.indexOf("hydrateChatGPTDesktopFromCache()") <
+      codexEnsure.indexOf("loadPromise = refreshChatGPTDesktop"),
+    "ChatGPT Desktop route entry should hydrate cache before starting the background refresh"
   );
 
   assert.doesNotMatch(claudeEnsure, /snapshot\.loaded\s*\|\|\s*snapshot\.loading/);
@@ -92,8 +92,8 @@ test("desktop client page entry hydrates cache before background refresh", () =>
   );
 });
 
-test("Codex Client cached update plan does not render foreground refresh placeholders", () => {
-  const route = read("src/routes/CodexClient.svelte");
+test("ChatGPT Desktop cached update plan does not render foreground refresh placeholders", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
 
   assert.match(route, /planRefreshing\s*=\s*kindView\.planRefreshing/);
   assert.match(route, /effectivePlan\s*=\s*planUnavailable \? null : plan/);
@@ -102,16 +102,16 @@ test("Codex Client cached update plan does not render foreground refresh placeho
   assert.match(route, /\{effectivePlan\.installRoot \?\? \$t\("common\.none"\)\}/);
 
   const planSection = route.slice(
-    route.indexOf('<h2>{$t("codexClient.planTitle")}</h2>'),
-    route.indexOf('<h2>{$t("codexClient.capabilities")}</h2>')
+    route.indexOf('<h2>{$t("chatgptDesktop.planTitle")}</h2>'),
+    route.indexOf('<h2>{$t("chatgptDesktop.capabilities")}</h2>')
   );
   const capabilitySection = route.slice(
-    route.indexOf('<h2>{$t("codexClient.capabilities")}</h2>'),
-    route.indexOf('<h2>{$t("codexClient.settingsTitle")}</h2>')
+    route.indexOf('<h2>{$t("chatgptDesktop.capabilities")}</h2>'),
+    route.indexOf('<h2>{$t("chatgptDesktop.settingsTitle")}</h2>')
   );
 
-  assert.ok(planSection.length > 0, "Codex Client update plan section should be present");
-  assert.ok(capabilitySection.length > 0, "Codex Client capability section should be present");
+  assert.ok(planSection.length > 0, "ChatGPT Desktop update plan section should be present");
+  assert.ok(capabilitySection.length > 0, "ChatGPT Desktop capability section should be present");
   assert.doesNotMatch(planSection, /planRefreshing && effectivePlan \? planRefreshText/);
   assert.doesNotMatch(planSection, /<StatusPill status="info" label=\{planRefreshText\}/);
   assert.doesNotMatch(planSection, /\{#if planRefreshing\}[\s\S]*\{planRefreshText\}/);
@@ -127,14 +127,14 @@ test("Claude Desktop cached update plan does not render foreground refresh place
   assert.match(route, /\{activePlanDetails\.installLocation\}/);
 
   const planSection = route.slice(
-    route.indexOf('<h2>{$t("codexClient.planTitle")}</h2>'),
+    route.indexOf('<h2>{$t("desktopClient.planTitle")}</h2>'),
     route.indexOf('<h2>{$t("claudeDesktop.capabilities")}</h2>')
   );
 
   assert.ok(planSection.length > 0, "Claude Desktop update plan section should be present");
-  assert.doesNotMatch(planSection, /planRefreshing && activePlanDetails \? \$t\("codexClient\.planRefreshing"\)/);
-  assert.doesNotMatch(planSection, /<StatusPill status="info" label=\{\$t\("codexClient\.planRefreshing"\)\}/);
-  assert.doesNotMatch(planSection, /\{#if planRefreshing\}[\s\S]*\$t\("codexClient\.planRefreshing"\)/);
+  assert.doesNotMatch(planSection, /planRefreshing && activePlanDetails \? \$t\("desktopClient\.planRefreshing"\)/);
+  assert.doesNotMatch(planSection, /<StatusPill status="info" label=\{\$t\("desktopClient\.planRefreshing"\)\}/);
+  assert.doesNotMatch(planSection, /\{#if planRefreshing\}[\s\S]*\$t\("desktopClient\.planRefreshing"\)/);
 });
 
 test("Claude Desktop keeps cached update plan visible and renders only download hash and install location", () => {
@@ -425,6 +425,72 @@ test("Claude Desktop Windows launch script command hides PowerShell windows", ()
   assert.doesNotMatch(launchScript, /-Command \$command -Args \$argsLine/);
 });
 
+test("ChatGPT Desktop owns the canonical desktop protocol while legacy identifiers remain compatibility inputs", () => {
+  const api = read("src/lib/api.ts");
+  const store = read("src/lib/chatgptDesktopStore.ts");
+  const lib = read("src-tauri/src/lib.rs");
+  const detector = read("src-tauri/src/core/detector.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const storage = read("src-tauri/src/core/storage.rs");
+  const profiles = read("src/routes/Profiles.svelte");
+  const setupWizard = read("src/routes/SetupWizard.svelte");
+  const refreshCache = read("src/lib/refreshCache.ts");
+
+  assert.match(api, /export async function detectChatGPTDesktopInstallKinds/);
+  assert.match(api, /invoke\("detect_chatgpt_desktop_install_kinds"\)/);
+  assert.doesNotMatch(api, /detectCodexInstallKinds|detect_codex_install_kinds/);
+  assert.match(store, /detectChatGPTDesktopInstallKinds/);
+  assert.match(lib, /commands::detect::detect_chatgpt_desktop_install_kinds/);
+  assert.match(detector, /fn supports_chatgpt_desktop_for_platform/);
+  assert.match(core, /let product_name = chatgpt_desktop_product_name\(generation\)/);
+  assert.match(core, /id: "chatgpt-desktop"\.to_string\(\),\s*name: product_name\.to_string\(\)/);
+  assert.match(core, /ChatGptDesktopProductGeneration::Current => "ChatGPT Desktop"/);
+  assert.match(core, /ChatGptDesktopProductGeneration::Legacy => "Codex Desktop"/);
+  assert.match(core, /CHATGPT_DESKTOP_PROGRESS_EVENT: &str = "chatgpt-desktop:\/\/progress"/);
+  assert.match(core, /CHATGPT_DESKTOP_SETTINGS_STATE_KEY: &str = "chatgpt_desktop\.settings"/);
+  assert.match(core, /if migrate_legacy \|\| settings_changed \{[\s\S]*save_settings\(&settings\)\?/);
+  assert.match(core, /if migrate_legacy \{[\s\S]*delete_state_json\(LEGACY_CODEX_CLIENT_SETTINGS_STATE_KEY\)/);
+  assert.match(core, /if save_marker\(&marker\)\.is_ok\(\) \{[\s\S]*delete_state_json\(LEGACY_CODEX_CLIENT_MARKER_STATE_KEY\)/);
+  assert.match(storage, /CREATE TABLE IF NOT EXISTS chatgpt_desktop_state/);
+  assert.match(storage, /SELECT install_kind, generated_at, state_json FROM codex_client_state/);
+
+  for (const source of [profiles, setupWizard, api]) {
+    assert.match(source, /"chatgpt-desktop"/);
+    assert.match(source, /"codex-app"/);
+    assert.match(source, /"codex-client"/);
+  }
+  assert.match(refreshCache, /key === "chatgptDesktop"/);
+  assert.match(refreshCache, /legacyKey = `\$\{STORAGE_PREFIX\}codexClient`/);
+});
+
+test("Claude Desktop uses generic desktop-client copy and the Codex CLI boundary remains intact", () => {
+  const route = read("src/routes/ClaudeDesktop.svelte");
+  const api = read("src/lib/api.ts");
+  const types = read("src/types.ts");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const toolLaunch = read("src-tauri/src/core/tool_launch.rs");
+  const dictionaries = [
+    read("src/lib/locales/zh-CN.ts"),
+    read("src/lib/locales/zh-TW.ts"),
+    read("src/lib/locales/en-US.ts")
+  ];
+
+  assert.doesNotMatch(route, /chatgptDesktop\./);
+  assert.match(route, /desktopClient\.planTitle/);
+  assert.match(route, /desktopClient\.currentVersion/);
+  for (const dictionary of dictionaries) {
+    assert.match(dictionary, /"desktopClient\.planTitle"/);
+    assert.match(dictionary, /"desktopClient\.currentVersion"/);
+  }
+
+  assert.match(types, /export type CodexAuthMethod/);
+  assert.match(api, /codexAuth:/);
+  assert.match(toolLaunch, /"codex" \| "codex-cli"/);
+  assert.match(core, /home_dir\.join\("\.codex"\)/);
+  assert.match(core, /CODEX_EXE_NAME: &str = "Codex\.exe"/);
+  assert.match(core, /PACKAGE_IDENTITY: &str = "OpenAI\.Codex"/);
+});
+
 test("Windows PowerShell callers use the shared system-path resolver", () => {
   const patch = read("src-tauri/src/core/claude_desktop_patch.rs");
   const platform = read("src-tauri/src/core/platform/mod.rs");
@@ -490,7 +556,7 @@ test("Claude Desktop localization progress keys are translated with fallbacks", 
 
 test("desktop client launch buttons always show launch copy", () => {
   const claudeRoute = read("src/routes/ClaudeDesktop.svelte");
-  const codexRoute = read("src/routes/CodexClient.svelte");
+  const codexRoute = read("src/routes/ChatGPTDesktop.svelte");
 
   const claudeTopActions = claudeRoute.slice(
     claudeRoute.indexOf("<div class={topActionsRecipe()}>"),
@@ -507,8 +573,8 @@ test("desktop client launch buttons always show launch copy", () => {
   assert.doesNotMatch(claudeTopActions, /toolLaunch\.restart|toolLaunch\.restarting|toolLaunch\.restartTitle/);
   assert.match(codexTopActions, /busyAction === "launch"/);
   assert.match(codexTopActions, /\$t\("toolLaunch\.starting"\)/);
-  assert.match(codexTopActions, /\$t\("codexClient\.launch"\)/);
-  assert.doesNotMatch(codexTopActions, /codexClient\.restart/);
+  assert.match(codexTopActions, /\$t\("chatgptDesktop\.launch"\)/);
+  assert.doesNotMatch(codexTopActions, /chatgptDesktop\.restart/);
 });
 
 test("Claude Desktop localized launch returns without blocking the UI", () => {
@@ -527,12 +593,12 @@ test("Claude Desktop localized launch returns without blocking the UI", () => {
 });
 
 test("desktop client launch actions do not trigger immediate refresh", () => {
-  const codexStore = read("src/lib/codexClientStore.ts");
+  const codexStore = read("src/lib/chatgptDesktopStore.ts");
   const claudeStore = read("src/lib/claudeDesktopStore.ts");
   const dashboard = read("src/routes/Dashboard.svelte");
 
   const codexLaunch = codexStore.slice(
-    codexStore.indexOf("export async function launchManagedCodexClient"),
+    codexStore.indexOf("export async function launchManagedChatGPTDesktop"),
     codexStore.length
   );
   const claudeDashboardLaunch = claudeStore.slice(
@@ -544,7 +610,7 @@ test("desktop client launch actions do not trigger immediate refresh", () => {
     dashboard.indexOf("async function openToolLaunch")
   );
 
-  assert.doesNotMatch(codexLaunch, /refreshCodexClient|setTimeout\(resolve,\s*2500\)/);
+  assert.doesNotMatch(codexLaunch, /refreshChatGPTDesktop|setTimeout\(resolve,\s*2500\)/);
   assert.doesNotMatch(claudeDashboardLaunch, /refreshClaudeDesktop|setTimeout\(resolve,\s*2500\)/);
   assert.doesNotMatch(dashboardLaunch, /onRefresh\(\{ quiet: true, scheduleFollowup: false \}\)/);
   assert.match(dashboardLaunch, /if \(launchingToolId\) \{\s*return;\s*\}/);
@@ -557,8 +623,8 @@ test("dashboard direct desktop launches show and lock the launch button", () => 
     dashboard.indexOf("async function openToolLaunch")
   );
 
-  assert.doesNotMatch(dashboard, /codexClientView/);
-  assert.doesNotMatch(dashboard, /codexClientLaunching|isCodexClientLaunching/);
+  assert.doesNotMatch(dashboard, /chatgptDesktopView/);
+  assert.doesNotMatch(dashboard, /chatgptDesktopLaunching|isChatGPTDesktopLaunching/);
   assert.match(dashboard, /let directLaunchToolIds = new Set<string>\(\)/);
   assert.match(dashboard, /function isDirectLaunchingTool\(tool: ToolStatus, activeDirectLaunchToolIds: Set<string>\)/);
   assert.match(dashboard, /return activeDirectLaunchToolIds\.has\(tool\.id\)/);
@@ -577,8 +643,8 @@ test("dashboard direct desktop launches show and lock the launch button", () => 
     /\{isLaunchingTool\(tool, launchingToolId, directLaunchToolIds\) \? \$t\("toolLaunch\.starting"\) : \$t\("toolLaunch\.action"\)\}/
   );
   assert.match(dashboardLaunch, /directLaunchToolIds = new Set\(directLaunchToolIds\)\.add\(tool\.id\)/);
-  assert.match(dashboardLaunch, /const launchPromise = tool\.id === "codex-app"[\s\S]*launchManagedCodexClient\(\)[\s\S]*launchClaudeDesktopFromDashboard\(\)/);
-  assert.doesNotMatch(dashboardLaunch, /await launchManagedCodexClient\(\)|await launchClaudeDesktopFromDashboard\(\)/);
+  assert.match(dashboardLaunch, /const launchPromise = tool\.id === "chatgpt-desktop"[\s\S]*launchManagedChatGPTDesktop\(\)[\s\S]*launchClaudeDesktopFromDashboard\(\)/);
+  assert.doesNotMatch(dashboardLaunch, /await launchManagedChatGPTDesktop\(\)|await launchClaudeDesktopFromDashboard\(\)/);
   assert.match(dashboardLaunch, /await launchPromise/);
   assert.match(dashboard, /const directLaunchFeedbackMs = \d+/);
   assert.match(dashboardLaunch, /await tick\(\)/);
@@ -589,7 +655,7 @@ test("dashboard direct desktop launches show and lock the launch button", () => 
   assert.match(dashboard, /if \(isManagedDesktopClient\(tool\)\) \{[\s\S]*await launchDesktopClient\(tool\);[\s\S]*return;[\s\S]*\}/);
   assert.match(
     dashboard,
-    /function isManagedDesktopClient\(tool: ToolStatus\) \{[\s\S]*tool\.id === "codex-app" \|\| tool\.id === "claude-desktop"/
+    /function isManagedDesktopClient\(tool: ToolStatus\) \{[\s\S]*tool\.id === "chatgpt-desktop" \|\| tool\.id === "claude-desktop"/
   );
 });
 test("Claude Desktop external terminal localization starts the injector", () => {
@@ -663,7 +729,7 @@ test("Claude Desktop isolates Windows App and EXE tab operation state", () => {
   assert.match(route, /updatePlan\s*=\s*kindView\.updatePlan/);
   assert.match(route, /activePlan\s*=\s*installed \? updatePlan : installPlan/);
   assert.match(route, /activePlanAvailable\s*=\s*Boolean\(activePlan\?\.canInstall\)/);
-  assert.match(route, /\$t\("codexClient\.planTitle"\)/);
+  assert.match(route, /\$t\("desktopClient\.planTitle"\)/);
   assert.match(route, /activePlanDetails\s*=\s*kindView\.plan/);
   assert.match(route, /\{activePlanDetails\.downloadUrl\}/);
   assert.match(route, /\{activePlanDetails\.sha256\}/);

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppIcon from "../components/AppIcon.svelte";
-  import Profiles from "./Profiles.svelte";
   import { loadGatewayRequestLog } from "../lib/api";
   import { t } from "../lib/i18n";
   import { css, cx } from "../../styled-system/css";
@@ -25,25 +24,18 @@
     topStripRecipe
   } from "../../styled-system/recipes";
   import type {
-    DetectionSnapshot,
     GatewayRequestLogEntry,
     GatewayStatus,
-    PrivacyFilterMode,
-    ProfileSummary,
-    WizardPrefill
+    PrivacyFilterMode
   } from "../types";
 
   type GatewayTone = "online" | "offline";
 
-  export let summary: ProfileSummary | null = null;
-  export let snapshot: DetectionSnapshot | null = null;
   export let gatewayStatus: GatewayStatus | null = null;
   export let gatewayBusy = false;
   export let onGatewayAction: (action: "start" | "stop" | "restart") => void | Promise<void> = () => {};
   export let onPrivacyFilterChange: (mode: PrivacyFilterMode) => void | Promise<void> = () => {};
   export let onCopyGatewayUrl: () => void | Promise<void> = () => {};
-  export let onProfileSwitched: () => void | Promise<void> = () => {};
-  export let onCreateProfile: (prefill: WizardPrefill) => void = () => {};
 
   const privacyModes: Array<{ value: PrivacyFilterMode; labelKey: Parameters<typeof $t>[0] }> = [
     { value: "off", labelKey: "gateway.privacy.off" },
@@ -229,12 +221,4 @@
     {/if}
   </section>
 
-  <Profiles
-    {summary}
-    {snapshot}
-    modeFilter="gateway"
-    embedded
-    onProfileSwitched={onProfileSwitched}
-    onCreateProfile={(prefill) => onCreateProfile({ ...prefill, mode: "gateway" })}
-  />
 </div>

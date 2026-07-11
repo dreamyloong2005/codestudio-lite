@@ -60,6 +60,7 @@
     profileIconEditorRecipe,
     profileInlineNoticeRecipe,
     profileModeLayoutRecipe,
+    profileModeSwitcherRecipe,
     profileSortableRowRecipe,
     profileToolSectionRecipe,
     profileToolSwitcherRecipe,
@@ -105,6 +106,11 @@
   export let embedded = false;
   export let onProfileSwitched: () => void | Promise<void> = () => {};
   export let onCreateProfile: (prefill?: WizardPrefill) => void = () => {};
+
+  const profileViewOptions: Array<{ value: ProviderApplyMode; labelKey: TranslationKey }> = [
+    { value: "config", labelKey: "profiles.view.config" },
+    { value: "gateway", labelKey: "profiles.view.gateway" }
+  ];
 
   type ProfileGroup = {
     id: string;
@@ -381,7 +387,6 @@
   $: selectedProfileGroup = profileToolGroups.find((group) => group.id === selectedToolId) ?? null;
   $: syncSortableProfiles(selectedProfileGroup, normalizedModeFilter);
   $: displayedProfiles = sortableProfiles;
-  $: routeTitleKey = (normalizedModeFilter === "gateway" ? "gateway.profileTitle" : "profiles.title") as TranslationKey;
   $: visibleProfileCount = selectedProfileGroup?.profiles.length ?? 0;
   $: selectedModePreview =
     applyPreview?.modePreviews.find((mode) => mode.mode === selectedApplyMode) ?? null;
@@ -1911,7 +1916,7 @@
 
   function canonicalProfileToolId(toolId: string) {
     const normalized = toolId.trim().toLowerCase();
-    if (["codex-app", "codex-client", "codex-desktop", "codex-cli", "codex-vscode", "codex-code-vscode", "codex-vs-code"].includes(normalized)) {
+    if (["chatgpt-desktop", "codex-app", "codex-client", "codex-desktop", "codex-cli", "codex-vscode", "codex-code-vscode", "codex-vs-code"].includes(normalized)) {
       return "codex";
     }
     if (["claude-app", "claude-client"].includes(normalized)) {
@@ -1963,7 +1968,11 @@
       return activeProfiles[app];
     }
     if (app === "codex") {
-      return activeProfiles["codex-app"] ?? null;
+      return activeProfiles["chatgpt-desktop"]
+        ?? activeProfiles["codex-app"]
+        ?? activeProfiles["codex-client"]
+        ?? activeProfiles["codex-desktop"]
+        ?? null;
     }
     return null;
   }
@@ -2042,9 +2051,21 @@
   {#if !embedded}
     <section class={topStripRecipe({ compact: true })}>
       <div>
-        <h1>{$t(routeTitleKey)}</h1>
+        <h1>{$t("profiles.title")}</h1>
       </div>
       <div class={topActionsRecipe()}>
+        <div class={profileModeSwitcherRecipe()} role="group" aria-label={$t("profiles.viewSwitcherLabel")}>
+          {#each profileViewOptions as option}
+            <button
+              type="button"
+              data-selected={normalizedModeFilter === option.value}
+              aria-pressed={normalizedModeFilter === option.value}
+              on:click={() => (modeFilter = option.value)}
+            >
+              {$t(option.labelKey)}
+            </button>
+          {/each}
+        </div>
         <button
           class={actionButtonRecipe()}
           title={$t("common.createConfig")}

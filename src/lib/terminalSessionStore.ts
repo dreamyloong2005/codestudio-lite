@@ -34,6 +34,12 @@ let activeSessionId: string | null = null;
 let unlistenOutput: (() => void) | null = null;
 let outputHandler: ((data: string) => void) | null = null;
 let pendingOutput: string[] = [];
+let pendingResize: { cols: number; rows: number } | null = null;
+let resizeFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let lastResizeKey = "";
+const TERMINAL_RESIZE_FLUSH_DELAY_MS = 80;
+const INITIAL_TERMINAL_COLS = 100;
+const INITIAL_TERMINAL_ROWS = 24;
 
 function handleOutput(output: InstallTerminalOutput): void {
   if (!activeSessionId || output.sessionId !== activeSessionId) return;
@@ -59,6 +65,37 @@ function flushPending(): void {
   pendingOutput = [];
 }
 
+function clearPendingResize(): void {
+  if (resizeFlushTimer) {
+    clearTimeout(resizeFlushTimer);
+    resizeFlushTimer = null;
+  }
+  pendingResize = null;
+  lastResizeKey = "";
+}
+
+function flushResize(): void {
+  resizeFlushTimer = null;
+  if (!activeSessionId || !pendingResize) return;
+  const { cols, rows } = pendingResize;
+  const resizeKey = `${activeSessionId}:${cols}x${rows}`;
+  pendingResize = null;
+  if (resizeKey === lastResizeKey) return;
+  lastResizeKey = resizeKey;
+  void resizeInstallTerminal({ sessionId: activeSessionId, cols, rows }).catch(() => {});
+}
+
+function schedulePendingResize(): void {
+  if (!activeSessionId || !pendingResize) return;
+  if (resizeFlushTimer) clearTimeout(resizeFlushTimer);
+  resizeFlushTimer = setTimeout(flushResize, TERMINAL_RESIZE_FLUSH_DELAY_MS);
+}
+
+function normalizedResizeDimension(value: number, minimum: number): number {
+  if (!Number.isFinite(value)) return minimum;
+  return Math.max(minimum, Math.floor(value));
+}
+
 export function setOutputHandler(handler: ((data: string) => void) | null): void {
   outputHandler = handler;
   if (handler) flushPending();
@@ -72,8 +109,10 @@ export async function startEmbeddedSession(
     // Kill the old session without blocking — don't await the IPC.
     const oldId = activeSessionId;
     activeSessionId = null;
+    clearPendingResize();
     void stopInstallTerminal({ sessionId: oldId }).catch(() => {});
   }
+  clearPendingResize();
   // Set the store state immediately so the terminal panel can render a
   // "connecting" state before the backend PTY is ready.
   terminalSession.set({
@@ -96,14 +135,13 @@ export async function startEmbeddedSession(
     const result = await startInstallTerminal({
       ...request,
       keepOpen: true,
-      cols: 100,
-      rows: 24
+      cols: INITIAL_TERMINAL_COLS,
+      rows: INITIAL_TERMINAL_ROWS
     });
     activeSessionId = result.sessionId;
+    lastResizeKey = `${result.sessionId}:${INITIAL_TERMINAL_COLS}x${INITIAL_TERMINAL_ROWS}`;
     terminalSession.update((state) => ({ ...state, sessionId: result.sessionId }));
-    // Resize is non-critical — fire it without blocking so the terminal
-    // panel can start rendering output immediately.
-    void resizeInstallTerminal({ sessionId: result.sessionId, cols: 100, rows: 24 }).catch(() => {});
+    schedulePendingResize();
     return result.sessionId;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -140,14 +178,18 @@ export function writeSessionInput(data: string): void {
 }
 
 export function resizeSession(cols: number, rows: number): void {
-  if (!activeSessionId) return;
-  void resizeInstallTerminal({ sessionId: activeSessionId, cols, rows }).catch(() => {});
+  pendingResize = {
+    cols: normalizedResizeDimension(cols, 20),
+    rows: normalizedResizeDimension(rows, 10)
+  };
+  schedulePendingResize();
 }
 
 export function stopEmbeddedSession(): void {
   if (!activeSessionId) return;
   const sessionId = activeSessionId;
   activeSessionId = null;
+  clearPendingResize();
   // Fire-and-forget: don't block the UI on the backend kill IPC.
   void stopInstallTerminal({ sessionId }).catch(() => {});
   terminalSession.update((state) => ({ ...state, running: false }));
@@ -155,6 +197,7 @@ export function stopEmbeddedSession(): void {
 
 export function clearTerminalSession(): void {
   if (inputFlushTimer) { clearTimeout(inputFlushTimer); inputFlushTimer = null; }
+  clearPendingResize();
   inputBuffer = "";
   activeSessionId = null;
   outputHandler = null;
@@ -168,6 +211,7 @@ export function disposeTerminalSession(): void {
     unlistenOutput = null;
   }
   if (inputFlushTimer) { clearTimeout(inputFlushTimer); inputFlushTimer = null; }
+  clearPendingResize();
   inputBuffer = "";
   activeSessionId = null;
   outputHandler = null;

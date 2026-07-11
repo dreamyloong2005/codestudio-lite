@@ -2,6 +2,7 @@ import { derived, writable } from "svelte/store";
 import { enUS } from "./locales/en-US";
 import { zhCN, type TranslationKey } from "./locales/zh-CN";
 import { zhTW } from "./locales/zh-TW";
+import { brandChatGPTDesktopText, chatgptDesktopGeneration } from "./chatgptDesktopBranding";
 import type { Locale } from "../types";
 
 const fallbackLocale: Locale = "en-US";
@@ -45,10 +46,13 @@ function interpolate(template: string, values?: Record<string, string | number>)
 
 export const locale = writable<Locale>(initialLocale());
 
-export const t = derived(locale, ($locale) => {
+export const t = derived([locale, chatgptDesktopGeneration], ([$locale, $generation]) => {
   const dictionary = dictionaries[$locale] ?? dictionaries[fallbackLocale];
   return (key: TranslationKey, values?: Record<string, string | number>) =>
-    interpolate(dictionary[key] ?? dictionaries[fallbackLocale][key] ?? key, values);
+    brandChatGPTDesktopText(
+      interpolate(dictionary[key] ?? dictionaries[fallbackLocale][key] ?? key, values),
+      $generation
+    );
 });
 
 export function setLocale(nextLocale: Locale) {

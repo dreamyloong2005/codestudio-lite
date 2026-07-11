@@ -14,18 +14,18 @@ import type {
   ClaudeDesktopPageState,
   ClearEnvironmentVariablesRequest,
   ClearEnvironmentVariablesResult,
-  CodexClientInstallKinds,
-  CodexClientCapability,
-  CodexClientInstallRequest,
-  CodexClientOperationResult,
-  CodexClientProgress,
-  CodexClientSettings,
-  CodexClientStageReport,
-  CodexClientState,
-  CodexClientStateCache,
-  CodexClientUninstallRequest,
-  PlanCodexClientUpdateRequest,
-  StageCodexClientUpdateRequest,
+  ChatGPTDesktopInstallKinds,
+  DesktopClientCapability,
+  ChatGPTDesktopInstallRequest,
+  ChatGPTDesktopOperationResult,
+  ChatGPTDesktopProgress,
+  ChatGPTDesktopSettings,
+  ChatGPTDesktopStageReport,
+  ChatGPTDesktopState,
+  ChatGPTDesktopStateCache,
+  ChatGPTDesktopUninstallRequest,
+  PlanChatGPTDesktopUpdateRequest,
+  StageChatGPTDesktopUpdateRequest,
   DeleteProfileDraftRequest,
   DetectionSnapshot,
   DoctorReport,
@@ -66,7 +66,7 @@ import type {
   ToolInstallResult,
   ToolUninstallRequest,
   ToolLaunchPlan,
-  UpdateCodexClientSettingsRequest,
+  UpdateChatGPTDesktopSettingsRequest,
   ToolStatus,
   UpdateAppSettingsRequest,
   UpdateGatewaySettingsRequest,
@@ -79,7 +79,7 @@ import type {
 } from "../types";
 
 const isTauri = () => Boolean(window.__TAURI_INTERNALS__);
-const codexClientProgressListeners = new Set<(progress: CodexClientProgress) => void>();
+const chatgptDesktopProgressListeners = new Set<(progress: ChatGPTDesktopProgress) => void>();
 const toolInstallProgressListeners = new Set<(progress: ToolInstallProgress) => void>();
 const claudeDesktopLocalizationProgressListeners = new Set<(progress: ClaudeDesktopLocalizationProgress) => void>();
 const installTerminalOutputListeners = new Set<(output: InstallTerminalOutput) => void>();
@@ -153,19 +153,19 @@ export async function detectClaudeInstallKinds(): Promise<ClaudeDesktopInstallKi
   };
 }
 /// Local MSIX-runtime capability check for the Claude Desktop page, mirroring
-/// the Codex client capability panel.
-export async function detectClaudeCapabilities(): Promise<CodexClientCapability[]> {
+/// the ChatGPT desktop capability panel.
+export async function detectClaudeCapabilities(): Promise<DesktopClientCapability[]> {
   if (isTauri()) {
     return invoke("detect_claude_capabilities");
   }
   return [];
 }
 
-/// Per-kind install detection for the Codex desktop client page tabs (MSIX
+/// Per-kind install detection for the ChatGPT desktop client page tabs (MSIX
 /// vs portable). Resolves both kinds independently.
-export async function detectCodexInstallKinds(): Promise<CodexClientInstallKinds> {
+export async function detectChatGPTDesktopInstallKinds(): Promise<ChatGPTDesktopInstallKinds> {
   if (isTauri()) {
-    return invoke("detect_codex_install_kinds");
+    return invoke("detect_chatgpt_desktop_install_kinds");
   }
   return {
     msix: { installed: false, version: null, path: null },
@@ -837,82 +837,83 @@ export async function restoreBackup(request: RestoreBackupRequest): Promise<Rest
   };
 }
 
-export async function inspectCodexClient(): Promise<CodexClientState> {
+export async function inspectChatGPTDesktop(): Promise<ChatGPTDesktopState> {
   if (isTauri()) {
-    return invoke("inspect_codex_client");
+    return invoke("inspect_chatgpt_desktop");
   }
-  return mockCodexClientState(false);
+  return mockChatGPTDesktopState(false);
 }
 
-export async function loadCachedCodexClientState(): Promise<CodexClientState | null> {
+export async function loadCachedChatGPTDesktopState(): Promise<ChatGPTDesktopState | null> {
   if (isTauri()) {
-    return invoke("load_cached_codex_client_state");
+    return invoke("load_cached_chatgpt_desktop_state");
   }
   return null;
 }
 
-export async function loadCachedCodexClientStates(): Promise<CodexClientStateCache> {
+export async function loadCachedChatGPTDesktopStates(): Promise<ChatGPTDesktopStateCache> {
   if (isTauri()) {
-    return invoke("load_cached_codex_client_states");
+    return invoke("load_cached_chatgpt_desktop_states");
   }
   return {};
 }
 
-export async function planCodexClientUpdate(
-  request: PlanCodexClientUpdateRequest = {}
-): Promise<CodexClientState> {
+export async function planChatGPTDesktopUpdate(
+  request: PlanChatGPTDesktopUpdateRequest = {}
+): Promise<ChatGPTDesktopState> {
   if (isTauri()) {
-    return invoke("plan_codex_client_update", { request });
+    return invoke("plan_chatgpt_desktop_update", { request });
   }
-  return mockCodexClientState(true, undefined, request.installKind);
+  return mockChatGPTDesktopState(true, undefined, request.installKind);
 }
 
-export async function stageCodexClientUpdate(
-  request: StageCodexClientUpdateRequest
-): Promise<CodexClientStageReport> {
+export async function stageChatGPTDesktopUpdate(
+  request: StageChatGPTDesktopUpdateRequest
+): Promise<ChatGPTDesktopStageReport> {
   if (isTauri()) {
-    return invoke("stage_codex_client_update", { request });
+    return invoke("stage_chatgpt_desktop_update", { request });
   }
-  const installKind = mockCodexClientInstallKind(request.installKind);
-  await simulateCodexClientProgress([
-    { installKind, phase: "preparing", message: "codexClient.progressStageReading", downloaded: null, total: null, percent: null, step: 1, stepTotal: 4 },
-    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 46000000, total: 552187367, percent: 8.3, step: 2, stepTotal: 4 },
-    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 178000000, total: 552187367, percent: 32.2, step: 2, stepTotal: 4 },
-    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 394000000, total: 552187367, percent: 71.3, step: 2, stepTotal: 4 },
-    { installKind, phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 4 },
-    { installKind, phase: "done", message: "codexClient.progressStageDone", downloaded: 552187367, total: 552187367, percent: 100, step: 4, stepTotal: 4 }
+  const installKind = mockChatGPTDesktopInstallKind(request.installKind);
+  await simulateChatGPTDesktopProgress([
+    { installKind, phase: "preparing", message: "chatgptDesktop.progressStageReading", downloaded: null, total: null, percent: null, step: 1, stepTotal: 4 },
+    { installKind, phase: "downloading", message: "chatgptDesktop.progressDownloading", downloaded: 46000000, total: 552187367, percent: 8.3, step: 2, stepTotal: 4 },
+    { installKind, phase: "downloading", message: "chatgptDesktop.progressDownloading", downloaded: 178000000, total: 552187367, percent: 32.2, step: 2, stepTotal: 4 },
+    { installKind, phase: "downloading", message: "chatgptDesktop.progressDownloading", downloaded: 394000000, total: 552187367, percent: 71.3, step: 2, stepTotal: 4 },
+    { installKind, phase: "verifying", message: "chatgptDesktop.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 4 },
+    { installKind, phase: "done", message: "chatgptDesktop.progressStageDone", downloaded: 552187367, total: 552187367, percent: 100, step: 4, stepTotal: 4 }
   ]);
-  return mockCodexClientStageReport(installKind);
+  return mockChatGPTDesktopStageReport(installKind);
 }
 
-export async function installCodexClient(
-  request: CodexClientInstallRequest
-): Promise<CodexClientOperationResult> {
+export async function installChatGPTDesktop(
+  request: ChatGPTDesktopInstallRequest
+): Promise<ChatGPTDesktopOperationResult> {
   if (isTauri()) {
-    return invoke("install_codex_client", { request });
+    return invoke("install_chatgpt_desktop", { request });
   }
   if (!request.confirm) {
     throw new Error("explicit confirmation is required");
   }
-  const installKind = mockCodexClientInstallKind(request.installKind);
-  await simulateCodexClientProgress([
-    { installKind, phase: "preparing", message: "codexClient.progressInstallConfirming", downloaded: null, total: null, percent: null, step: 1, stepTotal: 7 },
-    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 220000000, total: 552187367, percent: 39.8, step: 2, stepTotal: 7 },
-    { installKind, phase: "downloading", message: "codexClient.progressDownloading", downloaded: 552187367, total: 552187367, percent: 100, step: 2, stepTotal: 7 },
-    { installKind, phase: "verifying", message: "codexClient.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 7 },
-    { installKind, phase: "extracting", message: "codexClient.progressExtractingMsix", downloaded: 38, total: 120, percent: 31.7, step: 4, stepTotal: 7 },
-    { installKind, phase: "copying", message: "codexClient.progressCopyingPortable", downloaded: null, total: null, percent: null, step: 5, stepTotal: 7 },
-    { installKind, phase: "writing", message: "codexClient.progressWritingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
-    { installKind, phase: "finalizing", message: "codexClient.progressFinalizingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
-    { installKind, phase: "done", message: "codexClient.progressInstallDone", downloaded: 1, total: 1, percent: 100, step: 7, stepTotal: 7 }
+  const installKind = mockChatGPTDesktopInstallKind(request.installKind);
+  await simulateChatGPTDesktopProgress([
+    { installKind, phase: "preparing", message: "chatgptDesktop.progressInstallConfirming", downloaded: null, total: null, percent: null, step: 1, stepTotal: 7 },
+    { installKind, phase: "downloading", message: "chatgptDesktop.progressDownloading", downloaded: 220000000, total: 552187367, percent: 39.8, step: 2, stepTotal: 7 },
+    { installKind, phase: "downloading", message: "chatgptDesktop.progressDownloading", downloaded: 552187367, total: 552187367, percent: 100, step: 2, stepTotal: 7 },
+    { installKind, phase: "verifying", message: "chatgptDesktop.progressVerifying", downloaded: null, total: null, percent: null, step: 3, stepTotal: 7 },
+    { installKind, phase: "extracting", message: "chatgptDesktop.progressExtractingMsix", downloaded: 38, total: 120, percent: 31.7, step: 4, stepTotal: 7 },
+    { installKind, phase: "copying", message: "chatgptDesktop.progressCopyingPortable", downloaded: null, total: null, percent: null, step: 5, stepTotal: 7 },
+    { installKind, phase: "writing", message: "chatgptDesktop.progressWritingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
+    { installKind, phase: "finalizing", message: "chatgptDesktop.progressFinalizingInstall", downloaded: null, total: null, percent: null, step: 6, stepTotal: 7 },
+    { installKind, phase: "done", message: "chatgptDesktop.progressInstallDone", downloaded: 1, total: 1, percent: 100, step: 7, stepTotal: 7 }
   ]);
-  mockCodexClientInstalled = {
+  mockChatGPTDesktopInstalled = {
     path: installKind === "portable"
-      ? mockCodexClientSettings.installRoot
+      ? mockChatGPTDesktopSettings.installRoot
       : "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0",
     version: "26.609.4994.0",
     arch: "x64",
     source: installKind === "portable" ? "portable" : "msix",
+    generation: "current",
     packageFamilyName: installKind === "portable"
       ? null
       : "OpenAI.Codex_2p2nqsd0c76g0",
@@ -921,39 +922,39 @@ export async function installCodexClient(
   return {
     installKind,
     success: true,
-    action: mockCodexClientInstalled.source === "portable" ? "portable-fallback" : "msix-sideload",
-    message: `Codex is ready: ${mockCodexClientInstalled.version}`,
-    installed: mockCodexClientInstalled,
-    stage: mockCodexClientStageReport(installKind),
+    action: mockChatGPTDesktopInstalled.source === "portable" ? "portable-fallback" : "msix-sideload",
+    message: `ChatGPT Desktop is ready: ${mockChatGPTDesktopInstalled.version}`,
+    installed: mockChatGPTDesktopInstalled,
+    stage: mockChatGPTDesktopStageReport(installKind),
     notes: ["browser-dev mock: install path is simulated."]
   };
 }
 
-export async function uninstallCodexClient(
-  request: CodexClientUninstallRequest
-): Promise<CodexClientOperationResult> {
+export async function uninstallChatGPTDesktop(
+  request: ChatGPTDesktopUninstallRequest
+): Promise<ChatGPTDesktopOperationResult> {
   if (isTauri()) {
-    return invoke("uninstall_codex_client", { request });
+    return invoke("uninstall_chatgpt_desktop", { request });
   }
   if (!request.confirm) {
     throw new Error("explicit confirmation is required");
   }
-  const installKind = mockCodexClientInstallKind(request.installKind);
-  mockCodexClientInstalled = null;
+  const installKind = mockChatGPTDesktopInstallKind(request.installKind);
+  mockChatGPTDesktopInstalled = null;
   return {
     installKind,
     success: true,
     action: "remove-portable",
-    message: "Codex uninstalled.",
+    message: "ChatGPT Desktop uninstalled.",
     installed: null,
     stage: null,
     notes: [request.purgeUserData ? "Deleted ~/.codex user data." : "Kept ~/.codex user data."]
   };
 }
 
-export async function launchCodexClient(): Promise<void> {
+export async function launchChatGPTDesktop(): Promise<void> {
   if (isTauri()) {
-    return invoke("launch_codex_client");
+    return invoke("launch_chatgpt_desktop");
   }
 }
 
@@ -997,48 +998,48 @@ export async function openClaudeDesktopPath(kind: "staging"): Promise<void> {
   }
 }
 
-export async function updateCodexClientSettings(
-  request: UpdateCodexClientSettingsRequest
-): Promise<CodexClientSettings> {
+export async function updateChatGPTDesktopSettings(
+  request: UpdateChatGPTDesktopSettingsRequest
+): Promise<ChatGPTDesktopSettings> {
   if (isTauri()) {
-    return invoke("update_codex_client_settings", { request });
+    return invoke("update_chatgpt_desktop_settings", { request });
   }
-  mockCodexClientSettings = {
-    ...mockCodexClientSettings,
+  mockChatGPTDesktopSettings = {
+    ...mockChatGPTDesktopSettings,
     source: "mirror",
     customUrl: "",
-    autoCheck: request.autoCheck ?? mockCodexClientSettings.autoCheck,
-    askBefore: request.askBefore ?? mockCodexClientSettings.askBefore,
-    windowsInstallMode: request.windowsInstallMode ?? mockCodexClientSettings.windowsInstallMode,
-    installRoot: request.installRoot ?? mockCodexClientSettings.installRoot,
-    keepUserDataOnUninstall: request.keepUserDataOnUninstall ?? mockCodexClientSettings.keepUserDataOnUninstall,
-    syncHistoryOnLaunch: request.syncHistoryOnLaunch ?? mockCodexClientSettings.syncHistoryOnLaunch,
-    pluginMarketplaceUnlockOnLaunch: request.pluginMarketplaceUnlockOnLaunch ?? mockCodexClientSettings.pluginMarketplaceUnlockOnLaunch,
-    pluginAutoExpandOnLaunch: request.pluginAutoExpandOnLaunch ?? mockCodexClientSettings.pluginAutoExpandOnLaunch,
-    modelWhitelistUnlockOnLaunch: request.modelWhitelistUnlockOnLaunch ?? mockCodexClientSettings.modelWhitelistUnlockOnLaunch,
-    serviceTierControlsOnLaunch: request.serviceTierControlsOnLaunch ?? mockCodexClientSettings.serviceTierControlsOnLaunch,
-    officialRemotePluginCacheOnLaunch: request.officialRemotePluginCacheOnLaunch ?? mockCodexClientSettings.officialRemotePluginCacheOnLaunch,
-    computerUseGuardOnLaunch: request.computerUseGuardOnLaunch ?? mockCodexClientSettings.computerUseGuardOnLaunch,
+    autoCheck: request.autoCheck ?? mockChatGPTDesktopSettings.autoCheck,
+    askBefore: request.askBefore ?? mockChatGPTDesktopSettings.askBefore,
+    windowsInstallMode: request.windowsInstallMode ?? mockChatGPTDesktopSettings.windowsInstallMode,
+    installRoot: request.installRoot ?? mockChatGPTDesktopSettings.installRoot,
+    keepUserDataOnUninstall: request.keepUserDataOnUninstall ?? mockChatGPTDesktopSettings.keepUserDataOnUninstall,
+    syncHistoryOnLaunch: request.syncHistoryOnLaunch ?? mockChatGPTDesktopSettings.syncHistoryOnLaunch,
+    pluginMarketplaceUnlockOnLaunch: request.pluginMarketplaceUnlockOnLaunch ?? mockChatGPTDesktopSettings.pluginMarketplaceUnlockOnLaunch,
+    pluginAutoExpandOnLaunch: request.pluginAutoExpandOnLaunch ?? mockChatGPTDesktopSettings.pluginAutoExpandOnLaunch,
+    modelWhitelistUnlockOnLaunch: request.modelWhitelistUnlockOnLaunch ?? mockChatGPTDesktopSettings.modelWhitelistUnlockOnLaunch,
+    serviceTierControlsOnLaunch: request.serviceTierControlsOnLaunch ?? mockChatGPTDesktopSettings.serviceTierControlsOnLaunch,
+    officialRemotePluginCacheOnLaunch: request.officialRemotePluginCacheOnLaunch ?? mockChatGPTDesktopSettings.officialRemotePluginCacheOnLaunch,
+    computerUseGuardOnLaunch: request.computerUseGuardOnLaunch ?? mockChatGPTDesktopSettings.computerUseGuardOnLaunch,
     signedOnly: true
   };
-  return mockCodexClientSettings;
+  return mockChatGPTDesktopSettings;
 }
 
-export async function openCodexClientPath(kind: "install" | "staging" | "config"): Promise<void> {
+export async function openChatGPTDesktopPath(kind: "install" | "staging" | "config"): Promise<void> {
   if (isTauri()) {
-    return invoke("open_codex_client_path", { kind });
+    return invoke("open_chatgpt_desktop_path", { kind });
   }
 }
 
-export async function listenCodexClientProgress(
-  handler: (progress: CodexClientProgress) => void
+export async function listenChatGPTDesktopProgress(
+  handler: (progress: ChatGPTDesktopProgress) => void
 ): Promise<() => void> {
   if (isTauri()) {
     const { listen } = await import("@tauri-apps/api/event");
-    return listen<CodexClientProgress>("codex-client://progress", (event) => handler(event.payload));
+    return listen<ChatGPTDesktopProgress>("chatgpt-desktop://progress", (event) => handler(event.payload));
   }
-  codexClientProgressListeners.add(handler);
-  return () => codexClientProgressListeners.delete(handler);
+  chatgptDesktopProgressListeners.add(handler);
+  return () => chatgptDesktopProgressListeners.delete(handler);
 }
 
 export async function testProfileConnection(
@@ -1717,7 +1718,7 @@ let mockGatewayStartedAt: string | null = null;
 
 let mockGatewayPrivacyFilterMode: GatewayStatus["privacyFilterMode"] = "off";
 
-let mockCodexClientSettings: CodexClientSettings = {
+let mockChatGPTDesktopSettings: ChatGPTDesktopSettings = {
   source: "mirror",
   customUrl: "",
   autoCheck: true,
@@ -1735,7 +1736,7 @@ let mockCodexClientSettings: CodexClientSettings = {
   computerUseGuardOnLaunch: false
 };
 
-let mockCodexClientInstalled: CodexClientState["installed"] = null;
+let mockChatGPTDesktopInstalled: ChatGPTDesktopState["installed"] = null;
 
 let mockInstalledToolIds = new Set<string>(["codex", "claude", "gemini", "node", "git", "npm"]);
 let mockUpdatedToolIds = new Set<string>();
@@ -2274,7 +2275,7 @@ function mockToolUpdateFields(toolId: string): Pick<ToolStatus, "latestVersion" 
   if (!update) {
     return { latestVersion: null, updateAvailable: false, updateCommand: null };
   }
-  const installed = toolId === "codex-app" ? Boolean(mockCodexClientInstalled) : mockInstalledToolIds.has(toolId);
+  const installed = toolId === "chatgpt-desktop" ? Boolean(mockChatGPTDesktopInstalled) : mockInstalledToolIds.has(toolId);
   return {
     latestVersion: installed && !mockUpdatedToolIds.has(toolId) ? update.latestVersion : null,
     updateAvailable: installed && !mockUpdatedToolIds.has(toolId),
@@ -2317,7 +2318,8 @@ function readMockDetectionCache(): DetectionSnapshot | null {
       ...snapshot,
       source: "cached",
       platform: snapshot.platform ?? "windows",
-      envConflicts: snapshot.envConflicts ?? []
+      envConflicts: snapshot.envConflicts ?? [],
+      chatgptDesktopProductGeneration: snapshot.chatgptDesktopProductGeneration ?? "current"
     };
   } catch {
     return null;
@@ -2460,18 +2462,18 @@ function mockDetection(): DetectionSnapshot {
       ...mockToolUpdateFields("hermes")
     }),
     mockTool({
-      id: "codex-app",
-      name: "Codex",
+      id: "chatgpt-desktop",
+      name: "ChatGPT Desktop",
       command: "Codex.exe",
-      version: mockCodexClientInstalled?.version ?? null,
-      installState: mockCodexClientInstalled ? "installed" : "missing",
+      version: mockChatGPTDesktopInstalled?.version ?? null,
+      installState: mockChatGPTDesktopInstalled ? "installed" : "missing",
       configState: "configured",
       configPath: "~/.codex",
-      installCommand: "Install or update from the Codex page",
-      details: mockCodexClientInstalled
-        ? `${mockCodexClientInstalled.source} / ${mockCodexClientInstalled.path}`
-        : "Official Codex desktop was not detected",
-      ...mockToolUpdateFields("codex-app")
+      installCommand: "Install or update from the ChatGPT Desktop page",
+      details: mockChatGPTDesktopInstalled
+        ? `${mockChatGPTDesktopInstalled.source} / ${mockChatGPTDesktopInstalled.path}`
+        : "Official ChatGPT desktop was not detected",
+      ...mockToolUpdateFields("chatgpt-desktop")
     })
   ];
 
@@ -2554,11 +2556,12 @@ function mockDetection(): DetectionSnapshot {
     activeProfile: mockDefaultActiveProfileId(),
     activeProfileName: mockActiveProfileName(),
     codexAuth: mockCodexAuthStatus,
+    chatgptDesktopProductGeneration: mockChatGPTDesktopInstalled?.generation ?? "current",
     tools: mockVisibleTools(tools),
     system,
     envConflicts: mockClaudeEnvConflicts,
     claudeInstallKinds: { msix: { installed: true, version: "1.0.0", path: "C:/Program Files/WindowsApps/Claude" }, exe: { installed: false, version: null, path: null } },
-    codexInstallKinds: { msix: { installed: true, version: "0.0.0", path: "C:/Program Files/WindowsApps/Codex" }, portable: { installed: false, version: null, path: null } },
+    chatgptDesktopInstallKinds: { msix: { installed: true, version: "0.0.0", path: "C:/Program Files/WindowsApps/Codex" }, portable: { installed: false, version: null, path: null } },
     problems: [
       {
         id: "missing-pnpm",
@@ -2900,23 +2903,23 @@ function buildMockInstallSteps(
   return steps;
 }
 
-function mockCodexClientInstallKind(
+function mockChatGPTDesktopInstallKind(
   value?: "msix" | "portable" | null
 ): "msix" | "portable" {
   return value === "portable" ? "portable" : "msix";
 }
 
-function mockCodexClientState(
+function mockChatGPTDesktopState(
   includeNetwork: boolean,
-  installClass = mockCodexClientInstalled ? "managed" : "none",
+  installClass = mockChatGPTDesktopInstalled ? "managed" : "none",
   installKind?: "msix" | "portable" | null
-): CodexClientState {
-  const kind = mockCodexClientInstallKind(installKind);
+): ChatGPTDesktopState {
+  const kind = mockChatGPTDesktopInstallKind(installKind);
   const settings = {
-    ...mockCodexClientSettings,
+    ...mockChatGPTDesktopSettings,
     windowsInstallMode: kind
   };
-  const installed = mockCodexClientInstalled?.source === kind ? mockCodexClientInstalled : null;
+  const installed = mockChatGPTDesktopInstalled?.source === kind ? mockChatGPTDesktopInstalled : null;
   const release = {
     version: "26.609.4994.0",
     packageMoniker: "OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0",
@@ -2972,22 +2975,22 @@ function mockCodexClientState(
           ]
         }
       : null,
-    stagingDir: "~/.codestudio-lite/downloads/codex-client",
+    stagingDir: "~/.codestudio-lite/downloads/chatgpt-desktop",
     notes: [
-      "Codex management covers install, update, uninstall, launch, and mirror-source flows.",
-      "The Codex installer content is not modified; downloads are SHA-256 verified before installation."
+      "ChatGPT Desktop management covers install, update, uninstall, launch, and mirror-source flows.",
+      "The ChatGPT Desktop installer content is not modified; downloads are SHA-256 verified before installation."
     ],
     running: false
   };
 }
 
-function mockCodexClientStageReport(
+function mockChatGPTDesktopStageReport(
   installKind: "msix" | "portable" = "msix"
-): CodexClientStageReport {
+): ChatGPTDesktopStageReport {
   return {
     installKind,
     upToDate: false,
-    stagedPath: "~/.codestudio-lite/downloads/codex-client/OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0.Msix",
+    stagedPath: "~/.codestudio-lite/downloads/chatgpt-desktop/OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0.Msix",
     packageMoniker: "OpenAI.Codex_26.609.4994.0_x64__2p2nqsd0c76g0",
     downloadSize: 552187367,
     sha256: "547618a744149221078a27febdfff65c924b46ff85ab2fe1595180e128be8d85",
@@ -2997,9 +3000,9 @@ function mockCodexClientStageReport(
   };
 }
 
-async function simulateCodexClientProgress(steps: CodexClientProgress[]) {
+async function simulateChatGPTDesktopProgress(steps: ChatGPTDesktopProgress[]) {
   for (const step of steps) {
-    codexClientProgressListeners.forEach((listener) => listener(step));
+    chatgptDesktopProgressListeners.forEach((listener) => listener(step));
     await new Promise((resolve) => window.setTimeout(resolve, 160));
   }
 }
@@ -3157,7 +3160,12 @@ function setMockActiveProfileForMode(mode: ProviderApplyMode, profile: ProfileDr
 function mockProfileIsActive(profile: ProfileDraft): boolean {
   const app = canonicalProfileApp(profile.app);
   const activeProfiles = mockActiveProfilesByMode[profile.mode];
-  const activeProfileId = activeProfiles[app] ?? (app === "codex" ? activeProfiles["codex-app"] : undefined);
+  const activeProfileId = activeProfiles[app] ?? (app === "codex"
+    ? activeProfiles["chatgpt-desktop"]
+      ?? activeProfiles["codex-app"]
+      ?? activeProfiles["codex-client"]
+      ?? activeProfiles["codex-desktop"]
+    : undefined);
   return activeProfileId === profile.id;
 }
 
@@ -3165,7 +3173,12 @@ function mockDefaultActiveProfile(): ProfileDraft | null {
   const activeProfiles = mockActiveProfilesByMode.gateway;
   const preferredApps = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes"];
   for (const app of preferredApps) {
-    const profileId = activeProfiles[app] ?? (app === "codex" ? activeProfiles["codex-app"] : undefined);
+    const profileId = activeProfiles[app] ?? (app === "codex"
+      ? activeProfiles["chatgpt-desktop"]
+        ?? activeProfiles["codex-app"]
+        ?? activeProfiles["codex-client"]
+        ?? activeProfiles["codex-desktop"]
+      : undefined);
     const profile = mockAllProfiles().find((draft) => draft.id === profileId && canonicalProfileApp(draft.app) === app);
     if (profile) {
       return profile;
@@ -4796,6 +4809,7 @@ function canonicalProfileApp(app: string): string {
   if ([
     "codex",
     "codex-cli",
+    "chatgpt-desktop",
     "codex-app",
     "codex-client",
     "codex-desktop",
@@ -4822,7 +4836,7 @@ function canonicalProfileApp(app: string): string {
 
 function mockRestartMessageForProfile(profile: ProfileDraft, syncClaudeVsCode = false): string {
   const labels: Record<string, string> = {
-    codex: "Codex, Codex CLI, or Codex VS Code extension backend",
+    codex: "ChatGPT Desktop, Codex CLI, or Codex VS Code extension backend",
     "claude-desktop": "Claude Desktop",
     claude: syncClaudeVsCode ? "Claude Code or Claude VS Code extension backend" : "Claude Code",
     gemini: "Gemini CLI",

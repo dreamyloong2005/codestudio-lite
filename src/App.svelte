@@ -21,14 +21,15 @@
     ensureClaudeDesktopLoaded,
     setClaudeDesktopPendingLaunchAfterRestart
   } from "./lib/claudeDesktopStore";
-  import { ensureCodexClientLoaded } from "./lib/codexClientStore";
+  import { applyChatGPTDesktopBrandingFromDetection } from "./lib/chatgptDesktopBranding";
+  import { ensureChatGPTDesktopLoaded } from "./lib/chatgptDesktopStore";
   import { setLocale, t } from "./lib/i18n";
   import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./lib/refreshCache";
   import { applyTheme } from "./lib/theme";
   import { disposeTerminalSession } from "./lib/terminalSessionStore";
   import { appBrandMarkRecipe, appBrandRecipe, appErrorBannerRecipe, appNavButtonRecipe, appNavLabelRecipe, appNavRecipe, appNavUpdateDotRecipe, appRouteTransitionRecipe, appShellRecipe, appSidebarRecipe, appWorkspaceRecipe } from "../styled-system/recipes";
   import ClaudeDesktop from "./routes/ClaudeDesktop.svelte";
-  import CodexClient from "./routes/CodexClient.svelte";
+  import ChatGPTDesktop from "./routes/ChatGPTDesktop.svelte";
   import Dashboard from "./routes/Dashboard.svelte";
   import Gateway from "./routes/Gateway.svelte";
   import Profiles from "./routes/Profiles.svelte";
@@ -39,12 +40,13 @@
     DetectionSnapshot,
     GatewayStatus,
     PrivacyFilterMode,
+    ProviderApplyMode,
     ProfileSummary,
     ToolStatus,
     WizardPrefill
   } from "./types";
 
-  type Route = "dashboard" | "codexClient" | "claudeDesktop" | "wizard" | "profiles" | "gateway" | "settings" | "terminal";
+  type Route = "dashboard" | "chatgptDesktop" | "claudeDesktop" | "wizard" | "profiles" | "gateway" | "settings" | "terminal";
 
   let route: Route = "dashboard";
   let dashboardLoading = true;
@@ -55,6 +57,7 @@
   let error: string | null = null;
   let gatewayBusy = false;
   let wizardPrefill: WizardPrefill | null = null;
+  let profileManagementMode: ProviderApplyMode = "config";
   let backgroundDetectionTimers: number[] = [];
   let backgroundDetectionInterval: number | null = null;
   let dashboardRefreshRunId = 0;
@@ -71,7 +74,7 @@
 
   const navItems: Array<{ id: Route; labelKey: Parameters<typeof $t>[0]; icon: AppIconName }> = [
     { id: "dashboard", labelKey: "app.nav.dashboard", icon: "dashboard" },
-    { id: "codexClient", labelKey: "app.nav.codexClient", icon: "codexClient" },
+    { id: "chatgptDesktop", labelKey: "app.nav.chatgptDesktop", icon: "chatgptDesktop" },
     { id: "claudeDesktop", labelKey: "app.nav.claudeDesktop", icon: "claudeDesktop" },
     { id: "profiles", labelKey: "app.nav.profiles", icon: "profiles" },
     { id: "gateway", labelKey: "app.nav.gateway", icon: "gateway" },
@@ -81,11 +84,11 @@
   const routeExitTransition = { duration: 140 };
 
   $: desktopClientPagesAvailable = ["windows", "macos"].includes(snapshot?.platform ?? "");
-  $: visibleNavItems = navItems.filter((item) => !["codexClient", "claudeDesktop"].includes(item.id) || desktopClientPagesAvailable);
+  $: visibleNavItems = navItems.filter((item) => !["chatgptDesktop", "claudeDesktop"].includes(item.id) || desktopClientPagesAvailable);
   $: if (snapshot && pendingClaudeDesktopRouteRestore) {
     pendingClaudeDesktopRouteRestore = false;
   }
-  $: if (["codexClient", "claudeDesktop"].includes(route) && !desktopClientRouteAllowed(route)) {
+  $: if (["chatgptDesktop", "claudeDesktop"].includes(route) && !desktopClientRouteAllowed(route)) {
     route = "dashboard";
   }
   $: if (route !== lastRouteRefreshRoute) {
@@ -101,7 +104,7 @@
   }
 
   function selectRoute(nextRoute: Route) {
-    if (["codexClient", "claudeDesktop"].includes(nextRoute) && !desktopClientPagesAvailable) {
+    if (["chatgptDesktop", "claudeDesktop"].includes(nextRoute) && !desktopClientPagesAvailable) {
       route = "dashboard";
       return;
     }
@@ -120,8 +123,8 @@
   }
 
   function navigateToClient(toolId: string) {
-    if (toolId === "codex-app") {
-      selectRoute("codexClient");
+    if (toolId === "chatgpt-desktop") {
+      selectRoute("chatgptDesktop");
     } else if (toolId === "claude-desktop") {
       selectRoute("claudeDesktop");
     }
@@ -177,6 +180,7 @@
   }
 
   function applyDetectionSnapshot(nextSnapshot: DetectionSnapshot) {
+    applyChatGPTDesktopBrandingFromDetection(nextSnapshot);
     if (detectionSnapshotUiChanged(snapshot, nextSnapshot)) {
       snapshot = nextSnapshot;
     }
@@ -366,8 +370,8 @@
       } else {
         await refreshDashboard({ quiet: true, scheduleFollowup: true, showRefreshIndicator: true, waitForUpdates: true });
       }
-    } else if (currentRoute === "codexClient") {
-      await ensureCodexClientLoaded();
+    } else if (currentRoute === "chatgptDesktop") {
+      await ensureChatGPTDesktopLoaded();
     } else if (currentRoute === "claudeDesktop") {
       await ensureClaudeDesktopLoaded();
     } else if (currentRoute === "profiles" || currentRoute === "gateway") {
@@ -520,34 +524,31 @@
             onOpenTerminal={openTerminal}
             onNavigateToClient={navigateToClient}
           />
-        {:else if route === "codexClient"}
-          <CodexClient />
+        {:else if route === "chatgptDesktop"}
+          <ChatGPTDesktop />
         {:else if route === "claudeDesktop"}
           <ClaudeDesktop />
         {:else if route === "wizard"}
           <SetupWizard {snapshot} prefill={wizardPrefill} onProfileSaved={async (mode) => {
             await refreshAfterProfileChange();
-            route = mode === "gateway" ? "gateway" : "profiles";
+            profileManagementMode = mode;
+            route = "profiles";
           }} />
         {:else if route === "profiles"}
           <Profiles
             summary={profileSummary}
             {snapshot}
-            modeFilter="config"
+            bind:modeFilter={profileManagementMode}
             onProfileSwitched={refreshAfterProfileChange}
-            onCreateProfile={(prefill) => openWizard({ ...prefill, mode: "config" })}
+            onCreateProfile={(prefill) => openWizard(prefill ?? null)}
           />
         {:else if route === "gateway"}
           <Gateway
-            summary={profileSummary}
-            {snapshot}
             {gatewayStatus}
             {gatewayBusy}
             onGatewayAction={runGatewayAction}
             onPrivacyFilterChange={updateGatewayPrivacyFilter}
             onCopyGatewayUrl={copyGatewayUrl}
-            onProfileSwitched={refreshAfterProfileChange}
-            onCreateProfile={openWizard}
           />
         {:else if route === "terminal"}
           <TerminalPanel onBack={() => { route = "dashboard"; }} />

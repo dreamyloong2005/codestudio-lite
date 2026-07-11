@@ -115,9 +115,10 @@ test("ToolIcon owns icon tone and size styling through Panda", () => {
   assert.doesNotMatch(pandaConfig, /"[^"]*\.tool-icon/);
   assert.match(toolIcon, /codex:\s*\{[\s\S]*?background: "#111111"[\s\S]*?\}/);
   assert.match(toolIcon, /"&\[data-tool-icon-tone='codex'\]": \{[\s\S]*?background: "#111111"[\s\S]*?\}/);
-  assert.doesNotMatch(toolIcon, /"&\[data-tool-icon-tone='codex-app'\]": \{[\s\S]*?background: "#111111"/);
-  assert.match(toolIcon, /"codex-app": \{[\s\S]*?background: "#fff"[\s\S]*?\}/);
-  assert.doesNotMatch(toolIcon, /"codex-app": \{[\s\S]*?background: "#111111"/);
+  assert.match(toolIcon, /data-tool-icon-tone='chatgpt-desktop-current'\] img[\s\S]*?filter: "invert\(1\)"/);
+  assert.match(toolIcon, /"chatgpt-desktop-current": \{[\s\S]*?background: "#fff"[\s\S]*?\}/);
+  assert.match(toolIcon, /"chatgpt-desktop-legacy": \{[\s\S]*?background: "#fff"[\s\S]*?\}/);
+  assert.doesNotMatch(toolIcon, /"chatgpt-desktop-(?:current|legacy)": \{[\s\S]*?background: "#111111"/);
   assert.match(toolIcon, /vscode:\s*\{[\s\S]*?background: "#007ACC"/);
   assert.match(toolIcon, /"&\[data-tool-icon-tone='vscode'\] img": \{[\s\S]*?width: "24px"[\s\S]*?height: "24px"/);
   assert.match(toolIcon, /choice:\s*\{[\s\S]*?"&\[data-tool-icon-tone='vscode'\] img": \{[\s\S]*?width: "18px"[\s\S]*?height: "18px"/);
@@ -130,7 +131,7 @@ test("unowned legacy tool and profile globals are removed", () => {
     "src/App.svelte",
     "src/components/ToolStatusCard.svelte",
     "src/routes/Dashboard.svelte",
-    "src/routes/CodexClient.svelte",
+    "src/routes/ChatGPTDesktop.svelte",
     "src/routes/ClaudeDesktop.svelte",
     "src/routes/Profiles.svelte",
     "src/routes/SetupWizard.svelte",
@@ -357,8 +358,8 @@ test("Dashboard install and launch modals use Panda recipes", () => {
   assert.doesNotMatch(modalMarkup, /class="inline-success"/);
 });
 
-test("Codex Client main route surfaces use Panda recipes", () => {
-  const route = read("src/routes/CodexClient.svelte");
+test("ChatGPT Desktop main route surfaces use Panda recipes", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
   const mainMarkup = route.split("{#if confirmUninstall}")[0];
 
   assert.match(route, /import \{ css, cx \} from "\.\.\/\.\.\/styled-system\/css";/);
@@ -379,23 +380,23 @@ test("Codex Client main route surfaces use Panda recipes", () => {
   assert.doesNotMatch(mainMarkup, /class="install-kind-tabs"/);
   assert.doesNotMatch(mainMarkup, /class="panel-band"/);
   assert.doesNotMatch(mainMarkup, /class="section-heading"/);
-  assert.doesNotMatch(mainMarkup, /class="settings-list codex-client-settings/);
+  assert.doesNotMatch(mainMarkup, /class="settings-list chatgpt-desktop-settings/);
   assert.doesNotMatch(mainMarkup, /class="native-write-toggle/);
-  assert.doesNotMatch(mainMarkup, /class="gateway-metrics codex-client-metrics"/);
-  assert.doesNotMatch(mainMarkup, /class="gateway-actions codex-client-actions"/);
+  assert.doesNotMatch(mainMarkup, /class="gateway-metrics chatgpt-desktop-metrics"/);
+  assert.doesNotMatch(mainMarkup, /class="gateway-actions chatgpt-desktop-actions"/);
   assert.doesNotMatch(mainMarkup, /class="install-progress"/);
   assert.doesNotMatch(mainMarkup, /class="progress-copy"/);
   assert.doesNotMatch(mainMarkup, /class="progress-track/);
   assert.doesNotMatch(mainMarkup, /class="progress-fill"/);
   assert.doesNotMatch(mainMarkup, /class="progress-meta"/);
-  assert.doesNotMatch(mainMarkup, /class="preview-list codex-client-list"/);
+  assert.doesNotMatch(mainMarkup, /class="preview-list chatgpt-desktop-list"/);
   assert.doesNotMatch(mainMarkup, /class="doctor-list"/);
   assert.doesNotMatch(mainMarkup, /class="doctor-row"/);
   assert.doesNotMatch(mainMarkup, /class="empty-row"/);
 });
 
-test("Codex Client uninstall modal uses Panda recipes", () => {
-  const route = read("src/routes/CodexClient.svelte");
+test("ChatGPT Desktop uninstall modal uses Panda recipes", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
   const modalMarkup = route.split("{#if confirmUninstall}")[1];
   const styles = read("src/styles.css");
 
@@ -445,16 +446,16 @@ test("Claude Desktop route surfaces use Panda desktop client recipes", () => {
   assert.doesNotMatch(route, /class="install-kind-tabs"/);
   assert.doesNotMatch(route, /class="panel-band"/);
   assert.doesNotMatch(route, /class="section-heading"/);
-  assert.doesNotMatch(route, /class="settings-list codex-client-settings/);
+  assert.doesNotMatch(route, /class="settings-list chatgpt-desktop-settings/);
   assert.doesNotMatch(route, /class="native-write-toggle/);
-  assert.doesNotMatch(route, /class="gateway-metrics codex-client-metrics"/);
-  assert.doesNotMatch(route, /class="gateway-actions codex-client-actions"/);
+  assert.doesNotMatch(route, /class="gateway-metrics chatgpt-desktop-metrics"/);
+  assert.doesNotMatch(route, /class="gateway-actions chatgpt-desktop-actions"/);
   assert.doesNotMatch(route, /class="install-progress"/);
   assert.doesNotMatch(route, /class="progress-copy"/);
   assert.doesNotMatch(route, /class="progress-track/);
   assert.doesNotMatch(route, /class="progress-fill"/);
   assert.doesNotMatch(route, /class="progress-meta"/);
-  assert.doesNotMatch(route, /class="preview-list codex-client-list"/);
+  assert.doesNotMatch(route, /class="preview-list chatgpt-desktop-list"/);
   assert.doesNotMatch(route, /class="preview-list"/);
   assert.doesNotMatch(route, /class="doctor-list"/);
   assert.doesNotMatch(route, /class="doctor-row"/);
@@ -468,7 +469,7 @@ test("Claude Desktop route surfaces use Panda desktop client recipes", () => {
 
 test("desktop client recipes keep panel content comfortably inset and controls consistent", () => {
   const pandaConfig = read("panda.config.ts");
-  const codexRoute = read("src/routes/CodexClient.svelte");
+  const codexRoute = read("src/routes/ChatGPTDesktop.svelte");
   const claudeRoute = read("src/routes/ClaudeDesktop.svelte");
 
   const tabs = recipeBlock(pandaConfig, "desktopClientTabsRecipe", "desktopClientMetricsRecipe");
@@ -541,7 +542,7 @@ test("legacy inline notice globals are removed", () => {
   const styles = read("src/styles.css");
   const productionRoutes = [
     "src/routes/Dashboard.svelte",
-    "src/routes/CodexClient.svelte",
+    "src/routes/ChatGPTDesktop.svelte",
     "src/routes/ClaudeDesktop.svelte",
     "src/routes/Profiles.svelte",
     "src/routes/SetupWizard.svelte",
@@ -566,7 +567,7 @@ test("unused preview-list global compatibility styles are removed", () => {
   const styles = read("src/styles.css");
   const productionRoutes = [
     "src/routes/Dashboard.svelte",
-    "src/routes/CodexClient.svelte",
+    "src/routes/ChatGPTDesktop.svelte",
     "src/routes/ClaudeDesktop.svelte",
     "src/routes/Profiles.svelte",
     "src/routes/SetupWizard.svelte",
@@ -585,7 +586,7 @@ test("shared utility globals for spinning icons are removed and visible eyebrows
   const productionSurfaces = [
     "src/components/ToolStatusCard.svelte",
     "src/routes/Dashboard.svelte",
-    "src/routes/CodexClient.svelte",
+    "src/routes/ChatGPTDesktop.svelte",
     "src/routes/ClaudeDesktop.svelte",
     "src/routes/Profiles.svelte",
     "src/routes/SetupWizard.svelte",
@@ -1038,7 +1039,7 @@ test("App shell and navigation use Panda recipes", () => {
 test("route shell primitives use Panda recipes", () => {
   const routeFiles = [
     "src/routes/Dashboard.svelte",
-    "src/routes/CodexClient.svelte",
+    "src/routes/ChatGPTDesktop.svelte",
     "src/routes/ClaudeDesktop.svelte",
     "src/routes/Settings.svelte",
     "src/routes/Profiles.svelte",

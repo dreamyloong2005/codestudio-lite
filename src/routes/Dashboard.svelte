@@ -53,10 +53,15 @@
     refreshClaudeDesktop
   } from "../lib/claudeDesktopStore";
   import {
-    installOrUpdateCodexClient,
-    launchManagedCodexClient,
-    refreshCodexClient
-  } from "../lib/codexClientStore";
+    installOrUpdateChatGPTDesktop,
+    launchManagedChatGPTDesktop,
+    refreshChatGPTDesktop
+  } from "../lib/chatgptDesktopStore";
+  import {
+    applyChatGPTDesktopToolBranding,
+    brandChatGPTDesktopText,
+    chatgptDesktopGeneration
+  } from "../lib/chatgptDesktopBranding";
   import {
     clearClaudeEnvironmentVariables,
     installTool,
@@ -146,7 +151,7 @@
   const vscodePluginToolIds = new Set(["codex-vscode", "claude-vscode", "gemini-code-assist"]);
 
   function clientSortRank(tool: ToolStatus) {
-    return tool.id === "codex-app" ? 0 : 1;
+    return tool.id === "chatgpt-desktop" ? 0 : 1;
   }
 
   function isVscodePluginTool(tool: ToolStatus) {
@@ -251,7 +256,7 @@
   }
 
   function isManagedDesktopClient(tool: ToolStatus) {
-    return tool.id === "codex-app" || tool.id === "claude-desktop";
+    return tool.id === "chatgpt-desktop" || tool.id === "claude-desktop";
   }
 
   function installPlanToolFor(tool: ToolStatus) {
@@ -655,7 +660,7 @@
   });
 
   function desktopClientRouteForTool(toolId: string): string | null {
-    if (toolId === "codex-app") return "codexClient";
+    if (toolId === "chatgpt-desktop") return "chatgptDesktop";
     if (toolId === "claude-desktop") return "claudeDesktop";
     return null;
   }
@@ -666,13 +671,18 @@
     }
   }
 
+  function brandDesktopText(value: string) {
+    return brandChatGPTDesktopText(value, $chatgptDesktopGeneration);
+  }
+
+  $: desktopProductName = $t("app.nav.chatgptDesktop");
   $: connectedClients = [
     ...(snapshot?.tools.filter((tool) => {
       if (tool.category !== "ai_tool") {
         return false;
       }
       return !isVscodePluginTool(tool) || hasVsCodeHost(snapshot?.tools ?? []);
-    }) ?? [])
+    }).map((tool) => applyChatGPTDesktopToolBranding(tool, desktopProductName)) ?? [])
   ]
     .sort((left, right) => clientSortRank(left) - clientSortRank(right));
   $: envConflicts = snapshot?.envConflicts ?? [];
@@ -702,8 +712,8 @@
     // install/update stream on mount and renders the progress panel.
     onNavigateToClient(tool.id);
     try {
-      const result = tool.id === "codex-app"
-        ? await installOrUpdateCodexClient()
+      const result = tool.id === "chatgpt-desktop"
+        ? await installOrUpdateChatGPTDesktop()
         : await installOrUpdateClaudeDesktop(mode);
       if (result && "currentStatus" in result && result.currentStatus) {
         onToolStatusUpdated(result.currentStatus);
@@ -937,8 +947,8 @@
     launchingToolId = tool.id;
     directLaunchToolIds = new Set(directLaunchToolIds).add(tool.id);
     toolActionError = null;
-    const launchPromise = tool.id === "codex-app"
-      ? launchManagedCodexClient()
+    const launchPromise = tool.id === "chatgpt-desktop"
+      ? launchManagedChatGPTDesktop()
       : launchClaudeDesktopFromDashboard();
     try {
       await tick();
@@ -1099,10 +1109,10 @@
 
   <section class={panelRecipe()}>
     {#if toolActionMessage}
-      <DismissibleNotice tone="success" message={toolActionMessage} on:dismiss={() => (toolActionMessage = null)} />
+      <DismissibleNotice tone="success" message={brandDesktopText(toolActionMessage)} on:dismiss={() => (toolActionMessage = null)} />
     {/if}
     {#if toolActionError}
-      <DismissibleNotice tone="error" message={toolActionError} on:dismiss={() => (toolActionError = null)} />
+      <DismissibleNotice tone="error" message={brandDesktopText(toolActionError)} on:dismiss={() => (toolActionError = null)} />
     {/if}
     {#if envConflicts.length > 0}
       <div class={dashboardEnvConflictRecipe()}>
@@ -1661,7 +1671,7 @@
       {/if}
 
       {#if installError}
-        <div class={noticeRecipe({ tone: "error" })}>{installError}</div>
+        <div class={noticeRecipe({ tone: "error" })}>{brandDesktopText(installError)}</div>
       {/if}
 
       </div>
@@ -1859,7 +1869,7 @@
         {/if}
 
         {#if launchError}
-          <div class={noticeRecipe({ tone: "error" })}>{launchError}</div>
+          <div class={noticeRecipe({ tone: "error" })}>{brandDesktopText(launchError)}</div>
         {/if}
       </div>
 

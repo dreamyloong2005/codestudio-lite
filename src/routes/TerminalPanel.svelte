@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
+  import { FitAddon } from "@xterm/addon-fit";
   import { Terminal } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
   import AppIcon from "../components/AppIcon.svelte";
@@ -7,7 +8,6 @@
   import { actionButtonRecipe, terminalPanelActionsRecipe, terminalPanelFrameRecipe, terminalPanelHeaderRecipe, terminalPanelRecipe, terminalPanelStatusRecipe, terminalPanelTitleRecipe } from "../../styled-system/recipes";
   import {
     clearTerminalSession,
-    disposeTerminalSession,
     resizeSession,
     setOutputHandler,
     stopEmbeddedSession,
@@ -21,15 +21,15 @@
 
   let container: HTMLDivElement | null = null;
   let term: Terminal | null = null;
+  let fitAddon: FitAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  let terminalResizeDisposable: { dispose: () => void } | null = null;
   let sessionToolName = "";
   let sessionRunning = false;
   let sessionExitCode: number | null = null;
   let sessionError: string | null = null;
   let terminalStatusTone: TerminalStatusTone = "idle";
 
-  // Subscribe to store but only read fields we actually render — avoid
-  // pulling sessionId into a reactive variable that would toggle {#if}.
   const unsubscribe = terminalSession.subscribe((state) => {
     sessionToolName = state.toolName;
     sessionRunning = state.running;
@@ -37,38 +37,50 @@
     sessionError = state.error;
   });
 
-  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastCols = 100;
-  let lastRows = 24;
+  let fitFrame: number | null = null;
+  let focusAfterFit = false;
+  let observedWidth = -1;
+  let observedHeight = -1;
 
-  function fitTerminal() {
-    if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(doFit, 80);
-  }
-
-  let initTime = 0;
-  function doFit() {
+  function scheduleTerminalFit(focus = false) {
+    focusAfterFit ||= focus;
     if (!term || !container) return;
-    // Skip resize during the route enter transition (fly, 320ms) to avoid
-    // a resize storm from the continuously-changing layout.
-    if (Date.now() - initTime < 450) return;
-    // Use xterm's own cell dimensions for accurate sizing instead of
-    // measuring the DOM (which is unreliable and causes resize loops).
-    const cell = (term as any)._core?._renderService?._dimensions;
-    const cellW = cell?.cellWidth ?? 7.2;
-    const cellH = cell?.cellHeight ?? 14;
-    const padding = 16;
-    const cols = Math.max(20, Math.floor((container.clientWidth - padding) / cellW));
-    const rows = Math.max(10, Math.floor((container.clientHeight - padding) / cellH));
-    if (cols !== lastCols || rows !== lastRows) {
-      lastCols = cols;
-      lastRows = rows;
-      try { term.resize(cols, rows); } catch (_) { return; }
-      resizeSession(cols, rows);
-    }
+    if (fitFrame !== null) return;
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = null;
+      if (!term || !fitAddon || !container || !container.isConnected) return;
+      if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
+      try {
+        fitAddon.fit();
+      } catch (_) {
+        return;
+      }
+      if (focusAfterFit) {
+        focusAfterFit = false;
+        term.focus();
+      }
+    });
   }
 
-  let mounted = false;
+  function handleObservedResize(entries: ResizeObserverEntry[]) {
+    const entry = entries[0];
+    if (!entry) return;
+    const width = Math.round(entry.contentRect.width);
+    const height = Math.round(entry.contentRect.height);
+    if (width === observedWidth && height === observedHeight) return;
+    observedWidth = width;
+    observedHeight = height;
+    scheduleTerminalFit();
+  }
+
+  function clearScheduledFit() {
+    if (fitFrame !== null) {
+      cancelAnimationFrame(fitFrame);
+      fitFrame = null;
+    }
+    focusAfterFit = false;
+  }
+
   async function initTerminal() {
     if (term || !container) return;
     term = new Terminal({
@@ -85,22 +97,25 @@
         selectionBackground: "#334155"
       }
     });
+    fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
     term.open(container);
-    initTime = Date.now();
-    term.focus();
     term.onData((data: string) => {
       writeSessionInput(data);
+    });
+    terminalResizeDisposable = term.onResize(({ cols, rows }) => {
+      resizeSession(cols, rows);
     });
     setOutputHandler((data: string) => {
       term?.write(data);
     });
-    // Fit after the DOM has settled (xterm needs a frame to measure fonts).
     await tick();
-    requestAnimationFrame(() => { if (term && container) doFit(); });
-    resizeObserver = new ResizeObserver(() => fitTerminal());
+    resizeObserver = new ResizeObserver(handleObservedResize);
     resizeObserver.observe(container);
+    scheduleTerminalFit(true);
   }
 
+  let mounted = false;
   onMount(() => {
     mounted = true;
     if (container) {
@@ -113,16 +128,21 @@
 
   onDestroy(() => {
     mounted = false;
-    if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null; }
+    clearScheduledFit();
     setOutputHandler(null);
     if (resizeObserver) {
       resizeObserver.disconnect();
       resizeObserver = null;
     }
+    if (terminalResizeDisposable) {
+      terminalResizeDisposable.dispose();
+      terminalResizeDisposable = null;
+    }
     if (term) {
       term.dispose();
       term = null;
     }
+    fitAddon = null;
     unsubscribe();
   });
 

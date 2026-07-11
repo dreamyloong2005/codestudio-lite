@@ -412,9 +412,8 @@ fn mask_token(token: &str) -> String {
 
 fn normalize_gateway_tool_id(value: &str) -> Option<String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "codex" | "codex-cli" | "codex-app" | "codex-client" | "codex-desktop" => {
-            Some("codex".to_string())
-        }
+        "codex" | "codex-cli" | "chatgpt-desktop" | "codex-app" | "codex-client"
+        | "codex-desktop" => Some("codex".to_string()),
         "claude-desktop" | "claude-app" | "claude-client" => Some("claude-desktop".to_string()),
         "claude" | "claude-code" => Some("claude".to_string()),
         "gemini" | "gemini-cli" => Some("gemini".to_string()),
@@ -707,7 +706,8 @@ fn inferred_tool_from_headers(request: &HttpRequest) -> Option<String> {
         .map(|value| value.to_ascii_lowercase())
         .unwrap_or_default();
 
-    if header_value.contains("codex-app")
+    if header_value.contains("chatgpt-desktop")
+        || header_value.contains("chatgpt desktop")
         || header_value.contains("codex desktop")
         || header_value.contains("codex client")
     {
@@ -6518,7 +6518,11 @@ mod tests {
     }
 
     #[test]
-    fn codex_client_alias_uses_codex_gateway_scope() {
+    fn chatgpt_desktop_alias_uses_codex_gateway_scope() {
+        assert_eq!(
+            normalize_gateway_tool_id("chatgpt-desktop").as_deref(),
+            Some("codex")
+        );
         assert_eq!(
             normalize_gateway_tool_id("codex-app").as_deref(),
             Some("codex")

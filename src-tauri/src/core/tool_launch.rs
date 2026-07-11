@@ -160,8 +160,10 @@ fn provider_is_official(provider: &str) -> bool {
 
 fn canonical_profile_app(app: &str) -> String {
     match app.trim().to_ascii_lowercase().as_str() {
-        "codex" | "codex-cli" | "codex-app" | "codex-client" | "codex-desktop" | "codex-vscode"
-        | "codex-code-vscode" | "codex-vs-code" => "codex".to_string(),
+        "codex" | "codex-cli" | "chatgpt-desktop" | "codex-app" | "codex-client"
+        | "codex-desktop" | "codex-vscode" | "codex-code-vscode" | "codex-vs-code" => {
+            "codex".to_string()
+        }
         "claude-desktop" | "claude-app" | "claude-client" => "claude-desktop".to_string(),
         "claude-vscode" | "claude-code-vscode" | "claude-vs-code" => "claude".to_string(),
         "gemini-code-assist" | "gemini-vscode" | "gemini-code-vscode" | "gemini-vs-code" => {

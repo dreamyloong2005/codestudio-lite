@@ -1588,7 +1588,7 @@ fn native_config_paths_route_supported_tools() {
         Some(paths.home_dir.join(".hermes").join("config.yaml"))
     );
 
-    profile.app = "codex-app".to_string();
+    profile.app = "chatgpt-desktop".to_string();
     assert_eq!(
         native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
             .expect("codex gateway path should resolve"),
@@ -1637,7 +1637,7 @@ fn lifecycle_restore_targets_include_gateway_apps() {
     let mut active = ActiveProfilesByMode::default();
     active
         .config
-        .insert("codex-app".to_string(), "codex-config".to_string());
+        .insert("chatgpt-desktop".to_string(), "codex-config".to_string());
     active
         .gateway
         .insert("claude-vscode".to_string(), "claude-gateway".to_string());
@@ -1649,6 +1649,31 @@ fn lifecycle_restore_targets_include_gateway_apps() {
     assert_eq!(
         lifecycle_target_apps(&active, ProviderApplyMode::Gateway, false),
         vec!["claude".to_string()]
+    );
+}
+
+#[test]
+fn chatgpt_desktop_active_profile_prefers_canonical_then_legacy_keys() {
+    let mut active = HashMap::new();
+    active.insert("codex-app".to_string(), "legacy-app".to_string());
+    assert_eq!(
+        active_profile_id_for_app(&active, "codex").map(String::as_str),
+        Some("legacy-app")
+    );
+
+    active.insert(
+        "chatgpt-desktop".to_string(),
+        "chatgpt-desktop-profile".to_string(),
+    );
+    assert_eq!(
+        active_profile_id_for_app(&active, "codex").map(String::as_str),
+        Some("chatgpt-desktop-profile")
+    );
+
+    active.insert("codex".to_string(), "codex-profile".to_string());
+    assert_eq!(
+        active_profile_id_for_app(&active, "codex").map(String::as_str),
+        Some("codex-profile")
     );
 }
 
@@ -1962,7 +1987,7 @@ fn codex_restart_targets_cover_client_cli_and_vscode_backend() {
 
     assert_eq!(targets.len(), 3);
     assert_eq!(targets[0].label, "Codex");
-    assert!(matches!(targets[0].launch, RestartLaunch::CodexClient));
+    assert!(matches!(targets[0].launch, RestartLaunch::ChatGptDesktop));
     assert_eq!(targets[1].label, "Codex VS Code extension backend");
     assert!(matches!(targets[1].launch, RestartLaunch::CloseOnly));
     assert!(targets[1]

@@ -138,3 +138,34 @@ test("tool console output does not repeat commands or duplicate result tails", (
   assert.doesNotMatch(api, /Hermes installer may ask for confirmation/);
   assert.doesNotMatch(api, /Type responses directly in this terminal/);
 });
+
+test("embedded terminal uses FitAddon and only syncs applied xterm dimensions", () => {
+  const packageJson = read("package.json");
+  const pandaConfig = read("panda.config.ts");
+  const terminalPanel = read("src/routes/TerminalPanel.svelte");
+  const terminalStore = read("src/lib/terminalSessionStore.ts");
+
+  assert.match(packageJson, /"@xterm\/addon-fit": "\^0\.10\.0"/);
+  assert.match(terminalPanel, /import \{ FitAddon \} from "@xterm\/addon-fit";/);
+  assert.match(terminalPanel, /term\.loadAddon\(fitAddon\);/);
+  assert.match(terminalPanel, /terminalResizeDisposable = term\.onResize\(\(\{ cols, rows \}\) => \{/);
+  assert.match(terminalPanel, /resizeSession\(cols, rows\);/);
+  assert.match(terminalPanel, /entry\.contentRect\.width/);
+  assert.match(terminalPanel, /entry\.contentRect\.height/);
+  assert.doesNotMatch(terminalPanel, /_core|_renderService|cellWidth|cellHeight/);
+  assert.doesNotMatch(terminalPanel, /BACKEND_RESIZE_SETTLE_MS|pendingBackendResize/);
+  assert.match(
+    pandaConfig,
+    /appRouteTransitionRecipe:\s*\{[\s\S]*?base:\s*\{\s*width: "100%",\s*minWidth: 0,\s*minHeight: 0,\s*height: "100%"/
+  );
+  assert.match(
+    pandaConfig,
+    /terminalPanelRecipe:\s*\{[\s\S]*?base:\s*\{\s*display: "grid",\s*gridTemplateRows: "auto minmax\(0, 1fr\)",[\s\S]*?height: "100%",\s*overflow: "hidden"/
+  );
+
+  assert.match(terminalStore, /const TERMINAL_RESIZE_FLUSH_DELAY_MS = 80;/);
+  assert.match(terminalStore, /let pendingResize:/);
+  assert.match(terminalStore, /function schedulePendingResize\(\): void/);
+  assert.match(terminalStore, /const resizeKey = `\$\{activeSessionId\}:\$\{cols\}x\$\{rows\}`;/);
+  assert.match(terminalStore, /if \(resizeKey === lastResizeKey\) return;/);
+});

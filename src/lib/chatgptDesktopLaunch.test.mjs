@@ -4,34 +4,36 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 
-test("Codex client exposes a single patch-backed launch entrypoint", () => {
-  const route = read("src/routes/CodexClient.svelte");
-  const store = read("src/lib/codexClientStore.ts");
+test("ChatGPT desktop exposes a single patch-backed launch entrypoint", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const store = read("src/lib/chatgptDesktopStore.ts");
   const api = read("src/lib/api.ts");
-  const commands = read("src-tauri/src/commands/codex_client.rs");
+  const commands = read("src-tauri/src/commands/chatgpt_desktop.rs");
   const lib = read("src-tauri/src/lib.rs");
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
-  assert.match(route, /launchManagedCodexClient/);
-  assert.doesNotMatch(route, /launchManagedCodexClientPatched|patchLaunch|codexClient\.patchLaunch/);
-  assert.doesNotMatch(store, /launchManagedCodexClientPatched|launchPatchedCodexClient|patchLaunch/);
-  assert.match(api, /invoke\("launch_codex_client"\)/);
-  assert.doesNotMatch(api, /launchPatchedCodexClient|launch_codex_client_patched/);
-  assert.match(commands, /pub async fn launch_codex_client\(\)/);
-  assert.doesNotMatch(commands, /launch_codex_client_patched|launch_patched/);
-  assert.doesNotMatch(lib, /launch_codex_client_patched/);
-  assert.match(core, /pub fn launch\(\) -> Result<\(\), String> \{[\s\S]*codex_patch_launch_args/);
+  assert.match(route, /launchManagedChatGPTDesktop/);
+  assert.doesNotMatch(route, /launchManagedChatGPTDesktopPatched|patchLaunch|chatgptDesktop\.patchLaunch/);
+  assert.doesNotMatch(store, /launchManagedChatGPTDesktopPatched|launchPatchedChatGPTDesktop|patchLaunch/);
+  assert.match(api, /invoke\("launch_chatgpt_desktop"\)/);
+  assert.doesNotMatch(api, /launchPatchedChatGPTDesktop|launch_chatgpt_desktop_patched/);
+  assert.match(commands, /pub async fn launch_chatgpt_desktop\(\)/);
+  assert.doesNotMatch(commands, /launch_chatgpt_desktop_patched|launch_patched/);
+  assert.doesNotMatch(lib, /launch_chatgpt_desktop_patched/);
+  assert.match(core, /fn launch_with_restart_notes\([\s\S]*codex_patch_launch_args/);
   assert.doesNotMatch(core, /pub fn launch_patched/);
 });
 
 test("Codex plugin force unlock includes modern marketplace request patches", () => {
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
   assert.match(core, /Page\.addScriptToEvaluateOnNewDocument/);
   assert.match(core, /allowUnsafeEvalBlockedByCSP/);
   assert.match(core, /function patchPluginMarketplaceRequestParams/);
   assert.match(core, /method === "list-plugins"/);
-  assert.match(core, /delete next\.marketplaceKinds/);
+  assert.match(core, /if \(!nextKinds\.includes\("vertical"\)\) nextKinds\.push\("vertical"\)/);
+  assert.match(core, /function mergeLocalPluginMarketplaces/);
+  assert.match(core, /plugin_marketplace_local_merged/);
   assert.match(core, /function restorePluginMarketplaceName/);
   assert.match(core, /method === "install-plugin"/);
   assert.match(core, /app-server-manager-signals-/);
@@ -40,10 +42,10 @@ test("Codex plugin force unlock includes modern marketplace request patches", ()
 });
 
 test("Codex launch options mirror Codex++ plugin and model toggles", () => {
-  const route = read("src/routes/CodexClient.svelte");
-  const store = read("src/lib/codexClientStore.ts");
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const store = read("src/lib/chatgptDesktopStore.ts");
   const types = read("src/types.ts");
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
@@ -57,7 +59,7 @@ test("Codex launch options mirror Codex++ plugin and model toggles", () => {
 
   for (const [key, defaultValue] of Object.entries(codexPlusPluginAndModelDefaults)) {
     assert.match(route, new RegExp(`settingsDraft\\.${key}`));
-    assert.match(route, new RegExp(`updateCodexClientDraft\\(\\{ ${key}: event\\.currentTarget\\.checked \\}\\)`));
+    assert.match(route, new RegExp(`updateChatGPTDesktopDraft\\(\\{ ${key}: event\\.currentTarget\\.checked \\}\\)`));
     assert.match(store, new RegExp(`${key}: ${defaultValue}`));
     assert.match(store, new RegExp(`${key}: settings\\.${key}`));
     assert.match(store, new RegExp(`${key}: preserveLaunchOptions && draft[\\s\\S]*\\? draft\\.${key}[\\s\\S]*: stateSettings\\.${key}`));
@@ -66,10 +68,10 @@ test("Codex launch options mirror Codex++ plugin and model toggles", () => {
   }
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
-    assert.match(dictionary, /"codexClient\.pluginMarketplaceUnlockOnLaunch"/);
-    assert.match(dictionary, /"codexClient\.pluginAutoExpandOnLaunch"/);
-    assert.match(dictionary, /"codexClient\.modelWhitelistUnlockOnLaunch"/);
-    assert.match(dictionary, /"codexClient\.serviceTierControlsOnLaunch"/);
+    assert.match(dictionary, /"chatgptDesktop\.pluginMarketplaceUnlockOnLaunch"/);
+    assert.match(dictionary, /"chatgptDesktop\.pluginAutoExpandOnLaunch"/);
+    assert.match(dictionary, /"chatgptDesktop\.modelWhitelistUnlockOnLaunch"/);
+    assert.match(dictionary, /"chatgptDesktop\.serviceTierControlsOnLaunch"/);
   }
 
   assert.doesNotMatch(route, /settingsDraft\.patchForcePluginUnlock/);
@@ -79,27 +81,56 @@ test("Codex launch options mirror Codex++ plugin and model toggles", () => {
   assert.match(core, /pub service_tier_controls_on_launch: bool/);
 });
 
-test("Codex launch options include the official remote plugin cache", () => {
-  const route = read("src/routes/CodexClient.svelte");
-  const store = read("src/lib/codexClientStore.ts");
+test("ChatGPT Desktop leaves official GPT-5.6 model availability to the upstream client", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const store = read("src/lib/chatgptDesktopStore.ts");
   const types = read("src/types.ts");
   const api = read("src/lib/api.ts");
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const zhCN = read("src/lib/locales/zh-CN.ts");
+  const zhTW = read("src/lib/locales/zh-TW.ts");
+  const enUS = read("src/lib/locales/en-US.ts");
+
+  for (const source of [route, store, types, api]) {
+    assert.doesNotMatch(source, /gpt56OfficialEntryOnLaunch/);
+  }
+  assert.doesNotMatch(core, /gpt56_official_entry|gpt56OfficialEntry|official_gpt56|officialGpt56/);
+  assert.doesNotMatch(core, /\bCodexAuthMethod\b|api_key_login/);
+  assert.match(core, /if \(settings\.modelWhitelistUnlock\)/);
+
+  for (const dictionary of [zhCN, zhTW, enUS]) {
+    assert.doesNotMatch(dictionary, /"chatgptDesktop\.gpt56OfficialEntryOnLaunch/);
+  }
+});
+
+test("Codex launch options include the official remote plugin cache", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const store = read("src/lib/chatgptDesktopStore.ts");
+  const types = read("src/types.ts");
+  const api = read("src/lib/api.ts");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const moduleIndex = read("src-tauri/src/core/mod.rs");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
 
   assert.match(route, /settingsDraft\.officialRemotePluginCacheOnLaunch/);
-  assert.match(route, /updateCodexClientDraft\(\{ officialRemotePluginCacheOnLaunch: event\.currentTarget\.checked \}\)/);
+  assert.match(route, /updateChatGPTDesktopDraft\(\{ officialRemotePluginCacheOnLaunch: event\.currentTarget\.checked \}\)/);
   assert.match(store, /officialRemotePluginCacheOnLaunch: true/);
   assert.match(store, /officialRemotePluginCacheOnLaunch: settings\.officialRemotePluginCacheOnLaunch/);
   assert.match(store, /officialRemotePluginCacheOnLaunch: preserveLaunchOptions && draft[\s\S]*\? draft\.officialRemotePluginCacheOnLaunch[\s\S]*: stateSettings\.officialRemotePluginCacheOnLaunch/);
   assert.match(types, /officialRemotePluginCacheOnLaunch: boolean;/);
   assert.match(types, /officialRemotePluginCacheOnLaunch\?: boolean \| null;/);
-  assert.match(api, /officialRemotePluginCacheOnLaunch: request\.officialRemotePluginCacheOnLaunch \?\? mockCodexClientSettings\.officialRemotePluginCacheOnLaunch/);
+  assert.match(api, /officialRemotePluginCacheOnLaunch: request\.officialRemotePluginCacheOnLaunch \?\? mockChatGPTDesktopSettings\.officialRemotePluginCacheOnLaunch/);
   assert.match(core, /pub official_remote_plugin_cache_on_launch: bool/);
   assert.match(core, /ensure_official_remote_plugin_cache_if_enabled\(&settings\)/);
+  const remoteCacheBody = core
+    .split("fn ensure_official_remote_plugin_cache_if_enabled")
+    .at(1)
+    ?.split("fn ensure_computer_use_guard_if_enabled")
+    .at(0);
+  assert.ok(remoteCacheBody, "official remote plugin cache helper should exist");
+  assert.doesNotMatch(remoteCacheBody, /official_remote_plugin_cache_allowed|profile::codex_auth_status\(\)/);
   assert.match(moduleIndex, /pub mod codex_plugin_marketplace;/);
 
   const marketplace = read("src-tauri/src/core/codex_plugin_marketplace.rs");
@@ -107,16 +138,44 @@ test("Codex launch options include the official remote plugin cache", () => {
   assert.match(marketplace, /plugins-remote/);
   assert.match(marketplace, /include_bytes!\(.+openai-curated-remote\.zip/);
   assert.match(marketplace, /ensure_official_remote_plugin_cache/);
+  assert.doesNotMatch(marketplace, /remove_official_remote_plugin_cache_config/);
   assert.match(marketplace, /source_type"\]\s*=\s*toml_edit::value\("local"\)/);
+  assert.match(core, /codex_plugin_marketplaces_for_injection/);
+  assert.match(core, /__CODESTUDIO_LITE_PLUGIN_MARKETPLACES__/);
+  assert.match(core, /openai-curated-remote/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
-    assert.match(dictionary, /"codexClient\.officialRemotePluginCacheOnLaunch"/);
-    assert.match(dictionary, /"codexClient\.officialRemotePluginCacheOnLaunchHint"/);
+    assert.match(dictionary, /"chatgptDesktop\.officialRemotePluginCacheOnLaunch"/);
+    assert.match(dictionary, /"chatgptDesktop\.officialRemotePluginCacheOnLaunchHint"/);
+    assert.match(dictionary, /API mode can|API 模式也可/);
   }
 });
 
+test("ChatGPT desktop restart closes the package parent instead of the app-server child", () => {
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const closeBody = core
+    .split("fn close_chatgpt_desktop_processes")
+    .at(1)
+    ?.split("fn terminate_macos_codex_process_for_restart")
+    .at(0);
+  const restartBody = core
+    .split("pub fn restart()")
+    .at(1)
+    ?.split("pub fn update_settings")
+    .at(0);
+
+  assert.ok(closeBody, "package-aware restart closer should exist");
+  assert.match(closeBody, /close_appx_package_for_update\("ChatGPT Desktop", PACKAGE_IDENTITY\)/);
+  assert.match(closeBody, /close_processes_for_update\([\s\S]*\&\[CODEX_EXE_NAME\][\s\S]*Some\(Path::new\(&installed\.path\)\)/);
+  assert.doesNotMatch(closeBody, /Get-Process -Name Codex/);
+  assert.match(core, /item\.source == "msix"[\s\S]*is_process_running\("ChatGPT"\)/);
+  assert.ok(restartBody, "restart body should exist");
+  assert.match(restartBody, /launch_with_restart_notes\(&mut notes\)/);
+  assert.doesNotMatch(restartBody, /close_chatgpt_desktop_processes/);
+});
+
 test("Codex plugin and model injection is gated by individual Codex++ launch options", () => {
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
   assert.match(core, /struct CodexEnhancementInjectionSettings/);
   assert.match(core, /plugin_marketplace_unlock:\s*settings\.plugin_marketplace_unlock_on_launch/);
@@ -136,7 +195,7 @@ test("Codex plugin and model injection is gated by individual Codex++ launch opt
 });
 
 test("Codex model whitelist injection reads Codex++ local model catalog files", () => {
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
   assert.match(core, /model_catalog_json/);
   assert.match(core, /fn collect_codex_model_catalog_json_models/);
@@ -146,7 +205,7 @@ test("Codex model whitelist injection reads Codex++ local model catalog files", 
 });
 
 test("Codex service tier injection mirrors the latest Codex++ Fast controls", () => {
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
   assert.match(core, /const codexThreadServiceTierVersion = "1"/);
   assert.match(core, /const codexThreadServiceTierMaxEntries = 120/);
@@ -165,9 +224,9 @@ test("Codex service tier injection mirrors the latest Codex++ Fast controls", ()
 });
 
 test("Codex service tier observer avoids badge self-trigger refresh loops", () => {
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
-  assert.match(core, /const codestudioLiteCodexEnhancementsVersion = "3"/);
+  assert.match(core, /const codestudioLiteCodexEnhancementsVersion = "5"/);
   assert.match(core, /clearInterval\(window\.__codestudioLiteCodexEnhancementsTimer\)/);
   assert.match(core, /window\.__codestudioLiteCodexEnhancementsObserver\.disconnect\?\.\(\)/);
   assert.match(core, /function setCodestudioLiteText\(node, value\)/);
@@ -183,7 +242,7 @@ test("Codex service tier observer avoids badge self-trigger refresh loops", () =
 });
 
 test("Codex model whitelist refresh is not run twice from the main enhancement refresh", () => {
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const refreshBody = core
     .split("function refresh(mutations = null) {")
     .at(1)
@@ -196,54 +255,54 @@ test("Codex model whitelist refresh is not run twice from the main enhancement r
 });
 
 test("Codex enhancement injection runs after launch without blocking the command", () => {
-  const commands = read("src-tauri/src/commands/codex_client.rs");
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const commands = read("src-tauri/src/commands/chatgpt_desktop.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const launchBody = core
-    .split("pub fn launch() -> Result<(), String> {")
+    .split("fn launch_with_restart_notes(notes: &mut Vec<String>) -> Result<(), String> {")
     .at(1)
     ?.split("pub fn restart()")
     .at(0);
 
   assert.ok(launchBody, "Codex launch body should be present");
-  assert.match(commands, /pub async fn launch_codex_client\(\) -> Result<\(\), String>/);
-  assert.match(commands, /spawn_blocking\(\|\| codex_client::launch\(\)\)/);
+  assert.match(commands, /pub async fn launch_chatgpt_desktop\(\) -> Result<\(\), String>/);
+  assert.match(commands, /spawn_blocking\(\|\| chatgpt_desktop::launch\(\)\)/);
   assert.doesNotMatch(launchBody, /inject_codex_enhancements\(debug_port/);
   assert.match(launchBody, /spawn_codex_enhancement_injection\(debug_port/);
 });
 
-test("Codex client notices are localized and dismiss with an icon", () => {
-  const route = read("src/routes/CodexClient.svelte");
-  const store = read("src/lib/codexClientStore.ts");
+test("ChatGPT desktop notices are localized and dismiss with an icon", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const store = read("src/lib/chatgptDesktopStore.ts");
   const notice = read("src/components/DismissibleNotice.svelte");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
 
   for (const source of [store, route]) {
-    assert.doesNotMatch(source, /Codex client is ready/);
-    assert.doesNotMatch(source, /Codex client launch requested/);
+    assert.doesNotMatch(source, /ChatGPT desktop is ready/);
+    assert.doesNotMatch(source, /ChatGPT desktop launch requested/);
     assert.doesNotMatch(source, /Installer staged and verified/);
-    assert.doesNotMatch(source, /Preparing to (stage|install) the Codex client/);
+    assert.doesNotMatch(source, /Preparing to (stage|install) the ChatGPT desktop/);
   }
 
-  assert.match(store, /key:\s*"codexClient\.ready"/);
-  assert.match(store, /key:\s*"codexClient\.launchRequested"/);
+  assert.match(store, /key:\s*"chatgptDesktop\.ready"/);
+  assert.match(store, /key:\s*"chatgptDesktop\.launchRequested"/);
   assert.match(route, /formatNoticeMessage\(success\)/);
   assert.match(notice, /<AppIcon name="close"/);
   assert.doesNotMatch(notice, /\$t\("common\.dismiss"\)/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
-    assert.match(dictionary, /"codexClient\.ready"/);
-    assert.match(dictionary, /"codexClient\.progressStagePreparing"/);
-    assert.match(dictionary, /"codexClient\.progressInstallPreparing"/);
+    assert.match(dictionary, /"chatgptDesktop\.ready"/);
+    assert.match(dictionary, /"chatgptDesktop\.progressStagePreparing"/);
+    assert.match(dictionary, /"chatgptDesktop\.progressInstallPreparing"/);
   }
 });
 
-test("Codex client keeps cached update plan visible while background refresh runs", () => {
-  const route = read("src/routes/CodexClient.svelte");
-  const store = read("src/lib/codexClientStore.ts");
+test("ChatGPT desktop keeps cached update plan visible while background refresh runs", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const store = read("src/lib/chatgptDesktopStore.ts");
   const api = read("src/lib/api.ts");
-  const commands = read("src-tauri/src/commands/codex_client.rs");
+  const commands = read("src-tauri/src/commands/chatgpt_desktop.rs");
   const lib = read("src-tauri/src/lib.rs");
   const storage = read("src-tauri/src/core/storage.rs");
   const zhCN = read("src/lib/locales/zh-CN.ts");
@@ -260,31 +319,31 @@ test("Codex client keeps cached update plan visible while background refresh run
   assert.match(route, /effectiveRelease\s*=\s*planUnavailable\s*\?\s*null\s*:\s*release/);
   assert.match(route, /\{effectivePlan\.packageUrl\}/);
   assert.match(route, /\{effectivePlan\.sha256\}/);
-  assert.doesNotMatch(route, /planRefreshText\s*=\s*\$t\("codexClient\.planRefreshing"\)/);
+  assert.doesNotMatch(route, /planRefreshText\s*=\s*\$t\("chatgptDesktop\.planRefreshing"\)/);
   assert.doesNotMatch(route, /planRefreshing && effectivePlan/);
   assert.match(route, /\{#if planUnavailable\}/);
-  assert.match(route, /codexClient\.planStale/);
-  assert.match(store, /loadCachedCodexClientStates/);
-  assert.doesNotMatch(store, /loadCachedCodexClientState,\s*\n/);
-  assert.doesNotMatch(store, /await loadCachedCodexClientState\(\)/);
+  assert.match(route, /chatgptDesktop\.planStale/);
+  assert.match(store, /loadCachedChatGPTDesktopStates/);
+  assert.doesNotMatch(store, /loadCachedChatGPTDesktopState,\s*\n/);
+  assert.doesNotMatch(store, /await loadCachedChatGPTDesktopState\(\)/);
   assert.match(store, /function cachedStateEntries/);
   assert.match(store, /entries\.find\(\(\[kind,\s*state\]\) => kind === selectedKind && Boolean\(state\.plan\)\)/);
   assert.match(store, /patch\(\{ loaded:\s*true,\s*selectedKind:\s*preferredKind \}\)/);
-  assert.match(api, /export async function loadCachedCodexClientStates\(\): Promise<CodexClientStateCache>/);
-  assert.match(api, /invoke\("load_cached_codex_client_states"\)/);
-  assert.match(commands, /pub async fn load_cached_codex_client_states\(\) -> Result<CodexClientStateCache,\s*String>/);
-  assert.match(lib, /commands::codex_client::load_cached_codex_client_states/);
-  assert.match(storage, /CREATE TABLE IF NOT EXISTS codex_client_state \(\s*install_kind TEXT PRIMARY KEY,/);
-  assert.match(storage, /INSERT INTO codex_client_state \(install_kind,\s*generated_at,\s*state_json\)/);
+  assert.match(api, /export async function loadCachedChatGPTDesktopStates\(\): Promise<ChatGPTDesktopStateCache>/);
+  assert.match(api, /invoke\("load_cached_chatgpt_desktop_states"\)/);
+  assert.match(commands, /pub async fn load_cached_chatgpt_desktop_states\(\) -> Result<ChatGptDesktopStateCache,\s*String>/);
+  assert.match(lib, /commands::chatgpt_desktop::load_cached_chatgpt_desktop_states/);
+  assert.match(storage, /CREATE TABLE IF NOT EXISTS chatgpt_desktop_state \(\s*install_kind TEXT PRIMARY KEY,/);
+  assert.match(storage, /INSERT INTO chatgpt_desktop_state \(install_kind,\s*generated_at,\s*state_json\)/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
-    assert.match(dictionary, /"codexClient\.planRefreshing"/);
-    assert.match(dictionary, /"codexClient\.planStale"/);
+    assert.match(dictionary, /"chatgptDesktop\.planRefreshing"/);
+    assert.match(dictionary, /"chatgptDesktop\.planStale"/);
   }
 });
 
-test("Codex client refresh preserves draft edits made while the scan is in flight", () => {
-  const store = read("src/lib/codexClientStore.ts");
+test("ChatGPT desktop refresh preserves draft edits made while the scan is in flight", () => {
+  const store = read("src/lib/chatgptDesktopStore.ts");
 
   assert.match(store, /type ApplyStateOptions = \{[\s\S]*preserveDraft\?: boolean/);
   assert.match(store, /const preserveDraft = Boolean\(options\.preserveDraft && current\.settingsDraft\)/);
@@ -298,21 +357,21 @@ test("Codex client refresh preserves draft edits made while the scan is in fligh
   assert.match(store, /applyState\(nextState,\s*installKind,\s*\{ preserveDraft: preserveDraft\(\) \}\)/);
 });
 
-test("Codex client isolates Windows App and EXE tab operation state", () => {
-  const route = read("src/routes/CodexClient.svelte");
-  const store = read("src/lib/codexClientStore.ts");
+test("ChatGPT desktop isolates Windows App and EXE tab operation state", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const store = read("src/lib/chatgptDesktopStore.ts");
   const api = read("src/lib/api.ts");
   const types = read("src/types.ts");
-  const commands = read("src-tauri/src/commands/codex_client.rs");
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const commands = read("src-tauri/src/commands/chatgpt_desktop.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
-  assert.match(store, /export type CodexClientInstallKind = "msix" \| "portable"/);
-  assert.match(store, /kindViews:\s*Record<CodexClientInstallKind,\s*CodexClientKindViewState>/);
+  assert.match(store, /export type ChatGPTDesktopInstallKind = "msix" \| "portable"/);
+  assert.match(store, /kindViews:\s*Record<ChatGPTDesktopInstallKind,\s*ChatGPTDesktopKindViewState>/);
   assert.match(store, /function selectedKindView/);
   assert.match(store, /patchKind\(/);
-  assert.match(store, /listenCodexClientProgress\(\(progress\) => \{\s*patchKind\(progress\.installKind/);
-  assert.match(store, /stageCodexClientUpdate\(\{\s*installKind/);
-  assert.match(store, /planCodexClientUpdate\(\{\s*installKind/);
+  assert.match(store, /listenChatGPTDesktopProgress\(\(progress\) => \{\s*patchKind\(progress\.installKind/);
+  assert.match(store, /stageChatGPTDesktopUpdate\(\{\s*installKind/);
+  assert.match(store, /planChatGPTDesktopUpdate\(\{\s*installKind/);
   assert.match(store, /operationResult:\s*result/);
   assert.match(route, /kindView\s*=\s*view\.kindViews\[effectiveSelectedKind\]/);
   assert.match(route, /stageReport\s*=\s*kindView\.stageReport/);
@@ -326,39 +385,39 @@ test("Codex client isolates Windows App and EXE tab operation state", () => {
   assert.doesNotMatch(route, /busyAction\s*=\s*view\.busyAction/);
   assert.doesNotMatch(route, /state\s*=\s*view\.state/);
 
-  assert.match(types, /export interface PlanCodexClientUpdateRequest \{[\s\S]*installKind\?: "msix" \| "portable" \| null;/);
-  assert.match(types, /export interface StageCodexClientUpdateRequest \{[\s\S]*installKind\?: "msix" \| "portable" \| null;/);
-  assert.match(types, /export interface CodexClientState \{[\s\S]*installKind: "msix" \| "portable";/);
-  assert.match(types, /export interface CodexClientStageReport \{[\s\S]*installKind: "msix" \| "portable";/);
-  assert.match(types, /export interface CodexClientProgress \{[\s\S]*installKind: "msix" \| "portable";/);
-  assert.match(types, /export interface CodexClientOperationResult \{[\s\S]*installKind: "msix" \| "portable";/);
-  assert.match(api, /export async function planCodexClientUpdate\(\s*request: PlanCodexClientUpdateRequest = \{\}/);
-  assert.match(api, /invoke\("plan_codex_client_update", \{ request \}\)/);
-  assert.match(api, /export async function stageCodexClientUpdate\(\s*request: StageCodexClientUpdateRequest/);
-  assert.match(api, /invoke\("stage_codex_client_update", \{ request \}\)/);
-  assert.match(commands, /PlanCodexClientUpdateRequest/);
-  assert.match(commands, /StageCodexClientUpdateRequest/);
-  assert.match(commands, /pub async fn plan_codex_client_update\(\s*request: PlanCodexClientUpdateRequest/);
-  assert.match(commands, /pub async fn stage_codex_client_update\(\s*app: tauri::AppHandle,\s*request: StageCodexClientUpdateRequest/);
-  assert.match(core, /pub struct PlanCodexClientUpdateRequest/);
-  assert.match(core, /pub struct StageCodexClientUpdateRequest/);
+  assert.match(types, /export interface PlanChatGPTDesktopUpdateRequest \{[\s\S]*installKind\?: "msix" \| "portable" \| null;/);
+  assert.match(types, /export interface StageChatGPTDesktopUpdateRequest \{[\s\S]*installKind\?: "msix" \| "portable" \| null;/);
+  assert.match(types, /export interface ChatGPTDesktopState \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(types, /export interface ChatGPTDesktopStageReport \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(types, /export interface ChatGPTDesktopProgress \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(types, /export interface ChatGPTDesktopOperationResult \{[\s\S]*installKind: "msix" \| "portable";/);
+  assert.match(api, /export async function planChatGPTDesktopUpdate\(\s*request: PlanChatGPTDesktopUpdateRequest = \{\}/);
+  assert.match(api, /invoke\("plan_chatgpt_desktop_update", \{ request \}\)/);
+  assert.match(api, /export async function stageChatGPTDesktopUpdate\(\s*request: StageChatGPTDesktopUpdateRequest/);
+  assert.match(api, /invoke\("stage_chatgpt_desktop_update", \{ request \}\)/);
+  assert.match(commands, /PlanChatGptDesktopUpdateRequest/);
+  assert.match(commands, /StageChatGptDesktopUpdateRequest/);
+  assert.match(commands, /pub async fn plan_chatgpt_desktop_update\(\s*request: PlanChatGptDesktopUpdateRequest/);
+  assert.match(commands, /pub async fn stage_chatgpt_desktop_update\(\s*app: tauri::AppHandle,\s*request: StageChatGptDesktopUpdateRequest/);
+  assert.match(core, /pub struct PlanChatGptDesktopUpdateRequest/);
+  assert.match(core, /pub struct StageChatGptDesktopUpdateRequest/);
   assert.match(core, /fn settings_for_install_kind/);
-  assert.match(core, /pub fn plan_update\(request: PlanCodexClientUpdateRequest\)/);
-  assert.match(core, /pub fn stage_update_with_progress<F>\(\s*request: StageCodexClientUpdateRequest/);
-  assert.match(core, /fn select_install_route\(\s*settings:\s*&CodexClientSettings,\s*installed:\s*Option<&InstalledCodexClient>,\s*\) -> &'static str/);
+  assert.match(core, /pub fn plan_update\(\s*request: PlanChatGptDesktopUpdateRequest/);
+  assert.match(core, /pub fn stage_update_with_progress<F>\(\s*request: StageChatGptDesktopUpdateRequest/);
+  assert.match(core, /fn select_install_route\(\s*settings:\s*&ChatGptDesktopSettings,\s*installed:\s*Option<&InstalledChatGptDesktop>,\s*\) -> &'static str/);
   assert.doesNotMatch(core, /portable_recommended|Automatically switched to portable installation|progressMsixPortableFallback|progressMsixExecutionPortableFallback/);
 });
 
-test("Codex client does not expose a Windows official update-source choice", () => {
-  const route = read("src/routes/CodexClient.svelte");
-  const core = read("src-tauri/src/core/codex_client.rs");
+test("ChatGPT desktop does not expose a Windows official update-source choice", () => {
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
 
   assert.match(
     route,
-    /\{#if isMacos\}[\s\S]*\{\$t\("codexClient\.source"\)\}[\s\S]*<select[\s\S]*value=\{settingsDraft\.source\}[\s\S]*<option value="official">[\s\S]*\{\/if\}/
+    /\{#if isMacos\}[\s\S]*\{\$t\("chatgptDesktop\.source"\)\}[\s\S]*<select[\s\S]*value=\{settingsDraft\.source\}[\s\S]*<option value="official">[\s\S]*\{\/if\}/
   );
   assert.doesNotMatch(route, /windowsOfficial|Microsoft Store installer|get\.microsoft\.com\/installer\/download|winget install Codex/);
   assert.match(core, /"official" if cfg!\(target_os = "macos"\) => "official"/);

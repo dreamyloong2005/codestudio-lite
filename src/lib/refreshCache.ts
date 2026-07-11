@@ -2,7 +2,7 @@ export const REFRESH_CACHE_TTL_MS = 2 * 60 * 60_000;
 
 const STORAGE_PREFIX = "codestudio-lite:last-refresh:";
 
-export type RefreshCacheKey = "detection" | "codexClient" | "claudeDesktop";
+export type RefreshCacheKey = "detection" | "chatgptDesktop" | "claudeDesktop";
 
 function storageKey(key: RefreshCacheKey) {
   return `${STORAGE_PREFIX}${key}`;
@@ -12,7 +12,15 @@ export function readRefreshTimestamp(key: RefreshCacheKey): number {
   if (typeof localStorage === "undefined") {
     return 0;
   }
-  const raw = localStorage.getItem(storageKey(key));
+  let raw = localStorage.getItem(storageKey(key));
+  if (!raw && key === "chatgptDesktop") {
+    const legacyKey = `${STORAGE_PREFIX}codexClient`;
+    raw = localStorage.getItem(legacyKey);
+    if (raw) {
+      localStorage.setItem(storageKey(key), raw);
+      localStorage.removeItem(legacyKey);
+    }
+  }
   if (!raw) {
     return 0;
   }

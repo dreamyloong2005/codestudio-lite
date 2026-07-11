@@ -2,6 +2,7 @@ export type InstallState = "installed" | "missing" | "unknown";
 export type ConfigState = "configured" | "unconfigured" | "not_applicable" | "unknown";
 export type Severity = "ok" | "info" | "warning" | "error";
 export type DetectionSource = "live" | "preview" | "cached";
+export type ChatGPTDesktopProductGeneration = "current" | "legacy";
 
 export interface ToolStatus {
   id: string;
@@ -194,7 +195,7 @@ export interface ClaudeDesktopPageState {
   installPlan: ToolInstallPlan | null;
   updatePlan: ToolInstallPlan | null;
   plan: ClaudeDesktopPlan | null;
-  capabilities: CodexClientCapability[];
+  capabilities: DesktopClientCapability[];
 }
 
 export interface InstallTerminalOutput {
@@ -312,8 +313,9 @@ export interface DetectionSnapshot {
   system: ToolStatus[];
   problems: Problem[];
   envConflicts: EnvironmentVariableConflict[];
+  chatgptDesktopProductGeneration: ChatGPTDesktopProductGeneration;
   claudeInstallKinds?: ClaudeDesktopInstallKinds | null;
-  codexInstallKinds?: CodexClientInstallKinds | null;
+  chatgptDesktopInstallKinds?: ChatGPTDesktopInstallKinds | null;
 }
 
 export type CodexAuthMethod = "chat_gpt" | "api_key" | "access_token" | "unknown" | "none";
@@ -731,7 +733,7 @@ export interface UpdateGatewaySettingsRequest {
   privacyFilterMode?: PrivacyFilterMode | null;
 }
 
-export interface CodexClientSettings {
+export interface ChatGPTDesktopSettings {
   source: "mirror" | "official";
   customUrl: string;
   autoCheck: boolean;
@@ -749,12 +751,12 @@ export interface CodexClientSettings {
   computerUseGuardOnLaunch: boolean;
 }
 
-export interface UpdateCodexClientSettingsRequest {
-  source?: CodexClientSettings["source"] | null;
+export interface UpdateChatGPTDesktopSettingsRequest {
+  source?: ChatGPTDesktopSettings["source"] | null;
   customUrl?: string | null;
   autoCheck?: boolean | null;
   askBefore?: boolean | null;
-  windowsInstallMode?: CodexClientSettings["windowsInstallMode"] | null;
+  windowsInstallMode?: ChatGPTDesktopSettings["windowsInstallMode"] | null;
   installRoot?: string | null;
   keepUserDataOnUninstall?: boolean | null;
   syncHistoryOnLaunch?: boolean | null;
@@ -766,24 +768,25 @@ export interface UpdateCodexClientSettingsRequest {
   computerUseGuardOnLaunch?: boolean | null;
 }
 
-export interface PlanCodexClientUpdateRequest {
+export interface PlanChatGPTDesktopUpdateRequest {
   installKind?: "msix" | "portable" | null;
 }
 
-export interface StageCodexClientUpdateRequest {
+export interface StageChatGPTDesktopUpdateRequest {
   installKind?: "msix" | "portable" | null;
 }
 
-export interface InstalledCodexClient {
+export interface InstalledChatGPTDesktop {
   path: string;
   version: string;
   arch: string | null;
   source: string;
+  generation: ChatGPTDesktopProductGeneration;
   packageFamilyName: string | null;
   installedAt: string | null;
 }
 
-export interface CodexClientRelease {
+export interface ChatGPTDesktopRelease {
   version: string;
   packageMoniker: string;
   architecture: string | null;
@@ -800,14 +803,14 @@ export interface CodexClientRelease {
   macosX64Version: string | null;
 }
 
-export interface CodexClientCapability {
+export interface DesktopClientCapability {
   id: string;
   label: string;
   status: Severity;
   detail: string;
 }
 
-export interface CodexClientPlan {
+export interface ChatGPTDesktopPlan {
   upToDate: boolean;
   currentVersion: string | null;
   latestVersion: string;
@@ -818,26 +821,26 @@ export interface CodexClientPlan {
   stagedPath: string | null;
   installRoot: string | null;
   warnings: string[];
-  capabilities: CodexClientCapability[];
+  capabilities: DesktopClientCapability[];
 }
 
-export interface CodexClientState {
+export interface ChatGPTDesktopState {
   installKind: "msix" | "portable";
   generatedAt: string;
   platform: string;
-  settings: CodexClientSettings;
-  installed: InstalledCodexClient | null;
+  settings: ChatGPTDesktopSettings;
+  installed: InstalledChatGPTDesktop | null;
   installClass: "managed" | "external" | "none" | string;
-  release: CodexClientRelease | null;
-  plan: CodexClientPlan | null;
+  release: ChatGPTDesktopRelease | null;
+  plan: ChatGPTDesktopPlan | null;
   stagingDir: string;
   notes: string[];
   running: boolean;
 }
 
-export type CodexClientStateCache = Partial<Record<"msix" | "portable", CodexClientState>>;
+export type ChatGPTDesktopStateCache = Partial<Record<"msix" | "portable", ChatGPTDesktopState>>;
 
-export interface CodexClientStageReport {
+export interface ChatGPTDesktopStageReport {
   installKind: "msix" | "portable";
   upToDate: boolean;
   stagedPath: string | null;
@@ -849,7 +852,7 @@ export interface CodexClientStageReport {
   notes: string[];
 }
 
-export interface CodexClientProgress {
+export interface ChatGPTDesktopProgress {
   installKind: "msix" | "portable";
   phase: string;
   message: string;
@@ -860,7 +863,7 @@ export interface CodexClientProgress {
   stepTotal: number | null;
 }
 
-export interface CodexClientInstallRequest {
+export interface ChatGPTDesktopInstallRequest {
   confirm: boolean;
   expectedCurrentVersion?: string | null;
   expectedLatestVersion?: string | null;
@@ -868,19 +871,19 @@ export interface CodexClientInstallRequest {
   installKind?: "msix" | "portable" | null;
 }
 
-export interface CodexClientUninstallRequest {
+export interface ChatGPTDesktopUninstallRequest {
   confirm: boolean;
   purgeUserData: boolean;
   installKind?: "msix" | "portable" | null;
 }
 
-export interface CodexClientOperationResult {
+export interface ChatGPTDesktopOperationResult {
   installKind: "msix" | "portable";
   success: boolean;
   action: string;
   message: string;
-  installed: InstalledCodexClient | null;
-  stage: CodexClientStageReport | null;
+  installed: InstalledChatGPTDesktop | null;
+  stage: ChatGPTDesktopStageReport | null;
   notes: string[];
 }
 
@@ -895,7 +898,7 @@ export interface ClaudeDesktopInstallKinds {
   exe: DesktopInstallKindInfo;
 }
 
-export interface CodexClientInstallKinds {
+export interface ChatGPTDesktopInstallKinds {
   msix: DesktopInstallKindInfo;
   portable: DesktopInstallKindInfo;
 }

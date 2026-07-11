@@ -1,21 +1,25 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    openCodexClientPath,
+    openChatGPTDesktopPath,
   } from "../lib/api";
   import {
-    codexClientView,
-    installOrUpdateCodexClient,
-    launchManagedCodexClient,
-    refreshCodexClient,
-    removeCodexClient,
-    setCodexClientConfirmUninstall,
-    setCodexClientSelectedKind,
-    stageCodexClientPackage,
-    startCodexClientProgressListener,
-    updateCodexClientDraft,
-    type CodexClientNoticeMessage
-  } from "../lib/codexClientStore";
+    chatgptDesktopView,
+    installOrUpdateChatGPTDesktop,
+    launchManagedChatGPTDesktop,
+    refreshChatGPTDesktop,
+    removeChatGPTDesktop,
+    setChatGPTDesktopConfirmUninstall,
+    setChatGPTDesktopSelectedKind,
+    stageChatGPTDesktopPackage,
+    startChatGPTDesktopProgressListener,
+    updateChatGPTDesktopDraft,
+    type ChatGPTDesktopNoticeMessage
+  } from "../lib/chatgptDesktopStore";
+  import {
+    brandChatGPTDesktopText,
+    chatgptDesktopGeneration
+  } from "../lib/chatgptDesktopBranding";
   import { t, type TranslationKey } from "../lib/i18n";
   import AppIcon from "../components/AppIcon.svelte";
   import DismissibleNotice from "../components/DismissibleNotice.svelte";
@@ -46,11 +50,11 @@
     topStripRecipe
   } from "../../styled-system/recipes";
   import type {
-    CodexClientProgress,
+    ChatGPTDesktopProgress,
     Severity
   } from "../types";
 
-  $: view = $codexClientView;
+  $: view = $chatgptDesktopView;
   $: installKinds = view.installKinds;
   $: selectedKind = view.selectedKind;
   $: effectiveSelectedKind = selectedKind;
@@ -69,7 +73,7 @@
   $: release = state?.release ?? null;
   $: planRefreshing = kindView.planRefreshing;
   $: planUnavailable = kindView.planStale;
-  $: planUnavailableText = $t("codexClient.planStale");
+  $: planUnavailableText = $t("chatgptDesktop.planStale");
   $: effectivePlan = planUnavailable ? null : plan;
   $: effectiveRelease = planUnavailable ? null : release;
   $: platform = state?.platform ?? view.kindViews.msix.state?.platform ?? view.kindViews.portable.state?.platform;
@@ -83,32 +87,36 @@
   $: canUninstall = Boolean(installed);
   $: progressPercent = progress?.percent ?? null;
   $: progressStepLabel = progress?.step && progress.stepTotal
-    ? $t("codexClient.progressStep", { current: progress.step, total: progress.stepTotal })
+    ? $t("chatgptDesktop.progressStep", { current: progress.step, total: progress.stepTotal })
     : "";
   $: showProgress = Boolean(progress && (busyAction === "stage" || busyAction === "install" || progress.phase === "done"));
 
   onMount(() => {
-    startCodexClientProgressListener();
+    startChatGPTDesktopProgressListener();
   });
 
+  function brandDesktopText(value: string) {
+    return brandChatGPTDesktopText(value, $chatgptDesktopGeneration);
+  }
+
   async function stagePackage() {
-    await stageCodexClientPackage();
+    await stageChatGPTDesktopPackage();
   }
 
   async function installOrUpdate() {
-    await installOrUpdateCodexClient();
+    await installOrUpdateChatGPTDesktop();
   }
 
   async function removeCodex() {
-    await removeCodexClient();
+    await removeChatGPTDesktop();
   }
 
   async function launchCodex() {
-    await launchManagedCodexClient();
+    await launchManagedChatGPTDesktop();
   }
 
   async function refreshCodex() {
-    await refreshCodexClient();
+    await refreshChatGPTDesktop();
   }
 
   function formatBytes(value: number | null | undefined) {
@@ -126,12 +134,12 @@
   }
 
   function progressPhaseLabel(value: string) {
-    const key = `codexClient.phase.${value}` as Parameters<typeof $t>[0];
+    const key = `chatgptDesktop.phase.${value}` as Parameters<typeof $t>[0];
     const label = $t(key);
     return label === key ? value : label;
   }
 
-  function formatNoticeMessage(message: CodexClientNoticeMessage | null) {
+  function formatNoticeMessage(message: ChatGPTDesktopNoticeMessage | null) {
     if (!message) {
       return "";
     }
@@ -142,33 +150,33 @@
   }
 
   function formatProgressMessage(message: string) {
-    if (message.startsWith("codexClient.")) {
+    if (message.startsWith("chatgptDesktop.")) {
       return $t(message as TranslationKey);
     }
     return message;
   }
 
-  function progressByteLabel(value: CodexClientProgress) {
+  function progressByteLabel(value: ChatGPTDesktopProgress) {
     if (value.downloaded !== null && value.total !== null) {
-      return $t("codexClient.progressBytes", {
+      return $t("chatgptDesktop.progressBytes", {
         downloaded: formatBytes(value.downloaded),
         total: formatBytes(value.total)
       });
     }
     if (value.downloaded !== null) {
-      return $t("codexClient.progressDownloaded", {
+      return $t("chatgptDesktop.progressDownloaded", {
         downloaded: formatBytes(value.downloaded)
       });
     }
-    return $t("codexClient.progressWorking");
+    return $t("chatgptDesktop.progressWorking");
   }
 
   function dismissError() {
-    codexClientView.update((current) => ({ ...current, error: null }));
+    chatgptDesktopView.update((current) => ({ ...current, error: null }));
   }
 
   function dismissSuccess() {
-    codexClientView.update((current) => ({ ...current, success: null }));
+    chatgptDesktopView.update((current) => ({ ...current, success: null }));
   }
 
   const headingCopyClass = css({
@@ -197,8 +205,8 @@
 <div class={routeStackRecipe({ width: "desktopClient" })}>
   <section class={topStripRecipe()}>
     <div>
-      <h1>{$t("codexClient.title")}</h1>
-      <p>{$t("codexClient.subtitle")}</p>
+      <h1>{$t("chatgptDesktop.title")}</h1>
+      <p>{$t("chatgptDesktop.subtitle")}</p>
       <div class={statusStripRecipe()}>
         <StatusPill status={statusTone} label={statusLabel} />
         <span>{state ? $t("dashboard.lastScan", { time: new Date(state.generatedAt).toLocaleString() }) : $t("dashboard.waitingForScan")}</span>
@@ -211,7 +219,7 @@
           {$t("toolLaunch.starting")}
         {:else}
           <AppIcon name="play" size={16} />
-          {$t("codexClient.launch")}
+          {$t("chatgptDesktop.launch")}
         {/if}
       </button>
       <button class={actionButtonRecipe()} data-refresh-button="true" disabled={kindView.loading || busyAction !== null} on:click={refreshCodex}>
@@ -227,7 +235,7 @@
         role="tab"
         data-selected={effectiveSelectedKind === "msix"}
         aria-selected={effectiveSelectedKind === "msix"}
-        on:click={() => setCodexClientSelectedKind("msix")}
+        on:click={() => setChatGPTDesktopSelectedKind("msix")}
       >
         {$t("desktopClient.kind.windowsApp")}
       </button>
@@ -235,7 +243,7 @@
         role="tab"
         data-selected={effectiveSelectedKind === "portable"}
         aria-selected={effectiveSelectedKind === "portable"}
-        on:click={() => setCodexClientSelectedKind("portable")}
+        on:click={() => setChatGPTDesktopSelectedKind("portable")}
       >
         {$t("desktopClient.kind.exe")}
       </button>
@@ -243,16 +251,16 @@
   {/if}
 
   {#if error}
-    <DismissibleNotice tone="error" message={error} on:dismiss={dismissError} />
+    <DismissibleNotice tone="error" message={brandDesktopText(error)} on:dismiss={dismissError} />
   {/if}
   {#if success}
-    <DismissibleNotice tone="success" message={formatNoticeMessage(success)} on:dismiss={dismissSuccess} />
+    <DismissibleNotice tone="success" message={brandDesktopText(formatNoticeMessage(success))} on:dismiss={dismissSuccess} />
   {/if}
 
   <section class={panelRecipe()}>
     <div class={sectionHeadingRecipe()}>
       <div class={headingCopyClass}>
-        <h2>{$t("codexClient.launchOptionsTitle")}</h2>
+        <h2>{$t("chatgptDesktop.launchOptionsTitle")}</h2>
       </div>
     </div>
     {#if settingsDraft}
@@ -261,61 +269,61 @@
           <input
             type="checkbox"
             checked={settingsDraft.syncHistoryOnLaunch}
-            on:change={(event) => updateCodexClientDraft({ syncHistoryOnLaunch: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ syncHistoryOnLaunch: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.syncHistoryOnLaunch")}</strong>
+            <strong>{$t("chatgptDesktop.syncHistoryOnLaunch")}</strong>
           </span>
         </label>
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.pluginMarketplaceUnlockOnLaunch}
-            on:change={(event) => updateCodexClientDraft({ pluginMarketplaceUnlockOnLaunch: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ pluginMarketplaceUnlockOnLaunch: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.pluginMarketplaceUnlockOnLaunch")}</strong>
+            <strong>{$t("chatgptDesktop.pluginMarketplaceUnlockOnLaunch")}</strong>
           </span>
         </label>
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.officialRemotePluginCacheOnLaunch}
-            on:change={(event) => updateCodexClientDraft({ officialRemotePluginCacheOnLaunch: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ officialRemotePluginCacheOnLaunch: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.officialRemotePluginCacheOnLaunch")}</strong>
-            <small>{$t("codexClient.officialRemotePluginCacheOnLaunchHint")}</small>
+            <strong>{$t("chatgptDesktop.officialRemotePluginCacheOnLaunch")}</strong>
+            <small>{$t("chatgptDesktop.officialRemotePluginCacheOnLaunchHint")}</small>
           </span>
         </label>
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.pluginAutoExpandOnLaunch}
-            on:change={(event) => updateCodexClientDraft({ pluginAutoExpandOnLaunch: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ pluginAutoExpandOnLaunch: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.pluginAutoExpandOnLaunch")}</strong>
+            <strong>{$t("chatgptDesktop.pluginAutoExpandOnLaunch")}</strong>
           </span>
         </label>
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.modelWhitelistUnlockOnLaunch}
-            on:change={(event) => updateCodexClientDraft({ modelWhitelistUnlockOnLaunch: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ modelWhitelistUnlockOnLaunch: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.modelWhitelistUnlockOnLaunch")}</strong>
+            <strong>{$t("chatgptDesktop.modelWhitelistUnlockOnLaunch")}</strong>
           </span>
         </label>
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.serviceTierControlsOnLaunch}
-            on:change={(event) => updateCodexClientDraft({ serviceTierControlsOnLaunch: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ serviceTierControlsOnLaunch: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.serviceTierControlsOnLaunch")}</strong>
+            <strong>{$t("chatgptDesktop.serviceTierControlsOnLaunch")}</strong>
           </span>
         </label>
         {#if isWindows}
@@ -323,11 +331,11 @@
             <input
               type="checkbox"
               checked={settingsDraft.computerUseGuardOnLaunch}
-              on:change={(event) => updateCodexClientDraft({ computerUseGuardOnLaunch: event.currentTarget.checked })}
+              on:change={(event) => updateChatGPTDesktopDraft({ computerUseGuardOnLaunch: event.currentTarget.checked })}
             />
             <span>
-              <strong>{$t("codexClient.computerUseGuardOnLaunch")}</strong>
-              <small>{$t("codexClient.computerUseGuardOnLaunchHint")}</small>
+              <strong>{$t("chatgptDesktop.computerUseGuardOnLaunch")}</strong>
+              <small>{$t("chatgptDesktop.computerUseGuardOnLaunchHint")}</small>
             </span>
           </label>
         {/if}
@@ -338,24 +346,24 @@
   <section class={panelRecipe()}>
     <div class={sectionHeadingRecipe()}>
       <div class={headingCopyClass}>
-        <h2>{$t("codexClient.statusTitle")}</h2>
-        <p>{installed?.path ?? $t("codexClient.notInstalled")}</p>
+        <h2>{$t("chatgptDesktop.statusTitle")}</h2>
+        <p>{installed?.path ?? $t("chatgptDesktop.notInstalled")}</p>
       </div>
       <StatusPill status={statusTone} label={statusLabel} />
     </div>
     <div class={desktopClientMetricsRecipe()}>
       <div>
-        <span>{$t("codexClient.currentVersion")}</span>
+        <span>{$t("chatgptDesktop.currentVersion")}</span>
         <strong>{installed?.version ?? $t("common.none")}</strong>
         <small>{installed?.source ?? $t("common.unknown")}</small>
       </div>
       <div>
-        <span>{$t("codexClient.latestVersion")}</span>
+        <span>{$t("chatgptDesktop.latestVersion")}</span>
         <strong>{effectiveRelease?.version ?? $t("common.unknown")}</strong>
-        <small>{planUnavailable ? planUnavailableText : effectiveRelease?.packageMoniker ?? $t("codexClient.planNotLoaded")}</small>
+        <small>{planUnavailable ? planUnavailableText : effectiveRelease?.packageMoniker ?? $t("chatgptDesktop.planNotLoaded")}</small>
       </div>
       <div>
-        <span>{$t("codexClient.packageSize")}</span>
+        <span>{$t("chatgptDesktop.packageSize")}</span>
         <strong>{formatBytes(effectivePlan?.downloadSize ?? effectiveRelease?.contentLength)}</strong>
         <small>{effectiveRelease?.sha256 ? `${effectiveRelease.sha256.slice(0, 12)}...` : $t("common.unknown")}</small>
       </div>
@@ -363,17 +371,17 @@
     <div class={desktopClientActionsRecipe()}>
       <button class={actionButtonRecipe()} disabled={!canStage || busyAction !== null} on:click={stagePackage}>
         <AppIcon name="download" size={16} />
-        {busyAction === "stage" ? $t("codexClient.staging") : $t("codexClient.stage")}
+        {busyAction === "stage" ? $t("chatgptDesktop.staging") : $t("chatgptDesktop.stage")}
       </button>
-      <button class={actionButtonRecipe()} on:click={() => openCodexClientPath("staging")}>
+      <button class={actionButtonRecipe()} on:click={() => openChatGPTDesktopPath("staging")}>
         <AppIcon name="folder" size={16} />
-        {$t("codexClient.openStagingPath")}
+        {$t("chatgptDesktop.openStagingPath")}
       </button>
       <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canInstall || busyAction !== null} on:click={installOrUpdate}>
         <AppIcon name="rocket" size={16} />
-        {busyAction === "install" ? $t("codexClient.installing") : installed ? $t("codexClient.update") : $t("codexClient.install")}
+        {busyAction === "install" ? $t("chatgptDesktop.installing") : installed ? $t("chatgptDesktop.update") : $t("chatgptDesktop.install")}
       </button>
-      <button class={actionButtonRecipe()} disabled={!canUninstall || busyAction !== null} on:click={() => setCodexClientConfirmUninstall(true)}>
+      <button class={actionButtonRecipe()} disabled={!canUninstall || busyAction !== null} on:click={() => setChatGPTDesktopConfirmUninstall(true)}>
         <AppIcon name="delete" size={16} />
         {$t("common.uninstall")}
       </button>
@@ -391,7 +399,7 @@
           ></span>
         </div>
         <div data-desktop-client-progress-meta>
-          <span>{progressPercent === null ? $t("codexClient.progressUnknown") : `${progressPercent.toFixed(0)}%`}</span>
+          <span>{progressPercent === null ? $t("chatgptDesktop.progressUnknown") : `${progressPercent.toFixed(0)}%`}</span>
           <span>{progressByteLabel(progress)}</span>
         </div>
       </div>
@@ -401,14 +409,14 @@
   <section class={panelRecipe()}>
     <div class={sectionHeadingRecipe()}>
       <div class={headingCopyClass}>
-        <h2>{$t("codexClient.planTitle")}</h2>
-        <p>{planUnavailable ? planUnavailableText : effectiveRelease?.manifestUrl ?? $t("codexClient.planNotLoaded")}</p>
+        <h2>{$t("chatgptDesktop.planTitle")}</h2>
+        <p>{planUnavailable ? planUnavailableText : effectiveRelease?.manifestUrl ?? $t("chatgptDesktop.planNotLoaded")}</p>
       </div>
       <div class={sectionActionsClass}>
         {#if planUnavailable}
           <StatusPill status="info" label={planUnavailableText} />
         {:else if effectivePlan}
-          <StatusPill status={effectivePlan.upToDate ? "ok" : "warning"} label={effectivePlan.upToDate ? $t("codexClient.upToDate") : $t("codexClient.updateAvailable")} />
+          <StatusPill status={effectivePlan.upToDate ? "ok" : "warning"} label={effectivePlan.upToDate ? $t("chatgptDesktop.upToDate") : $t("chatgptDesktop.updateAvailable")} />
         {/if}
       </div>
     </div>
@@ -420,7 +428,7 @@
         </div>
       {:else if effectivePlan}
         <div>
-          <strong>{$t("codexClient.downloadUrl")}</strong>
+          <strong>{$t("chatgptDesktop.downloadUrl")}</strong>
           <span>{effectivePlan.packageUrl}</span>
         </div>
         <div>
@@ -428,32 +436,32 @@
           <span>{effectivePlan.sha256}</span>
         </div>
         <div>
-          <strong>{$t("codexClient.installRoot")}</strong>
+          <strong>{$t("chatgptDesktop.installRoot")}</strong>
           <span>{effectivePlan.installRoot ?? $t("common.none")}</span>
         </div>
         {#if stageReport}
           <div>
-            <strong>{$t("codexClient.stageReport")}</strong>
+            <strong>{$t("chatgptDesktop.stageReport")}</strong>
             <span>
               {stageReport.stagedPath ?? $t("common.none")} / {formatBytes(stageReport.downloadSize)}
-              / {stageReport.hashVerified ? $t("codexClient.hashVerified") : $t("common.error")}
+              / {stageReport.hashVerified ? $t("chatgptDesktop.hashVerified") : $t("common.error")}
             </span>
           </div>
         {/if}
         {#if operationResult}
           <div>
-            <strong>{$t("codexClient.lastOperation")}</strong>
-            <span>{operationResult.action} / {operationResult.notes.join(" ")}</span>
+            <strong>{$t("chatgptDesktop.lastOperation")}</strong>
+            <span>{operationResult.action} / {brandDesktopText(operationResult.notes.join(" "))}</span>
           </div>
         {/if}
         {#each effectivePlan.warnings as warning}
           <div class={warningRowClass}>
             <strong>{$t("status.warning")}</strong>
-            <span>{warning}</span>
+            <span>{brandDesktopText(warning)}</span>
           </div>
         {/each}
       {:else}
-        <div class={emptyRowRecipe()}>{$t("codexClient.planNotLoaded")}</div>
+        <div class={emptyRowRecipe()}>{$t("chatgptDesktop.planNotLoaded")}</div>
       {/if}
     </div>
   </section>
@@ -461,8 +469,8 @@
   <section class={panelRecipe()}>
     <div class={sectionHeadingRecipe()}>
       <div class={headingCopyClass}>
-        <h2>{$t("codexClient.capabilities")}</h2>
-        <p>{$t("codexClient.capabilityHint")}</p>
+        <h2>{$t("chatgptDesktop.capabilities")}</h2>
+        <p>{$t("chatgptDesktop.capabilityHint")}</p>
       </div>
     </div>
     <div class={doctorListRecipe()}>
@@ -476,12 +484,12 @@
           <div class={doctorRowRecipe()}>
             <StatusPill status={capability.status} label={$t(`status.${capability.status}` as Parameters<typeof $t>[0])} />
             <div>
-              <h3>{capability.label}</h3>
-              <p>{capability.detail}</p>
+              <h3>{brandDesktopText(capability.label)}</h3>
+              <p>{brandDesktopText(capability.detail)}</p>
             </div>
           </div>
         {:else}
-          <div class={emptyRowRecipe()}>{$t("codexClient.capabilityEmpty")}</div>
+          <div class={emptyRowRecipe()}>{$t("chatgptDesktop.capabilityEmpty")}</div>
         {/each}
       {/if}
     </div>
@@ -490,51 +498,51 @@
   <section class={panelRecipe()}>
     <div class={sectionHeadingRecipe()}>
       <div class={headingCopyClass}>
-        <h2>{$t("codexClient.settingsTitle")}</h2>
-        <p>{$t("codexClient.settingsHint")}</p>
+        <h2>{$t("chatgptDesktop.settingsTitle")}</h2>
+        <p>{$t("chatgptDesktop.settingsHint")}</p>
       </div>
     </div>
     {#if settingsDraft}
       <div class={desktopClientSettingsListRecipe()}>
         {#if isMacos}
           <label>
-            {$t("codexClient.source")}
+            {$t("chatgptDesktop.source")}
             <select
               value={settingsDraft.source}
-              on:change={(event) => updateCodexClientDraft({ source: event.currentTarget.value as "mirror" | "official" })}
+              on:change={(event) => updateChatGPTDesktopDraft({ source: event.currentTarget.value as "mirror" | "official" })}
             >
-              <option value="mirror">{$t("codexClient.source.mirror")}</option>
-              <option value="official">{$t("codexClient.source.official")}</option>
+              <option value="mirror">{$t("chatgptDesktop.source.mirror")}</option>
+              <option value="official">{$t("chatgptDesktop.source.official")}</option>
             </select>
           </label>
         {/if}
         <label>
-          {$t("codexClient.installRoot")}
+          {$t("chatgptDesktop.installRoot")}
           <input
             value={settingsDraft.installRoot}
-            on:input={(event) => updateCodexClientDraft({ installRoot: event.currentTarget.value })}
+            on:input={(event) => updateChatGPTDesktopDraft({ installRoot: event.currentTarget.value })}
           />
         </label>
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.autoCheck}
-            on:change={(event) => updateCodexClientDraft({ autoCheck: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ autoCheck: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.autoCheck")}</strong>
-            <small>{$t("codexClient.autoCheckHint")}</small>
+            <strong>{$t("chatgptDesktop.autoCheck")}</strong>
+            <small>{$t("chatgptDesktop.autoCheckHint")}</small>
           </span>
         </label>
         <label class={nativeToggleRecipe()} data-native-toggle>
           <input
             type="checkbox"
             checked={settingsDraft.keepUserDataOnUninstall}
-            on:change={(event) => updateCodexClientDraft({ keepUserDataOnUninstall: event.currentTarget.checked })}
+            on:change={(event) => updateChatGPTDesktopDraft({ keepUserDataOnUninstall: event.currentTarget.checked })}
           />
           <span>
-            <strong>{$t("codexClient.keepUserData")}</strong>
-            <small>{$t("codexClient.keepUserDataHint")}</small>
+            <strong>{$t("chatgptDesktop.keepUserData")}</strong>
+            <small>{$t("chatgptDesktop.keepUserDataHint")}</small>
           </span>
         </label>
       </div>
@@ -548,26 +556,26 @@
     <div class={desktopClientModalPanelRecipe()}>
       <div class={desktopClientModalBodyRecipe()}>
         <div>
-        <h2>{$t("codexClient.uninstallTitle")}</h2>
-        <p>{$t("codexClient.uninstallDescription")}</p>
+        <h2>{$t("chatgptDesktop.uninstallTitle")}</h2>
+        <p>{$t("chatgptDesktop.uninstallDescription")}</p>
       </div>
       <div class={desktopClientPreviewListRecipe()}>
         <div>
-          <strong>{$t("codexClient.currentVersion")}</strong>
+          <strong>{$t("chatgptDesktop.currentVersion")}</strong>
           <span>{installed?.version ?? $t("common.none")} / {installed?.path ?? $t("common.none")}</span>
         </div>
         <div>
-          <strong>{$t("codexClient.keepUserData")}</strong>
+          <strong>{$t("chatgptDesktop.keepUserData")}</strong>
           <span>{settingsDraft?.keepUserDataOnUninstall ? $t("common.enabled") : $t("common.disabled")}</span>
         </div>
       </div>
       </div>
 
       <div class={desktopClientModalActionsRecipe()}>
-        <button class={actionButtonRecipe()} on:click={() => setCodexClientConfirmUninstall(false)}>{$t("common.cancel")}</button>
+        <button class={actionButtonRecipe()} on:click={() => setChatGPTDesktopConfirmUninstall(false)}>{$t("common.cancel")}</button>
         <button class={actionButtonRecipe({ tone: "primary" })} disabled={busyAction !== null} on:click={removeCodex}>
           <AppIcon name="delete" size={16} />
-          {busyAction === "uninstall" ? $t("codexClient.uninstalling") : $t("codexClient.confirmUninstall")}
+          {busyAction === "uninstall" ? $t("chatgptDesktop.uninstalling") : $t("chatgptDesktop.confirmUninstall")}
         </button>
       </div>
     </div>

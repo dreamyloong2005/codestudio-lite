@@ -1,7 +1,7 @@
 use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path, ensure_dirs};
 use crate::core::backup;
-use crate::core::codex_client;
+use crate::core::chatgpt_desktop;
 use crate::core::credentials;
 use crate::core::detector;
 use crate::core::env_health;
@@ -826,7 +826,7 @@ pub fn preview_profile_apply(
     let tool_name = tool
         .as_ref()
         .map(|definition| definition.name)
-        .or_else(|| is_codex_tool.then_some("Codex Desktop"))
+        .or_else(|| is_codex_tool.then_some("ChatGPT Desktop"))
         .unwrap_or("Target tool");
     let config_native_diff = build_native_config_preview(
         &profile,
@@ -1485,7 +1485,7 @@ fn active_profile_for_lifecycle_app(
         ProviderApplyMode::Config => &config.active_profiles_by_mode.config,
         ProviderApplyMode::Gateway => &config.active_profiles_by_mode.gateway,
     };
-    let active_id = active_profiles.get(app)?;
+    let active_id = active_profile_id_for_app(active_profiles, app)?;
     profiles
         .iter()
         .find(|profile| {
@@ -1527,7 +1527,7 @@ struct RestartContext {
 #[derive(Clone, Copy)]
 enum RestartLaunch {
     CloseOnly,
-    CodexClient,
+    ChatGptDesktop,
     Command {
         command: &'static str,
         hidden: bool,
@@ -1650,7 +1650,7 @@ fn restart_targets_for_app(app: &str, context: RestartContext) -> Vec<RestartTar
                 exclude_command_markers: EMPTY,
                 require_window: true,
                 reject_window: false,
-                launch: RestartLaunch::CodexClient,
+                launch: RestartLaunch::ChatGptDesktop,
             },
             RestartTarget {
                 label: "Codex VS Code extension backend",
@@ -1966,7 +1966,7 @@ foreach ($id in $targetIds) {{
 fn launch_restart_target(target: RestartTarget, paths: &[String]) -> Result<(), String> {
     match target.launch {
         RestartLaunch::CloseOnly => Ok(()),
-        RestartLaunch::CodexClient => codex_client::launch(),
+        RestartLaunch::ChatGptDesktop => chatgpt_desktop::launch(),
         RestartLaunch::Command { command, hidden } => launch_process(command, hidden),
         RestartLaunch::ExistingProcessPath {
             fallback_command,
@@ -2249,17 +2249,26 @@ fn profile_is_active(config: &AppConfig, profile: &ProfileDraft) -> bool {
         ProviderApplyMode::Gateway => &config.active_profiles_by_mode.gateway,
     };
     let app = canonical_profile_app(&profile.app);
-    active_profiles
-        .get(&app)
-        .or_else(|| {
-            if app == "codex" {
-                active_profiles.get("codex-app")
-            } else {
-                None
-            }
-        })
+    active_profile_id_for_app(active_profiles, &app)
         .map(|active_id| active_id == &profile.id)
         .unwrap_or(false)
+}
+
+fn active_profile_id_for_app<'a>(
+    active_profiles: &'a HashMap<String, String>,
+    app: &str,
+) -> Option<&'a String> {
+    active_profiles.get(app).or_else(|| {
+        if app == "codex" {
+            active_profiles
+                .get("chatgpt-desktop")
+                .or_else(|| active_profiles.get("codex-app"))
+                .or_else(|| active_profiles.get("codex-client"))
+                .or_else(|| active_profiles.get("codex-desktop"))
+        } else {
+            None
+        }
+    })
 }
 
 fn verify_active_profile(config: &AppConfig, profile: &ProfileDraft) -> bool {
@@ -5147,8 +5156,10 @@ fn is_codex_family_app(app: &str) -> bool {
 
 fn canonical_profile_app(app: &str) -> String {
     match app.trim().to_ascii_lowercase().as_str() {
-        "codex" | "codex-cli" | "codex-app" | "codex-client" | "codex-desktop" | "codex-vscode"
-        | "codex-code-vscode" | "codex-vs-code" => "codex".to_string(),
+        "codex" | "codex-cli" | "chatgpt-desktop" | "codex-app" | "codex-client"
+        | "codex-desktop" | "codex-vscode" | "codex-code-vscode" | "codex-vs-code" => {
+            "codex".to_string()
+        }
         "claude-desktop" | "claude-app" | "claude-client" => "claude-desktop".to_string(),
         "claude-vscode" | "claude-code-vscode" | "claude-vs-code" => "claude".to_string(),
         "gemini-code-assist" | "gemini-vscode" | "gemini-code-vscode" | "gemini-vs-code" => {

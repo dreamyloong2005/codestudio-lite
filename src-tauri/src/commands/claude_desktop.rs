@@ -1,4 +1,4 @@
-use crate::core::codex_client::CodexClientCapability;
+use crate::core::chatgpt_desktop::DesktopClientCapability;
 use crate::core::platform::package;
 use crate::core::types::{ClaudeDesktopPageState, ClaudeDesktopPendingLaunch, ClaudeDesktopPlan};
 use crate::core::{claude_desktop_patch, detector, tool_installer};
@@ -65,7 +65,7 @@ pub async fn inspect_claude_desktop_page(
         let plan = tool_installer::plan_claude_desktop_update_for_status(status).ok();
         let capabilities = package::probe_msix_capabilities()
             .into_iter()
-            .map(|cap| CodexClientCapability {
+            .map(|cap| DesktopClientCapability {
                 id: cap.id,
                 label: cap.label,
                 status: cap.status,

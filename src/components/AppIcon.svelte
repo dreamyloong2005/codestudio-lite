@@ -53,7 +53,7 @@
     clock,
     close: x,
     claudeDesktop: appWindow,
-    codexClient: appWindow,
+    chatgptDesktop: appWindow,
     copy,
     dashboard: squaresFour,
     delete: trash,

@@ -1,6 +1,6 @@
 use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path};
-use crate::core::codex_client;
+use crate::core::chatgpt_desktop;
 use crate::core::env_health;
 use crate::core::npm_global;
 use crate::core::platform::{hidden_command_with_args, package, resolve_command};
@@ -38,7 +38,7 @@ const UPDATE_CACHE_TTL: Duration = Duration::from_secs(600);
 const NPM_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const WINGET_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
-const CODEX_CLIENT_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
+const CHATGPT_DESKTOP_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const FOREGROUND_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(6000);
 const CLAUDE_DESKTOP_INSTALL_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -96,8 +96,8 @@ pub fn detect_environment_with_options(
     profile::ensure_app_dirs()?;
     let paths = app_paths().map_err(|err| err.to_string())?;
     let mut tools = detect_tools(ai_tools_for_environment(resolve_command("code").is_some()));
-    if supports_codex_desktop_client() {
-        tools.push(codex_client::tool_status());
+    if supports_chatgpt_desktop() {
+        tools.push(chatgpt_desktop::tool_status());
     }
     let mut system = detect_tools(system_tools());
     annotate_update_status(&mut tools, &mut system, options);
@@ -161,8 +161,8 @@ pub fn detect_environment_with_options(
     } else {
         None
     };
-    let codex_install_kinds = if supports_codex_desktop_client() {
-        Some(codex_client::codex_client_install_kinds())
+    let chatgpt_desktop_install_kinds = if supports_chatgpt_desktop() {
+        Some(chatgpt_desktop::chatgpt_desktop_install_kinds())
     } else {
         None
     };
@@ -180,8 +180,9 @@ pub fn detect_environment_with_options(
         system,
         problems,
         env_conflicts,
+        chatgpt_desktop_product_generation: chatgpt_desktop::detected_product_generation(),
         claude_install_kinds,
-        codex_install_kinds,
+        chatgpt_desktop_install_kinds,
     };
     let _ = storage::store_detection_cache(&snapshot);
     Ok(snapshot)
@@ -202,7 +203,7 @@ pub fn detect_environment_fresh() -> Result<DetectionSnapshot, String> {
         wait_for_updates: true,
     })?;
     surface_claude_desktop_latest(&mut snapshot, Duration::from_millis(3000));
-    surface_codex_client_latest(&mut snapshot, Duration::from_millis(3000));
+    surface_chatgpt_desktop_latest(&mut snapshot, Duration::from_millis(3000));
     // detect_environment already stored the fast snapshot; re-store so the
     // latest-version field populated above is persisted for cached reads.
     let _ = storage::store_detection_cache(&snapshot);
@@ -241,20 +242,20 @@ fn apply_claude_desktop_latest_to_tools(tools: &mut [ToolStatus], latest: &str) 
     }
 }
 
-/// Apply the cached Codex client latest version to the snapshot codex-app
+/// Apply the cached ChatGPT Desktop latest version to the snapshot tool
 /// tool, waiting up to wait_budget for an in-flight background fetch. Sets
 /// latest_version always and update_available only when installed, mirroring
 /// the Claude Desktop latest-version surfacing path.
-fn surface_codex_client_latest(snapshot: &mut DetectionSnapshot, wait_budget: Duration) {
-    let Some(latest) = codex_client::latest_version_cached(wait_budget) else {
+fn surface_chatgpt_desktop_latest(snapshot: &mut DetectionSnapshot, wait_budget: Duration) {
+    let Some(latest) = chatgpt_desktop::latest_version_cached(wait_budget) else {
         return;
     };
-    apply_codex_client_latest_to_tools(&mut snapshot.tools, &latest);
+    apply_chatgpt_desktop_latest_to_tools(&mut snapshot.tools, &latest);
 }
 
-fn apply_codex_client_latest_to_tools(tools: &mut [ToolStatus], latest: &str) {
+fn apply_chatgpt_desktop_latest_to_tools(tools: &mut [ToolStatus], latest: &str) {
     for tool in tools.iter_mut() {
-        if tool.id != "codex-app" {
+        if tool.id != "chatgpt-desktop" {
             continue;
         }
         tool.latest_version = Some(latest.to_string());
@@ -333,11 +334,11 @@ fn current_platform_label() -> String {
     }
 }
 
-fn supports_codex_desktop_client() -> bool {
-    supports_codex_desktop_client_for_platform(&current_platform_label())
+fn supports_chatgpt_desktop() -> bool {
+    supports_chatgpt_desktop_for_platform(&current_platform_label())
 }
 
-fn supports_codex_desktop_client_for_platform(platform: &str) -> bool {
+fn supports_chatgpt_desktop_for_platform(platform: &str) -> bool {
     matches!(platform, "windows" | "macos")
 }
 
@@ -1142,8 +1143,8 @@ fn annotate_update_status(
         cached_winget_outdated(options.update_wait_budget(WINGET_UPDATE_WAIT_BUDGET));
     let claude_desktop_latest =
         cached_claude_desktop_latest(options.update_wait_budget(CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET));
-    let codex_client_latest = codex_client::latest_version_cached(
-        options.update_wait_budget(CODEX_CLIENT_UPDATE_WAIT_BUDGET),
+    let chatgpt_desktop_latest = chatgpt_desktop::latest_version_cached(
+        options.update_wait_budget(CHATGPT_DESKTOP_UPDATE_WAIT_BUDGET),
     );
     for tool in tools.iter_mut().chain(system.iter_mut()) {
         tool.update_command = update_command_for_tool(&tool.id);
@@ -1160,8 +1161,8 @@ fn annotate_update_status(
                 continue;
             }
         }
-        if tool.id == "codex-app" {
-            if let Some(latest) = codex_client_latest.as_deref() {
+        if tool.id == "chatgpt-desktop" {
+            if let Some(latest) = chatgpt_desktop_latest.as_deref() {
                 tool.latest_version = Some(latest.to_string());
                 if tool.install_state != InstallState::Installed {
                     continue;
@@ -1871,10 +1872,10 @@ mod tests {
     }
 
     #[test]
-    fn linux_platform_does_not_track_codex_desktop_client() {
-        assert!(!supports_codex_desktop_client_for_platform("linux"));
-        assert!(supports_codex_desktop_client_for_platform("windows"));
-        assert!(supports_codex_desktop_client_for_platform("macos"));
+    fn linux_platform_does_not_track_chatgpt_desktop() {
+        assert!(!supports_chatgpt_desktop_for_platform("linux"));
+        assert!(supports_chatgpt_desktop_for_platform("windows"));
+        assert!(supports_chatgpt_desktop_for_platform("macos"));
     }
 
     #[test]
@@ -2224,10 +2225,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_codex_client_latest_to_tools_sets_update_when_installed_and_behind() {
+    fn apply_chatgpt_desktop_latest_to_tools_sets_update_when_installed_and_behind() {
         let mut tools = vec![ToolStatus {
-            id: "codex-app".to_string(),
-            name: "Codex".to_string(),
+            id: "chatgpt-desktop".to_string(),
+            name: "ChatGPT Desktop".to_string(),
             category: ToolCategory::AiTool,
             command: "Codex.exe".to_string(),
             path_repair: None,
@@ -2244,16 +2245,16 @@ mod tests {
             install_kind: None,
             running: false,
         }];
-        apply_codex_client_latest_to_tools(&mut tools, "0.10.0");
+        apply_chatgpt_desktop_latest_to_tools(&mut tools, "0.10.0");
         assert_eq!(tools[0].latest_version.as_deref(), Some("0.10.0"));
         assert!(tools[0].update_available);
     }
 
     #[test]
-    fn apply_codex_client_latest_to_tools_marks_up_to_date_when_current_matches_latest() {
+    fn apply_chatgpt_desktop_latest_to_tools_marks_up_to_date_when_current_matches_latest() {
         let mut tools = vec![ToolStatus {
-            id: "codex-app".to_string(),
-            name: "Codex".to_string(),
+            id: "chatgpt-desktop".to_string(),
+            name: "ChatGPT Desktop".to_string(),
             category: ToolCategory::AiTool,
             command: "Codex.exe".to_string(),
             path_repair: None,
@@ -2270,16 +2271,16 @@ mod tests {
             install_kind: None,
             running: false,
         }];
-        apply_codex_client_latest_to_tools(&mut tools, "0.10.0");
+        apply_chatgpt_desktop_latest_to_tools(&mut tools, "0.10.0");
         assert_eq!(tools[0].latest_version.as_deref(), Some("0.10.0"));
         assert!(!tools[0].update_available);
     }
 
     #[test]
-    fn apply_codex_client_latest_to_tools_surfaces_latest_without_update_when_missing() {
+    fn apply_chatgpt_desktop_latest_to_tools_surfaces_latest_without_update_when_missing() {
         let mut tools = vec![ToolStatus {
-            id: "codex-app".to_string(),
-            name: "Codex".to_string(),
+            id: "chatgpt-desktop".to_string(),
+            name: "ChatGPT Desktop".to_string(),
             category: ToolCategory::AiTool,
             command: "Codex.exe".to_string(),
             path_repair: None,
@@ -2296,7 +2297,7 @@ mod tests {
             install_kind: None,
             running: false,
         }];
-        apply_codex_client_latest_to_tools(&mut tools, "0.10.0");
+        apply_chatgpt_desktop_latest_to_tools(&mut tools, "0.10.0");
         assert_eq!(tools[0].latest_version.as_deref(), Some("0.10.0"));
         // Not installed: latest is surfaced for display, update_available stays off.
         assert!(!tools[0].update_available);

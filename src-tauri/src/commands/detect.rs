@@ -1,6 +1,8 @@
 use crate::core::platform::package;
-use crate::core::types::{ClaudeDesktopInstallKinds, CodexClientInstallKinds, DetectionSnapshot};
-use crate::core::{codex_client, detector};
+use crate::core::types::{
+    ChatGptDesktopInstallKinds, ClaudeDesktopInstallKinds, DetectionSnapshot,
+};
+use crate::core::{chatgpt_desktop, detector};
 use serde::Deserialize;
 
 #[derive(Debug, Default, Deserialize)]
@@ -56,27 +58,27 @@ pub async fn detect_claude_install_kinds() -> Result<ClaudeDesktopInstallKinds, 
         .map_err(|err| err.to_string())
 }
 
-/// Per-kind install detection for the Codex desktop client page tabs:
+/// Per-kind install detection for the ChatGPT desktop client page tabs:
 /// resolves the MSIX (Windows App) and portable installs independently so
 /// the UI can show a tab per install kind.
 #[tauri::command]
-pub async fn detect_codex_install_kinds() -> Result<CodexClientInstallKinds, String> {
-    tauri::async_runtime::spawn_blocking(codex_client::codex_client_install_kinds)
+pub async fn detect_chatgpt_desktop_install_kinds() -> Result<ChatGptDesktopInstallKinds, String> {
+    tauri::async_runtime::spawn_blocking(chatgpt_desktop::chatgpt_desktop_install_kinds)
         .await
         .map_err(|err| err.to_string())
 }
 
 /// Local MSIX-runtime capability check for the Claude Desktop page (mirrors
-/// the Codex client capability panel): probes Add-AppxPackage, AppXSvc and
+/// the ChatGPT desktop capability panel): probes Add-AppxPackage, AppXSvc and
 /// the MSIX runtime so the user can see whether the Windows App install path
 /// is available on this machine.
 #[tauri::command]
-pub async fn detect_claude_capabilities() -> Result<Vec<codex_client::CodexClientCapability>, String>
-{
+pub async fn detect_claude_capabilities(
+) -> Result<Vec<chatgpt_desktop::DesktopClientCapability>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         package::probe_msix_capabilities()
             .into_iter()
-            .map(|cap| codex_client::CodexClientCapability {
+            .map(|cap| chatgpt_desktop::DesktopClientCapability {
                 id: cap.id,
                 label: cap.label,
                 status: cap.status,

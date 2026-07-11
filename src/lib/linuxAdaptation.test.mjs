@@ -12,18 +12,18 @@ test("Linux detection and UI do not expose desktop client panels", () => {
 
   assert.match(rustTypes, /pub platform: String/);
   assert.match(detector, /platform: current_platform_label\(\)/);
- assert.match(detector, /if supports_codex_desktop_client\(\)/);
- assert.match(detector, /fn supports_codex_desktop_client_for_platform\(platform: &str\) -> bool/);
- assert.match(detector, /linux_platform_does_not_track_codex_desktop_client/);
+  assert.match(detector, /if supports_chatgpt_desktop\(\)/);
+  assert.match(detector, /fn supports_chatgpt_desktop_for_platform\(platform: &str\) -> bool/);
+  assert.match(detector, /linux_platform_does_not_track_chatgpt_desktop/);
   assert.match(detector, /fn supports_claude_desktop_client_for_platform\(platform: &str\) -> bool/);
   assert.match(detector, /linux_platform_does_not_track_claude_desktop_client/);
   assert.match(detector, /tool\.id != "claude-desktop" \|\| supports_claude_desktop_client\(\)/);
   assert.match(app, /desktopClientPagesAvailable/);
   assert.match(app, /desktopClientPagesAvailable = \["windows", "macos"\]\.includes\(snapshot\?\.platform \?\? ""\)/);
-  assert.match(app, /!\["codexClient", "claudeDesktop"\]\.includes\(item\.id\) \|\| desktopClientPagesAvailable/);
+  assert.match(app, /!\["chatgptDesktop", "claudeDesktop"\]\.includes\(item\.id\) \|\| desktopClientPagesAvailable/);
   assert.match(app, /function desktopClientRouteAllowed\(currentRoute: Route\)/);
-  assert.match(app, /\["codexClient", "claudeDesktop"\]\.includes\(route\) && !desktopClientRouteAllowed\(route\)/);
-  assert.match(dashboard, /tool\.id === "codex-app"/);
+  assert.match(app, /\["chatgptDesktop", "claudeDesktop"\]\.includes\(route\) && !desktopClientRouteAllowed\(route\)/);
+  assert.match(dashboard, /tool\.id === "chatgpt-desktop"/);
 });
 
 test("Linux install routes use native shell-friendly installers", () => {

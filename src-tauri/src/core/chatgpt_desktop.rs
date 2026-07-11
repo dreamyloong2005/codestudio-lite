@@ -3,21 +3,22 @@ use crate::core::app_paths::{app_paths, display_path, ensure_dirs};
 use crate::core::codex_plugin_marketplace;
 use crate::core::codex_provider_sync;
 use crate::core::computer_use_guard;
-use crate::core::platform::{hidden_command, package, run_powershell};
+use crate::core::platform::{hidden_command, package};
 use crate::core::process_control;
 use crate::core::storage;
 use crate::core::types::{
-    CodexClientInstallKinds, ConfigState, DesktopInstallKindInfo, InstallState, Severity,
-    ToolCategory, ToolStatus,
+    ChatGptDesktopInstallKinds, ChatGptDesktopProductGeneration, ConfigState,
+    DesktopInstallKindInfo, InstallState, Severity, ToolCategory, ToolStatus,
 };
 use chrono::Utc;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -36,21 +37,37 @@ const PACKAGE_IDENTITY: &str = "OpenAI.Codex";
 const CODEX_DISPLAY_NAME: &str = "Codex";
 const CODEX_PUBLISHER: &str = "OpenAI";
 const CODEX_EXE_NAME: &str = "Codex.exe";
-const CODEX_MACOS_APP_NAME: &str = "Codex.app";
+const CHATGPT_EXE_NAME: &str = "ChatGPT.exe";
+const CHATGPT_MACOS_APP_NAME: &str = "ChatGPT.app";
+const LEGACY_CODEX_MACOS_APP_NAME: &str = "Codex.app";
+const CHATGPT_MACOS_APP_CANDIDATES: &[&str] = &[
+    CHATGPT_MACOS_APP_NAME,
+    LEGACY_CODEX_MACOS_APP_NAME,
+    "OpenAI Codex.app",
+    "OpenAI.Codex.app",
+];
 const CODEX_SHORTCUT_NAME: &str = "Codex.lnk";
 const CODEX_UNINSTALL_KEY: &str =
     r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Codex";
 const CODEX_MACOS_BUNDLE_ID: &str = "com.openai.codex";
-const CODEX_CLIENT_SETTINGS_STATE_KEY: &str = "codex_client.settings";
-const CODEX_CLIENT_MARKER_STATE_KEY: &str = "codex_client.managed_marker";
+const CHATGPT_DESKTOP_SETTINGS_STATE_KEY: &str = "chatgpt_desktop.settings";
+const CHATGPT_DESKTOP_MARKER_STATE_KEY: &str = "chatgpt_desktop.managed_marker";
+const LEGACY_CODEX_CLIENT_SETTINGS_STATE_KEY: &str = "codex_client.settings";
+const LEGACY_CODEX_CLIENT_MARKER_STATE_KEY: &str = "codex_client.managed_marker";
 const CODEX_PATCH_INJECTION_RETRY_COUNT: usize = 30;
 const CODEX_PATCH_INJECTION_RETRY_MS: u64 = 500;
-pub const CODEX_CLIENT_PROGRESS_EVENT: &str = "codex-client://progress";
+const CODEX_PATCH_WATCHDOG_POLL_MS: u64 = 2_000;
+const CODEX_PATCH_WATCHDOG_MAX_MISSES: usize = 15;
+const MIRROR_HTTP_MAX_ATTEMPTS: usize = 4;
+const MIRROR_HTTP_RETRY_DELAY_MS: u64 = 500;
+const MIRROR_METADATA_TIMEOUT_SECS: u64 = 30;
+const MIRROR_PACKAGE_TIMEOUT_SECS: u64 = 600;
+pub const CHATGPT_DESKTOP_PROGRESS_EVENT: &str = "chatgpt-desktop://progress";
 static DOWNLOAD_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientSettings {
+pub struct ChatGptDesktopSettings {
     pub source: String,
     pub custom_url: String,
     pub auto_check: bool,
@@ -77,7 +94,7 @@ pub struct CodexClientSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateCodexClientSettingsRequest {
+pub struct UpdateChatGptDesktopSettingsRequest {
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
@@ -110,18 +127,20 @@ pub struct UpdateCodexClientSettingsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InstalledCodexClient {
+pub struct InstalledChatGptDesktop {
     pub path: String,
     pub version: String,
     pub arch: Option<String>,
     pub source: String,
+    #[serde(default)]
+    pub generation: ChatGptDesktopProductGeneration,
     pub package_family_name: Option<String>,
     pub installed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientRelease {
+pub struct ChatGptDesktopRelease {
     pub version: String,
     pub package_moniker: String,
     pub architecture: Option<String>,
@@ -140,7 +159,7 @@ pub struct CodexClientRelease {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientCapability {
+pub struct DesktopClientCapability {
     pub id: String,
     pub label: String,
     pub status: Severity,
@@ -149,7 +168,7 @@ pub struct CodexClientCapability {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientPlan {
+pub struct ChatGptDesktopPlan {
     pub up_to_date: bool,
     pub current_version: Option<String>,
     pub latest_version: String,
@@ -160,31 +179,31 @@ pub struct CodexClientPlan {
     pub staged_path: Option<String>,
     pub install_root: Option<String>,
     pub warnings: Vec<String>,
-    pub capabilities: Vec<CodexClientCapability>,
+    pub capabilities: Vec<DesktopClientCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientState {
+pub struct ChatGptDesktopState {
     pub install_kind: String,
     pub generated_at: String,
     pub platform: String,
-    pub settings: CodexClientSettings,
-    pub installed: Option<InstalledCodexClient>,
+    pub settings: ChatGptDesktopSettings,
+    pub installed: Option<InstalledChatGptDesktop>,
     pub install_class: String,
-    pub release: Option<CodexClientRelease>,
-    pub plan: Option<CodexClientPlan>,
+    pub release: Option<ChatGptDesktopRelease>,
+    pub plan: Option<ChatGptDesktopPlan>,
     pub staging_dir: String,
     pub notes: Vec<String>,
     #[serde(default)]
     pub running: bool,
 }
 
-pub type CodexClientStateCache = BTreeMap<String, CodexClientState>;
+pub type ChatGptDesktopStateCache = BTreeMap<String, ChatGptDesktopState>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientStageReport {
+pub struct ChatGptDesktopStageReport {
     pub install_kind: String,
     pub up_to_date: bool,
     pub staged_path: Option<String>,
@@ -198,7 +217,7 @@ pub struct CodexClientStageReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientProgress {
+pub struct ChatGptDesktopProgress {
     pub install_kind: String,
     pub phase: String,
     pub message: String,
@@ -211,19 +230,19 @@ pub struct CodexClientProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientOperationResult {
+pub struct ChatGptDesktopOperationResult {
     pub install_kind: String,
     pub success: bool,
     pub action: String,
     pub message: String,
-    pub installed: Option<InstalledCodexClient>,
-    pub stage: Option<CodexClientStageReport>,
+    pub installed: Option<InstalledChatGptDesktop>,
+    pub stage: Option<ChatGptDesktopStageReport>,
     pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientUninstallRequest {
+pub struct ChatGptDesktopUninstallRequest {
     pub confirm: bool,
     #[serde(default)]
     pub purge_user_data: bool,
@@ -235,7 +254,7 @@ pub struct CodexClientUninstallRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodexClientInstallRequest {
+pub struct ChatGptDesktopInstallRequest {
     pub confirm: bool,
     #[serde(default)]
     pub expected_current_version: Option<String>,
@@ -252,14 +271,14 @@ pub struct CodexClientInstallRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct PlanCodexClientUpdateRequest {
+pub struct PlanChatGptDesktopUpdateRequest {
     #[serde(default)]
     pub install_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct StageCodexClientUpdateRequest {
+pub struct StageChatGptDesktopUpdateRequest {
     #[serde(default)]
     pub install_kind: Option<String>,
 }
@@ -335,7 +354,7 @@ struct MsixIdentity {
     processor_architecture: String,
 }
 
-impl Default for CodexClientSettings {
+impl Default for ChatGptDesktopSettings {
     fn default() -> Self {
         Self {
             source: "mirror".to_string(),
@@ -361,20 +380,20 @@ fn default_true() -> bool {
     true
 }
 
-const CODEX_CLIENT_LATEST_CACHE_TTL: Duration = Duration::from_secs(600);
-const CODEX_CLIENT_LATEST_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CHATGPT_DESKTOP_LATEST_CACHE_TTL: Duration = Duration::from_secs(600);
+const CHATGPT_DESKTOP_LATEST_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Default)]
-struct CodexClientLatestCache {
+struct ChatGptDesktopLatestCache {
     version: Option<String>,
     checked_at: Option<Instant>,
     in_progress: bool,
 }
 
-static CODEX_CLIENT_LATEST_CACHE: OnceLock<Mutex<CodexClientLatestCache>> = OnceLock::new();
+static CHATGPT_DESKTOP_LATEST_CACHE: OnceLock<Mutex<ChatGptDesktopLatestCache>> = OnceLock::new();
 
-fn codex_client_latest_cache() -> &'static Mutex<CodexClientLatestCache> {
-    CODEX_CLIENT_LATEST_CACHE.get_or_init(|| Mutex::new(CodexClientLatestCache::default()))
+fn chatgpt_desktop_latest_cache() -> &'static Mutex<ChatGptDesktopLatestCache> {
+    CHATGPT_DESKTOP_LATEST_CACHE.get_or_init(|| Mutex::new(ChatGptDesktopLatestCache::default()))
 }
 
 /// Fetch the latest Codex version from the mirror manifest in a
@@ -384,10 +403,10 @@ fn codex_client_latest_cache() -> &'static Mutex<CodexClientLatestCache> {
 /// long. Mirrors the Claude Desktop latest-version cache in detector.rs.
 pub fn latest_version_cached(wait_budget: Duration) -> Option<String> {
     let should_start = {
-        let mut cache = codex_client_latest_cache().lock().unwrap();
+        let mut cache = chatgpt_desktop_latest_cache().lock().unwrap();
         if cache
             .checked_at
-            .map(|checked_at| checked_at.elapsed() < CODEX_CLIENT_LATEST_CACHE_TTL)
+            .map(|checked_at| checked_at.elapsed() < CHATGPT_DESKTOP_LATEST_CACHE_TTL)
             .unwrap_or(false)
         {
             return cache.version.clone();
@@ -406,7 +425,7 @@ pub fn latest_version_cached(wait_budget: Duration) -> Option<String> {
                 let settings = load_settings().unwrap_or_default();
                 load_release(&settings).ok().map(|release| release.version)
             })();
-            let mut cache = codex_client_latest_cache().lock().unwrap();
+            let mut cache = chatgpt_desktop_latest_cache().lock().unwrap();
             finish_latest_cache(&mut cache, version);
         });
     }
@@ -414,11 +433,11 @@ pub fn latest_version_cached(wait_budget: Duration) -> Option<String> {
     let started_at = Instant::now();
     loop {
         {
-            let cache = codex_client_latest_cache().lock().unwrap();
+            let cache = chatgpt_desktop_latest_cache().lock().unwrap();
             if !cache.in_progress
                 || cache
                     .checked_at
-                    .map(|checked_at| checked_at.elapsed() < CODEX_CLIENT_LATEST_CACHE_TTL)
+                    .map(|checked_at| checked_at.elapsed() < CHATGPT_DESKTOP_LATEST_CACHE_TTL)
                     .unwrap_or(false)
             {
                 return cache.version.clone();
@@ -427,11 +446,11 @@ pub fn latest_version_cached(wait_budget: Duration) -> Option<String> {
                 return cache.version.clone();
             }
         }
-        thread::sleep(CODEX_CLIENT_LATEST_POLL_INTERVAL);
+        thread::sleep(CHATGPT_DESKTOP_LATEST_POLL_INTERVAL);
     }
 }
 
-fn finish_latest_cache(cache: &mut CodexClientLatestCache, version: Option<String>) {
+fn finish_latest_cache(cache: &mut ChatGptDesktopLatestCache, version: Option<String>) {
     if let Some(version) = version {
         cache.version = Some(version);
         cache.checked_at = Some(Instant::now());
@@ -441,25 +460,25 @@ fn finish_latest_cache(cache: &mut CodexClientLatestCache, version: Option<Strin
 
 /// Load the most recent Codex state cached to disk by inspect_state(true).
 /// Used by the page to hydrate instantly on startup before an async re-fetch.
-pub fn load_cached_state() -> Option<CodexClientState> {
-    storage::load_codex_client_state().ok().flatten()
+pub fn load_cached_state() -> Option<ChatGptDesktopState> {
+    storage::load_chatgpt_desktop_state().ok().flatten()
 }
 
 /// Load all cached Codex states keyed by install kind. Windows has independent
 /// MSIX and portable plans, so one global row loses whichever tab was scanned
 /// first.
-pub fn load_cached_states() -> CodexClientStateCache {
-    storage::load_codex_client_states().unwrap_or_default()
+pub fn load_cached_states() -> ChatGptDesktopStateCache {
+    storage::load_chatgpt_desktop_states().unwrap_or_default()
 }
 
-pub fn inspect_state(include_network: bool) -> Result<CodexClientState, String> {
+pub fn inspect_state(include_network: bool) -> Result<ChatGptDesktopState, String> {
     inspect_state_for_install_kind(include_network, None)
 }
 
 fn inspect_state_for_install_kind(
     include_network: bool,
     install_kind: Option<&str>,
-) -> Result<CodexClientState, String> {
+) -> Result<ChatGptDesktopState, String> {
     let settings = load_settings()?;
     let install_kind = normalize_install_kind(install_kind, &settings);
     let route_settings = settings_for_install_kind(settings.clone(), &install_kind);
@@ -475,19 +494,20 @@ fn inspect_state_for_install_kind(
         .transpose()?;
     let install_class = install_class(installed.as_ref());
     let mut notes = vec![
-        "Codex management covers install, update, uninstall, launch, and mirror-source flows.".to_string(),
-        "The Codex installer content is not modified; downloads are SHA-256 verified before installation.".to_string(),
+        "ChatGPT Desktop management covers install, update, uninstall, launch, and mirror-source flows.".to_string(),
+        "The ChatGPT Desktop installer content is not modified; downloads are SHA-256 verified before installation.".to_string(),
     ];
     if cfg!(target_os = "macos") {
         notes.push(
-            "macOS uses a DMG installer and copies Codex.app to the target Applications directory."
+            "macOS uses a DMG installer and copies ChatGPT.app to the target Applications directory; legacy Codex app bundle names remain detectable."
                 .to_string(),
         );
     } else if !cfg!(target_os = "windows") {
-        notes.push("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
+        notes.push("The current platform does not provide an executable ChatGPT desktop client install path yet.".to_string());
     }
+    let running = is_chatgpt_desktop_running(installed.as_ref());
 
-    let state = CodexClientState {
+    let state = ChatGptDesktopState {
         install_kind: install_kind.clone(),
         generated_at: Utc::now().to_rfc3339(),
         platform: platform_label(),
@@ -498,28 +518,30 @@ fn inspect_state_for_install_kind(
         plan,
         staging_dir: display_path(&staging_dir()?),
         notes,
-        running: process_control::is_process_running("Codex"),
+        running,
     };
     if include_network {
-        let _ = storage::store_codex_client_state(&state);
+        let _ = storage::store_chatgpt_desktop_state(&state);
     }
     Ok(state)
 }
 
-pub fn plan_update(request: PlanCodexClientUpdateRequest) -> Result<CodexClientState, String> {
+pub fn plan_update(
+    request: PlanChatGptDesktopUpdateRequest,
+) -> Result<ChatGptDesktopState, String> {
     inspect_state_for_install_kind(true, request.install_kind.as_deref())
 }
 
-pub fn stage_update() -> Result<CodexClientStageReport, String> {
-    stage_update_with_progress(StageCodexClientUpdateRequest::default(), |_| {})
+pub fn stage_update() -> Result<ChatGptDesktopStageReport, String> {
+    stage_update_with_progress(StageChatGptDesktopUpdateRequest::default(), |_| {})
 }
 
 pub fn stage_update_with_progress<F>(
-    request: StageCodexClientUpdateRequest,
+    request: StageChatGptDesktopUpdateRequest,
     on_progress: F,
-) -> Result<CodexClientStageReport, String>
+) -> Result<ChatGptDesktopStageReport, String>
 where
-    F: Fn(CodexClientProgress),
+    F: Fn(ChatGptDesktopProgress),
 {
     let mut settings = load_settings()?;
     let install_kind = normalize_install_kind(request.install_kind.as_deref(), &settings);
@@ -541,21 +563,22 @@ where
 }
 
 pub fn install_or_update(
-    request: CodexClientInstallRequest,
-) -> Result<CodexClientOperationResult, String> {
+    request: ChatGptDesktopInstallRequest,
+) -> Result<ChatGptDesktopOperationResult, String> {
     install_or_update_with_progress(request, |_| {})
 }
 
 pub fn install_or_update_with_progress<F>(
-    request: CodexClientInstallRequest,
+    request: ChatGptDesktopInstallRequest,
     on_progress: F,
-) -> Result<CodexClientOperationResult, String>
+) -> Result<ChatGptDesktopOperationResult, String>
 where
-    F: Fn(CodexClientProgress),
+    F: Fn(ChatGptDesktopProgress),
 {
     if !request.confirm {
         return Err(
-            "Refused: installing or updating Codex requires explicit confirmation.".to_string(),
+            "Refused: installing or updating ChatGPT Desktop requires explicit confirmation."
+                .to_string(),
         );
     }
 
@@ -581,7 +604,7 @@ where
         let actual = installed_before.as_ref().map(|item| item.version.as_str());
         if actual != Some(expected) && !(expected.is_empty() && actual.is_none()) {
             return Err(format!(
-                "Codex state changed: expected version {expected}, current version is {}. Refresh and try again.",
+                "ChatGPT Desktop state changed: expected version {expected}, current version is {}. Refresh and try again.",
                 actual.unwrap_or("not installed")
             ));
         }
@@ -608,17 +631,17 @@ where
             &on_progress,
             &install_kind,
             "done",
-            "codexClient.progressAlreadyUpToDate",
+            "chatgptDesktop.progressAlreadyUpToDate",
             Some(1),
             Some(1),
             Some(7),
             Some(7),
         );
-        return Ok(CodexClientOperationResult {
+        return Ok(ChatGptDesktopOperationResult {
             install_kind,
             success: true,
             action: "none".to_string(),
-            message: "Codex is already up to date.".to_string(),
+            message: "ChatGPT Desktop is already up to date.".to_string(),
             installed: installed_before,
             stage: None,
             notes: Vec::new(),
@@ -633,7 +656,7 @@ where
         .ok_or_else(|| "No staged file is available to install.".to_string())?;
     let mut notes = stage.notes.clone();
     if plan.route == "unsupported" {
-        return Err("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
+        return Err("The current platform does not provide an executable ChatGPT desktop client install path yet.".to_string());
     }
 
     let action = plan.route.clone();
@@ -656,8 +679,8 @@ where
                 notes.push(note);
             }
         } else if cfg!(target_os = "macos") {
-            if let Err(err) = package::quit_macos_app(CODEX_DISPLAY_NAME) {
-                notes.push(format!("Failed to close Codex: {err}"));
+            if let Err(err) = close_chatgpt_desktop_processes(installed, &mut notes) {
+                notes.push(format!("Failed to close ChatGPT Desktop: {err}"));
             }
         }
     }
@@ -666,7 +689,7 @@ where
             &on_progress,
             &install_kind,
             "installing",
-            "codexClient.progressInstallingPortable",
+            "chatgptDesktop.progressInstallingPortable",
             None,
             None,
             Some(4),
@@ -685,17 +708,17 @@ where
             &on_progress,
             &install_kind,
             "installing",
-            "codexClient.progressInstallingMacos",
+            "chatgptDesktop.progressInstallingMacos",
             None,
             None,
             Some(4),
             Some(7),
         );
-        let report = package::install_macos_dmg(
+        let report = package::install_macos_dmg_with_app_candidates(
             &staged_path,
-            CODEX_MACOS_APP_NAME,
+            CHATGPT_MACOS_APP_CANDIDATES,
             &expand_env_path(&settings.install_root)?,
-            Some(CODEX_MACOS_BUNDLE_ID),
+            None,
         )?;
         notes.extend(report.notes);
         report.installed.map(installed_from_macos_app)
@@ -704,7 +727,7 @@ where
             &on_progress,
             &install_kind,
             "msix-installing",
-            "codexClient.progressInstallingMsix",
+            "chatgptDesktop.progressInstallingMsix",
             None,
             None,
             Some(4),
@@ -749,7 +772,7 @@ where
     let _ = activity_log::append(
         Severity::Ok,
         format!(
-            "Installed or updated Codex to {} via {}.",
+            "Installed or updated ChatGPT Desktop to {} via {}.",
             release.version, action
         ),
     );
@@ -758,22 +781,28 @@ where
         &on_progress,
         &install_kind,
         "done",
-        "codexClient.progressInstallDone",
+        "chatgptDesktop.progressInstallDone",
         Some(1),
         Some(1),
         Some(7),
         Some(7),
     );
 
-    Ok(CodexClientOperationResult {
+    Ok(ChatGptDesktopOperationResult {
         install_kind,
         success: installed.is_some(),
         action,
         message: installed
             .as_ref()
-            .map(|item| format!("Codex is ready: {} ({})", item.version, item.source))
+            .map(|item| {
+                format!(
+                    "ChatGPT Desktop is ready: {} ({})",
+                    item.version, item.source
+                )
+            })
             .unwrap_or_else(|| {
-                "Installation flow finished, but Codex was not detected again.".to_string()
+                "Installation flow finished, but ChatGPT Desktop was not detected again."
+                    .to_string()
             }),
         installed,
         stage: Some(stage),
@@ -782,13 +811,15 @@ where
 }
 
 pub fn uninstall(
-    request: CodexClientUninstallRequest,
-) -> Result<CodexClientOperationResult, String> {
+    request: ChatGptDesktopUninstallRequest,
+) -> Result<ChatGptDesktopOperationResult, String> {
     if !request.confirm {
-        return Err("Refused: uninstalling Codex requires explicit confirmation.".to_string());
+        return Err(
+            "Refused: uninstalling ChatGPT Desktop requires explicit confirmation.".to_string(),
+        );
     }
     if !cfg!(target_os = "windows") && !cfg!(target_os = "macos") {
-        return Err("The current platform does not provide an executable Codex desktop client uninstall path yet.".to_string());
+        return Err("The current platform does not provide an executable ChatGPT desktop client uninstall path yet.".to_string());
     }
 
     let mut settings = load_settings()?;
@@ -798,11 +829,11 @@ pub fn uninstall(
     // only that kind so uninstalling targets the version the user is viewing.
     let installed = detect_installed_for_kind(&settings, &install_kind);
     let Some(installed_before) = installed else {
-        return Ok(CodexClientOperationResult {
+        return Ok(ChatGptDesktopOperationResult {
             install_kind,
             success: true,
             action: "none".to_string(),
-            message: "No uninstallable Codex was detected.".to_string(),
+            message: "No uninstallable ChatGPT Desktop installation was detected.".to_string(),
             installed: None,
             stage: None,
             notes: Vec::new(),
@@ -811,10 +842,10 @@ pub fn uninstall(
 
     let mut notes = Vec::new();
     if cfg!(target_os = "windows") {
-        terminate_codex_process_for_uninstall(Some(Path::new(&installed_before.path)), &mut notes)?;
+        close_chatgpt_desktop_processes(&installed_before, &mut notes)?;
     } else if cfg!(target_os = "macos") {
-        if let Err(err) = package::quit_macos_app(CODEX_DISPLAY_NAME) {
-            notes.push(format!("Failed to close Codex: {err}"));
+        if let Err(err) = close_chatgpt_desktop_processes(&installed_before, &mut notes) {
+            notes.push(format!("Failed to close ChatGPT Desktop: {err}"));
         }
     }
     let action = if installed_before.source == "portable" {
@@ -845,7 +876,7 @@ pub fn uninstall(
         "remove-msix"
     } else {
         return Err(format!(
-            "Unsupported Codex install type for uninstall: {}.",
+            "Unsupported ChatGPT Desktop install type for uninstall: {}.",
             installed_before.source
         ));
     };
@@ -860,14 +891,15 @@ pub fn uninstall(
         notes.push("Kept ~/.codex user data.".to_string());
     }
 
-    let _ = storage::delete_state_json(CODEX_CLIENT_MARKER_STATE_KEY);
-    let _ = activity_log::append(Severity::Ok, "Uninstalled Codex.");
+    let _ = storage::delete_state_json(CHATGPT_DESKTOP_MARKER_STATE_KEY);
+    let _ = storage::delete_state_json(LEGACY_CODEX_CLIENT_MARKER_STATE_KEY);
+    let _ = activity_log::append(Severity::Ok, "Uninstalled ChatGPT Desktop.");
 
-    Ok(CodexClientOperationResult {
+    Ok(ChatGptDesktopOperationResult {
         install_kind,
         success: true,
         action: action.to_string(),
-        message: "Codex uninstalled.".to_string(),
+        message: "ChatGPT Desktop uninstalled.".to_string(),
         installed: None,
         stage: None,
         notes,
@@ -876,13 +908,17 @@ pub fn uninstall(
 
 pub fn launch() -> Result<(), String> {
     let mut notes = Vec::new();
-    terminate_codex_process_for_restart(None, &mut notes)?;
+    launch_with_restart_notes(&mut notes)
+}
+
+fn launch_with_restart_notes(notes: &mut Vec<String>) -> Result<(), String> {
     let settings = load_settings()?;
+    let installed = detect_installed(&settings)
+        .ok_or_else(|| "ChatGPT Desktop was not detected.".to_string())?;
+    close_chatgpt_desktop_processes(&installed, notes)?;
     sync_history_if_enabled(&settings)?;
     ensure_official_remote_plugin_cache_if_enabled(&settings);
     ensure_computer_use_guard_if_enabled(&settings)?;
-    let installed =
-        detect_installed(&settings).ok_or_else(|| "Codex was not detected.".to_string())?;
     let debug_port = select_debug_port()?;
     let args = codex_patch_launch_args(debug_port);
     launch_installed_codex(&installed, &args)?;
@@ -891,29 +927,28 @@ pub fn launch() -> Result<(), String> {
     if enhancement_settings.enabled() {
         spawn_codex_enhancement_injection(debug_port, enhancement_settings);
     }
-    let _ = activity_log::append(Severity::Info, "Launched Codex.");
+    let _ = activity_log::append(Severity::Info, "Launched ChatGPT Desktop.");
     Ok(())
 }
 
 pub fn restart() -> Result<String, String> {
-    let settings = load_settings()?;
-    let _installed =
-        detect_installed(&settings).ok_or_else(|| "Codex was not detected.".to_string())?;
     let mut notes = Vec::new();
-    terminate_codex_process_for_restart(None, &mut notes)?;
-    launch()?;
+    launch_with_restart_notes(&mut notes)?;
     let message = if notes.is_empty() {
-        "Launched Codex.".to_string()
+        "Launched ChatGPT Desktop.".to_string()
     } else {
-        format!("{} Restarted Codex.", notes.join(" "))
+        format!("{} Restarted ChatGPT Desktop.", notes.join(" "))
     };
-    let _ = activity_log::append(Severity::Info, "Restarted Codex after profile apply.");
+    let _ = activity_log::append(
+        Severity::Info,
+        "Restarted ChatGPT Desktop after profile apply.",
+    );
     Ok(message)
 }
 
 pub fn update_settings(
-    request: UpdateCodexClientSettingsRequest,
-) -> Result<CodexClientSettings, String> {
+    request: UpdateChatGptDesktopSettingsRequest,
+) -> Result<ChatGptDesktopSettings, String> {
     let mut settings = load_settings()?;
     if let Some(source) = request.source {
         settings.source = normalize_source(&source);
@@ -988,15 +1023,26 @@ pub fn open_path(kind: String) -> Result<(), String> {
 pub fn tool_status() -> ToolStatus {
     let settings = load_settings().unwrap_or_default();
     let installed = detect_installed(&settings);
+    let generation = installed
+        .as_ref()
+        .map(|item| item.generation)
+        .unwrap_or_default();
+    let product_name = chatgpt_desktop_product_name(generation);
     let config_path = app_paths().ok().map(|paths| paths.home_dir.join(".codex"));
     ToolStatus {
-        id: "codex-app".to_string(),
-        name: "Codex".to_string(),
+        id: "chatgpt-desktop".to_string(),
+        name: product_name.to_string(),
         category: ToolCategory::AiTool,
         command: if cfg!(target_os = "windows") {
-            "Codex.exe".to_string()
+            if generation == ChatGptDesktopProductGeneration::Current
+                && installed.as_ref().is_some_and(|item| item.source == "msix")
+            {
+                CHATGPT_EXE_NAME.to_string()
+            } else {
+                CODEX_EXE_NAME.to_string()
+            }
         } else {
-            "Codex.app".to_string()
+            macos_tool_command(installed.as_ref())
         },
         path_repair: None,
         version: installed.as_ref().map(|item| item.version.clone()),
@@ -1015,21 +1061,38 @@ pub fn tool_status() -> ToolStatus {
         },
         config_path: config_path.as_deref().map(display_path),
         install_path: None,
-        install_command: Some("Install or update from the Codex page".to_string()),
+        install_command: Some(format!("Install or update from the {product_name} page")),
         details: installed
             .as_ref()
             .map(|item| format!("{} / {}", item.source, item.path))
-            .or_else(|| Some("Official Codex desktop client was not detected".to_string())),
+            .or_else(|| Some(format!("Official {product_name} client was not detected"))),
         install_kind: None,
-        running: process_control::is_process_running("Codex"),
+        running: is_chatgpt_desktop_running(installed.as_ref()),
     }
 }
 
+fn is_chatgpt_desktop_running(installed: Option<&InstalledChatGptDesktop>) -> bool {
+    if cfg!(target_os = "windows") {
+        return installed.is_some_and(|item| {
+            if item.generation == ChatGptDesktopProductGeneration::Current && item.source == "msix"
+            {
+                process_control::is_process_running("ChatGPT")
+            } else {
+                process_control::is_process_running("Codex")
+            }
+        });
+    }
+    if cfg!(target_os = "macos") {
+        return installed.is_some_and(|item| package::macos_app_running(Path::new(&item.path)));
+    }
+    false
+}
+
 fn build_plan(
-    settings: &CodexClientSettings,
-    installed: Option<&InstalledCodexClient>,
-    release: &CodexClientRelease,
-) -> Result<CodexClientPlan, String> {
+    settings: &ChatGptDesktopSettings,
+    installed: Option<&InstalledChatGptDesktop>,
+    release: &ChatGptDesktopRelease,
+) -> Result<ChatGptDesktopPlan, String> {
     let capabilities = probe_capabilities();
     let current_version = installed.map(|item| item.version.clone());
     let up_to_date = current_version
@@ -1039,7 +1102,7 @@ fn build_plan(
     let route = select_install_route(settings, installed).to_string();
     let mut warnings = Vec::new();
     if route == "unsupported" {
-        warnings.push("The current platform does not provide an executable Codex desktop client install path yet.".to_string());
+        warnings.push("The current platform does not provide an executable ChatGPT desktop client install path yet.".to_string());
     } else if route == "macos-dmg" {
         if settings.source == "official" {
             warnings.push(
@@ -1057,7 +1120,7 @@ fn build_plan(
         warnings.push("The current plan will install the portable build and register Start menu and uninstall entries.".to_string());
     }
 
-    Ok(CodexClientPlan {
+    Ok(ChatGptDesktopPlan {
         up_to_date,
         current_version,
         latest_version: release.version.clone(),
@@ -1080,8 +1143,8 @@ fn build_plan(
 }
 
 fn select_install_route(
-    settings: &CodexClientSettings,
-    installed: Option<&InstalledCodexClient>,
+    settings: &ChatGptDesktopSettings,
+    installed: Option<&InstalledChatGptDesktop>,
 ) -> &'static str {
     if cfg!(target_os = "macos") {
         return "macos-dmg";
@@ -1101,25 +1164,25 @@ fn select_install_route(
 
 fn stage_from_plan<F>(
     install_kind: &str,
-    release: &CodexClientRelease,
-    plan: &CodexClientPlan,
+    release: &ChatGptDesktopRelease,
+    plan: &ChatGptDesktopPlan,
     on_progress: &F,
-) -> Result<CodexClientStageReport, String>
+) -> Result<ChatGptDesktopStageReport, String>
 where
-    F: Fn(CodexClientProgress),
+    F: Fn(ChatGptDesktopProgress),
 {
     if plan.up_to_date {
         emit_step_progress(
             on_progress,
             install_kind,
             "done",
-            "codexClient.progressStageAlreadyUpToDate",
+            "chatgptDesktop.progressStageAlreadyUpToDate",
             Some(1),
             Some(1),
             Some(4),
             Some(4),
         );
-        return Ok(CodexClientStageReport {
+        return Ok(ChatGptDesktopStageReport {
             install_kind: install_kind.to_string(),
             up_to_date: true,
             staged_path: None,
@@ -1128,7 +1191,9 @@ where
             sha256: release.sha256.clone(),
             hash_verified: true,
             route: plan.route.clone(),
-            notes: vec!["Codex is already up to date; no download is needed.".to_string()],
+            notes: vec![
+                "ChatGPT Desktop is already up to date; no download is needed.".to_string(),
+            ],
         });
     }
 
@@ -1140,7 +1205,7 @@ where
                 on_progress,
                 install_kind,
                 "verifying",
-                "codexClient.progressFoundStaged",
+                "chatgptDesktop.progressFoundStaged",
                 Some(size),
                 Some(size),
                 Some(3),
@@ -1163,7 +1228,7 @@ where
         on_progress,
         install_kind,
         "verifying",
-        "codexClient.progressVerifying",
+        "chatgptDesktop.progressVerifying",
         None,
         None,
         Some(3),
@@ -1180,20 +1245,23 @@ where
     let size = fs::metadata(&path).map_err(|err| err.to_string())?.len();
     let _ = activity_log::append(
         Severity::Ok,
-        format!("Staged Codex package {}.", release.package_moniker),
+        format!(
+            "Staged ChatGPT Desktop package {}.",
+            release.package_moniker
+        ),
     );
     emit_step_progress(
         on_progress,
         install_kind,
         "done",
-        "codexClient.progressStageDone",
+        "chatgptDesktop.progressStageDone",
         Some(size),
         Some(size),
         Some(4),
         Some(4),
     );
 
-    Ok(CodexClientStageReport {
+    Ok(ChatGptDesktopStageReport {
         install_kind: install_kind.to_string(),
         up_to_date: false,
         staged_path: Some(display_path(&path)),
@@ -1206,7 +1274,7 @@ where
     })
 }
 
-fn cleanup_staged_package(stage: &mut CodexClientStageReport, notes: &mut Vec<String>) {
+fn cleanup_staged_package(stage: &mut ChatGptDesktopStageReport, notes: &mut Vec<String>) {
     let Some(staged_path) = stage.staged_path.as_deref() else {
         return;
     };
@@ -1230,17 +1298,17 @@ fn cleanup_staged_package(stage: &mut CodexClientStageReport, notes: &mut Vec<St
     }
 }
 
-fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, String> {
+fn load_release(settings: &ChatGptDesktopSettings) -> Result<ChatGptDesktopRelease, String> {
     let base = manifest_base(settings);
     let manifest_url = format!("{base}/latest/manifest");
     let checksums_url = format!("{base}/latest/checksums");
     let manifest_text = fetch_text(&manifest_url)?;
     let checksums_text = fetch_text(&checksums_url)?;
     let manifest: MirrorManifest = serde_json::from_str(&manifest_text)
-        .map_err(|err| format!("Failed to parse Codex mirror manifest: {err}"))?;
+        .map_err(|err| format!("Failed to parse ChatGPT Desktop mirror manifest: {err}"))?;
     if manifest.schema_version < 2 {
         return Err(format!(
-            "Unsupported Codex mirror manifest schemaVersion: {}",
+            "Unsupported ChatGPT Desktop mirror manifest schemaVersion: {}",
             manifest.schema_version
         ));
     }
@@ -1260,13 +1328,12 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
 
     if cfg!(target_os = "macos") {
         let macos = manifest.sources.macos.as_ref().ok_or_else(|| {
-            "Codex mirror manifest has no macOS installer information.".to_string()
+            "ChatGPT Desktop mirror manifest has no macOS installer information.".to_string()
         })?;
         let (source, arch) = current_macos_source(macos)?;
-        let source_url = source
-            .url
-            .clone()
-            .ok_or_else(|| format!("Codex mirror manifest has no macOS {arch} download URL."))?;
+        let source_url = source.url.clone().ok_or_else(|| {
+            format!("ChatGPT Desktop mirror manifest has no macOS {arch} download URL.")
+        })?;
         let package_url = if settings.source == "official" {
             official_macos_url(arch).to_string()
         } else {
@@ -1285,9 +1352,11 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
             .bundle_short_version
             .clone()
             .or_else(|| source.bundle_version.clone())
-            .ok_or_else(|| format!("Codex mirror manifest has no macOS {arch} version."))?;
+            .ok_or_else(|| {
+                format!("ChatGPT Desktop mirror manifest has no macOS {arch} version.")
+            })?;
 
-        return Ok(CodexClientRelease {
+        return Ok(ChatGptDesktopRelease {
             version,
             package_moniker,
             architecture: Some(arch.to_string()),
@@ -1318,7 +1387,7 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
             )
         })?;
 
-    Ok(CodexClientRelease {
+    Ok(ChatGptDesktopRelease {
         version: windows.version,
         package_moniker: windows.package_moniker,
         architecture: windows.architecture,
@@ -1341,12 +1410,12 @@ fn load_release(settings: &CodexClientSettings) -> Result<CodexClientRelease, St
     })
 }
 
-/// Detect both install kinds (MSIX and portable) of the Codex desktop client
+/// Detect both install kinds (MSIX and portable) of the ChatGPT desktop client
 /// simultaneously so the UI can show a per-kind tab. Each kind is resolved
 /// independently; a user may have both installed at once.
-pub fn codex_client_install_kinds() -> CodexClientInstallKinds {
+pub fn chatgpt_desktop_install_kinds() -> ChatGptDesktopInstallKinds {
     if !cfg!(target_os = "windows") {
-        return CodexClientInstallKinds {
+        return ChatGptDesktopInstallKinds {
             msix: DesktopInstallKindInfo {
                 installed: false,
                 version: None,
@@ -1384,10 +1453,10 @@ pub fn codex_client_install_kinds() -> CodexClientInstallKinds {
             version: None,
             path: None,
         });
-    CodexClientInstallKinds { msix, portable }
+    ChatGptDesktopInstallKinds { msix, portable }
 }
 
-fn detect_installed(settings: &CodexClientSettings) -> Option<InstalledCodexClient> {
+fn detect_installed(settings: &ChatGptDesktopSettings) -> Option<InstalledChatGptDesktop> {
     if cfg!(target_os = "windows") {
         package::detect_msix_package(PACKAGE_IDENTITY)
             .map(installed_from_msix)
@@ -1397,14 +1466,68 @@ fn detect_installed(settings: &CodexClientSettings) -> Option<InstalledCodexClie
                     .and_then(|root| detect_portable_install(&root))
             })
     } else if cfg!(target_os = "macos") {
-        package::detect_macos_app(&macos_app_candidates(), Some(CODEX_MACOS_BUNDLE_ID))
-            .map(installed_from_macos_app)
+        package::detect_macos_app(&macos_app_candidates(), None).map(installed_from_macos_app)
     } else {
         None
     }
 }
 
-fn normalize_install_kind(requested: Option<&str>, settings: &CodexClientSettings) -> String {
+pub fn detected_product_generation() -> ChatGptDesktopProductGeneration {
+    let settings = load_settings().unwrap_or_default();
+    detect_installed(&settings)
+        .map(|installed| installed.generation)
+        .unwrap_or_default()
+}
+
+fn chatgpt_desktop_product_name(generation: ChatGptDesktopProductGeneration) -> &'static str {
+    match generation {
+        ChatGptDesktopProductGeneration::Current => "ChatGPT Desktop",
+        ChatGptDesktopProductGeneration::Legacy => "Codex Desktop",
+    }
+}
+
+fn chatgpt_desktop_generation_from_windows_root(root: &Path) -> ChatGptDesktopProductGeneration {
+    let executable_exists =
+        |name: &str| root.join(name).is_file() || root.join("app").join(name).is_file();
+    if executable_exists(CHATGPT_EXE_NAME) {
+        ChatGptDesktopProductGeneration::Current
+    } else if executable_exists(CODEX_EXE_NAME) {
+        ChatGptDesktopProductGeneration::Legacy
+    } else {
+        ChatGptDesktopProductGeneration::Current
+    }
+}
+
+fn chatgpt_desktop_generation_from_macos_identity(
+    executable_name: Option<&str>,
+    app_path: &Path,
+) -> ChatGptDesktopProductGeneration {
+    if let Some(executable_name) = executable_name {
+        if executable_name.eq_ignore_ascii_case("ChatGPT") {
+            return ChatGptDesktopProductGeneration::Current;
+        }
+        if executable_name.eq_ignore_ascii_case("Codex") {
+            return ChatGptDesktopProductGeneration::Legacy;
+        }
+        return ChatGptDesktopProductGeneration::Current;
+    }
+
+    let app_name = app_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if CHATGPT_MACOS_APP_CANDIDATES
+        .iter()
+        .skip(1)
+        .any(|candidate| candidate.eq_ignore_ascii_case(app_name))
+    {
+        ChatGptDesktopProductGeneration::Legacy
+    } else {
+        ChatGptDesktopProductGeneration::Current
+    }
+}
+
+fn normalize_install_kind(requested: Option<&str>, settings: &ChatGptDesktopSettings) -> String {
     if cfg!(target_os = "windows") {
         match requested {
             Some("portable") => "portable".to_string(),
@@ -1418,9 +1541,9 @@ fn normalize_install_kind(requested: Option<&str>, settings: &CodexClientSetting
 }
 
 fn settings_for_install_kind(
-    mut settings: CodexClientSettings,
+    mut settings: ChatGptDesktopSettings,
     install_kind: &str,
-) -> CodexClientSettings {
+) -> ChatGptDesktopSettings {
     if cfg!(target_os = "windows") {
         settings.windows_install_mode = if install_kind == "portable" {
             "portable"
@@ -1433,9 +1556,9 @@ fn settings_for_install_kind(
 }
 
 fn detect_installed_for_kind(
-    settings: &CodexClientSettings,
+    settings: &ChatGptDesktopSettings,
     install_kind: &str,
-) -> Option<InstalledCodexClient> {
+) -> Option<InstalledChatGptDesktop> {
     if cfg!(target_os = "windows") {
         if install_kind == "portable" {
             return expand_env_path(&settings.install_root)
@@ -1447,29 +1570,36 @@ fn detect_installed_for_kind(
     detect_installed(settings)
 }
 
-fn installed_from_msix(package: package::InstalledMsixPackage) -> InstalledCodexClient {
-    InstalledCodexClient {
+fn installed_from_msix(package: package::InstalledMsixPackage) -> InstalledChatGptDesktop {
+    let generation = chatgpt_desktop_generation_from_windows_root(Path::new(&package.path));
+    InstalledChatGptDesktop {
         installed_at: path_mtime(&PathBuf::from(&package.path)),
         path: package.path,
         version: package.version,
         arch: package.arch,
         source: "msix".to_string(),
+        generation,
         package_family_name: package.package_family_name,
     }
 }
 
-fn installed_from_macos_app(app: package::InstalledMacosApp) -> InstalledCodexClient {
-    InstalledCodexClient {
-        installed_at: path_mtime(&PathBuf::from(&app.path)),
+fn installed_from_macos_app(app: package::InstalledMacosApp) -> InstalledChatGptDesktop {
+    let app_path = PathBuf::from(&app.path);
+    let executable_name = package::macos_bundle_executable_name(&app_path);
+    let generation =
+        chatgpt_desktop_generation_from_macos_identity(executable_name.as_deref(), &app_path);
+    InstalledChatGptDesktop {
+        installed_at: path_mtime(&app_path),
         path: app.path,
         version: app.version,
         arch: None,
         source: "macos".to_string(),
+        generation,
         package_family_name: app.bundle_identifier,
     }
 }
 
-fn detect_portable_install(root: &Path) -> Option<InstalledCodexClient> {
+fn detect_portable_install(root: &Path) -> Option<InstalledChatGptDesktop> {
     let exe = root.join("Codex.exe");
     if !exe.is_file() {
         return None;
@@ -1477,7 +1607,7 @@ fn detect_portable_install(root: &Path) -> Option<InstalledCodexClient> {
     let identity = fs::read_to_string(root.join("AppxManifest.xml"))
         .ok()
         .and_then(|xml| parse_msix_identity(&xml).ok());
-    Some(InstalledCodexClient {
+    Some(InstalledChatGptDesktop {
         path: root.to_string_lossy().to_string(),
         version: identity
             .as_ref()
@@ -1487,21 +1617,33 @@ fn detect_portable_install(root: &Path) -> Option<InstalledCodexClient> {
             .as_ref()
             .map(|item| item.processor_architecture.clone()),
         source: "portable".to_string(),
+        generation: chatgpt_desktop_generation_from_windows_root(root),
         package_family_name: None,
         installed_at: path_mtime(&exe),
     })
 }
 
 fn macos_app_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![PathBuf::from("/Applications").join(CODEX_MACOS_APP_NAME)];
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join("Applications").join(CODEX_MACOS_APP_NAME));
+    macos_app_candidates_for_home(dirs::home_dir().as_deref())
+}
+
+fn macos_app_candidates_for_home(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = CHATGPT_MACOS_APP_CANDIDATES
+        .iter()
+        .map(|app_name| PathBuf::from("/Applications").join(app_name))
+        .collect::<Vec<_>>();
+    if let Some(home) = home {
+        candidates.extend(
+            CHATGPT_MACOS_APP_CANDIDATES
+                .iter()
+                .map(|app_name| home.join("Applications").join(app_name)),
+        );
     }
     candidates
 }
 
 struct PortableInstallReport {
-    installed: Option<InstalledCodexClient>,
+    installed: Option<InstalledChatGptDesktop>,
     notes: Vec<String>,
 }
 
@@ -1512,13 +1654,13 @@ fn install_portable<F>(
     on_progress: &F,
 ) -> Result<PortableInstallReport, String>
 where
-    F: Fn(CodexClientProgress),
+    F: Fn(ChatGptDesktopProgress),
 {
     emit_step_progress(
         on_progress,
         install_kind,
         "installing",
-        "codexClient.progressPreparingPortableDir",
+        "chatgptDesktop.progressPreparingPortableDir",
         None,
         None,
         Some(4),
@@ -1537,7 +1679,7 @@ where
     fs::create_dir_all(parent)
         .map_err(|err| format!("Failed to create install parent directory: {err}"))?;
     let work = parent
-        .join(".codestudio-codex-client-staging")
+        .join(".codestudio-chatgpt-desktop-staging")
         .join(format!("portable-{}", std::process::id()));
     let extracted = work.join("extracted");
     let payload = work.join("payload");
@@ -1570,7 +1712,7 @@ where
         on_progress,
         install_kind,
         "copying",
-        "codexClient.progressCopyingPortable",
+        "chatgptDesktop.progressCopyingPortable",
         None,
         None,
         Some(5),
@@ -1585,7 +1727,7 @@ where
         on_progress,
         install_kind,
         "writing",
-        "codexClient.progressWritingInstall",
+        "chatgptDesktop.progressWritingInstall",
         None,
         None,
         Some(6),
@@ -1614,7 +1756,7 @@ where
         on_progress,
         install_kind,
         "finalizing",
-        "codexClient.progressFinalizingInstall",
+        "chatgptDesktop.progressFinalizingInstall",
         None,
         None,
         Some(6),
@@ -1637,7 +1779,7 @@ where
         on_progress,
         install_kind,
         "finalizing",
-        "codexClient.progressPortableWritten",
+        "chatgptDesktop.progressPortableWritten",
         Some(1),
         Some(1),
         Some(6),
@@ -1645,11 +1787,12 @@ where
     );
 
     Ok(PortableInstallReport {
-        installed: Some(InstalledCodexClient {
+        installed: Some(InstalledChatGptDesktop {
             path: install_root.to_string_lossy().to_string(),
             version: identity.version,
             arch: Some(identity.processor_architecture),
             source: "portable".to_string(),
+            generation: chatgpt_desktop_generation_from_windows_root(install_root),
             package_family_name: None,
             installed_at: path_mtime(&install_root.join("Codex.exe")),
         }),
@@ -1664,7 +1807,7 @@ fn extract_msix<F>(
     on_progress: &F,
 ) -> Result<String, String>
 where
-    F: Fn(CodexClientProgress),
+    F: Fn(ChatGptDesktopProgress),
 {
     let file = File::open(msix_path).map_err(|err| format!("Failed to open MSIX: {err}"))?;
     let mut zip =
@@ -1676,7 +1819,7 @@ where
         on_progress,
         install_kind,
         "extracting",
-        "codexClient.progressExtractingMsix",
+        "chatgptDesktop.progressExtractingMsix",
         Some(0),
         Some(total),
         Some(4),
@@ -1722,7 +1865,7 @@ where
                 on_progress,
                 install_kind,
                 "extracting",
-                "codexClient.progressExtractingMsix",
+                "chatgptDesktop.progressExtractingMsix",
                 Some((index + 1) as u64),
                 Some(total),
                 Some(4),
@@ -1801,7 +1944,7 @@ fn parse_msix_identity(xml: &str) -> Result<MsixIdentity, String> {
     })
 }
 
-fn probe_capabilities() -> Vec<CodexClientCapability> {
+fn probe_capabilities() -> Vec<DesktopClientCapability> {
     let capabilities = if cfg!(target_os = "macos") {
         package::probe_macos_dmg_capabilities()
     } else {
@@ -1809,7 +1952,7 @@ fn probe_capabilities() -> Vec<CodexClientCapability> {
     };
     capabilities
         .into_iter()
-        .map(|capability| CodexClientCapability {
+        .map(|capability| DesktopClientCapability {
             id: capability.id,
             label: capability.label,
             status: capability.status,
@@ -1818,7 +1961,7 @@ fn probe_capabilities() -> Vec<CodexClientCapability> {
         .collect()
 }
 
-fn manifest_base(_settings: &CodexClientSettings) -> String {
+fn manifest_base(_settings: &ChatGptDesktopSettings) -> String {
     DEFAULT_MIRROR_BASE.to_string()
 }
 
@@ -1837,7 +1980,8 @@ fn current_macos_source(macos: &MacosSources) -> Result<(&MacosSource, &'static 
             .as_ref()
             .map(|source| (source, "arm64"))
             .ok_or_else(|| {
-                "Codex mirror manifest has no macOS arm64 installer information.".to_string()
+                "ChatGPT Desktop mirror manifest has no macOS arm64 installer information."
+                    .to_string()
             })
     } else {
         macos
@@ -1845,7 +1989,8 @@ fn current_macos_source(macos: &MacosSources) -> Result<(&MacosSource, &'static 
             .as_ref()
             .map(|source| (source, "x64"))
             .ok_or_else(|| {
-                "Codex mirror manifest has no macOS x64 installer information.".to_string()
+                "ChatGPT Desktop mirror manifest has no macOS x64 installer information."
+                    .to_string()
             })
     }
 }
@@ -1905,19 +2050,89 @@ fn checksum_for_name(text: &str, expected_name: &str) -> Option<String> {
     })
 }
 
-fn fetch_text(url: &str) -> Result<String, String> {
-    let output = hidden_command("curl")
-        .args(["-fsSL", "--connect-timeout", "20", "--retry", "2", url])
-        .output()
-        .map_err(|err| format!("Failed to start curl: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to read {}: {}",
-            url_host(url),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+fn mirror_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .user_agent("CodeStudio Lite");
+    if cfg!(target_os = "macos") {
+        builder = builder.http1_only();
     }
-    String::from_utf8(output.stdout).map_err(|err| format!("Response is not UTF-8: {err}"))
+    builder
+        .build()
+        .map_err(|err| format!("Failed to create ChatGPT Desktop HTTP client: {err}"))
+}
+
+fn mirror_should_retry_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn mirror_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(
+        (MIRROR_HTTP_RETRY_DELAY_MS * attempt.max(1) as u64)
+            .min(MIRROR_HTTP_RETRY_DELAY_MS * MIRROR_HTTP_MAX_ATTEMPTS as u64),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadResponseMode {
+    Truncate,
+    Append,
+    Complete,
+}
+
+fn download_response_mode(
+    status: StatusCode,
+    resume_offset: u64,
+    expected_total: Option<u64>,
+) -> Result<DownloadResponseMode, String> {
+    if status == StatusCode::RANGE_NOT_SATISFIABLE
+        && resume_offset > 0
+        && expected_total == Some(resume_offset)
+    {
+        return Ok(DownloadResponseMode::Complete);
+    }
+    if status == StatusCode::PARTIAL_CONTENT {
+        return Ok(if resume_offset > 0 {
+            DownloadResponseMode::Append
+        } else {
+            DownloadResponseMode::Truncate
+        });
+    }
+    if status == StatusCode::OK {
+        return Ok(DownloadResponseMode::Truncate);
+    }
+    Err(format!("HTTP {status}"))
+}
+
+fn fetch_text(url: &str) -> Result<String, String> {
+    let client = mirror_http_client(Duration::from_secs(MIRROR_METADATA_TIMEOUT_SECS))?;
+    let host = url_host(url);
+    let mut last_error = "unknown transfer failure".to_string();
+    for attempt in 1..=MIRROR_HTTP_MAX_ATTEMPTS {
+        match client.get(url).send() {
+            Ok(response) if !response.status().is_success() => {
+                let status = response.status();
+                let detail = format!("HTTP {status}");
+                if !mirror_should_retry_status(status) {
+                    return Err(format!("Failed to read {host}: {detail}"));
+                }
+                last_error = detail;
+            }
+            Ok(response) => match response.text() {
+                Ok(text) => return Ok(text),
+                Err(err) => last_error = err.to_string(),
+            },
+            Err(err) => last_error = err.to_string(),
+        }
+        if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
+            thread::sleep(mirror_retry_delay(attempt));
+        }
+    }
+    Err(format!(
+        "Failed to read {host} after {MIRROR_HTTP_MAX_ATTEMPTS} attempts: {last_error}"
+    ))
 }
 
 fn download_to_file<F>(
@@ -1928,7 +2143,7 @@ fn download_to_file<F>(
     on_progress: &F,
 ) -> Result<(), String>
 where
-    F: Fn(CodexClientProgress),
+    F: Fn(ChatGptDesktopProgress),
 {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -1942,60 +2157,132 @@ where
         on_progress,
         install_kind,
         "downloading",
-        "codexClient.progressDownloading",
+        "chatgptDesktop.progressDownloading",
         Some(0),
         expected_total,
         Some(2),
         Some(4),
     );
-    let mut child = hidden_command("curl")
-        .args([
-            "-fLsS",
-            "--connect-timeout",
-            "20",
-            "--retry",
-            "2",
-            "--output",
-            &temp.to_string_lossy(),
-            url,
-        ])
-        .spawn()
-        .map_err(|err| format!("Failed to start download: {err}"))?;
-    let mut last_emit = Instant::now() - Duration::from_secs(2);
-    loop {
-        match child
-            .try_wait()
-            .map_err(|err| format!("Failed while waiting for download process: {err}"))?
-        {
-            Some(_) => break,
-            None => {
-                let downloaded = fs::metadata(&temp).ok().map(|metadata| metadata.len());
-                if last_emit.elapsed() >= Duration::from_millis(500) {
-                    emit_step_progress(
-                        on_progress,
-                        install_kind,
-                        "downloading",
-                        "codexClient.progressDownloading",
-                        downloaded,
-                        expected_total,
-                        Some(2),
-                        Some(4),
-                    );
-                    last_emit = Instant::now();
+    let client = mirror_http_client(Duration::from_secs(MIRROR_PACKAGE_TIMEOUT_SECS))?;
+    let host = url_host(url);
+    let mut last_error = "unknown transfer failure".to_string();
+    let mut completed = false;
+    for attempt in 1..=MIRROR_HTTP_MAX_ATTEMPTS {
+        let resume_offset = fs::metadata(&temp)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut request = client.get(url);
+        if resume_offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={resume_offset}-"));
+        }
+
+        let mut response = match request.send() {
+            Ok(response) => response,
+            Err(err) => {
+                last_error = err.to_string();
+                if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
+                    thread::sleep(mirror_retry_delay(attempt));
                 }
-                thread::sleep(Duration::from_millis(150));
+                continue;
+            }
+        };
+        let status = response.status();
+        let mode = match download_response_mode(status, resume_offset, expected_total) {
+            Ok(mode) => mode,
+            Err(detail) if mirror_should_retry_status(status) => {
+                last_error = detail;
+                if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
+                    thread::sleep(mirror_retry_delay(attempt));
+                }
+                continue;
+            }
+            Err(detail) => {
+                let _ = fs::remove_file(&temp);
+                return Err(format!("Failed to download {host}: {detail}"));
+            }
+        };
+        if mode == DownloadResponseMode::Complete {
+            completed = true;
+            break;
+        }
+
+        let append = mode == DownloadResponseMode::Append;
+        let mut downloaded = if append { resume_offset } else { 0 };
+        let total = expected_total.or_else(|| {
+            response
+                .content_length()
+                .map(|remaining| downloaded.saturating_add(remaining))
+        });
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(&temp)
+            .map_err(|err| format!("Failed to create download file: {err}"))?;
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut last_emit = Instant::now() - Duration::from_secs(2);
+        let mut read_failed = false;
+        loop {
+            let size = match response.read(&mut buffer) {
+                Ok(size) => size,
+                Err(err) => {
+                    last_error = format!("transfer interrupted after {downloaded} bytes: {err}");
+                    read_failed = true;
+                    break;
+                }
+            };
+            if size == 0 {
+                break;
+            }
+            file.write_all(&buffer[..size])
+                .map_err(|err| format!("Failed to write installer download: {err}"))?;
+            downloaded = downloaded.saturating_add(size as u64);
+            if last_emit.elapsed() >= Duration::from_millis(500) {
+                emit_step_progress(
+                    on_progress,
+                    install_kind,
+                    "downloading",
+                    "chatgptDesktop.progressDownloading",
+                    Some(downloaded),
+                    total,
+                    Some(2),
+                    Some(4),
+                );
+                last_emit = Instant::now();
             }
         }
+        file.flush()
+            .map_err(|err| format!("Failed to finish installer download: {err}"))?;
+        drop(file);
+
+        if !read_failed {
+            let final_size = fs::metadata(&temp)
+                .map_err(|err| format!("Failed to inspect installer download: {err}"))?
+                .len();
+            if let Some(expected_total) = expected_total {
+                if final_size != expected_total {
+                    last_error = format!(
+                        "transfer ended at {final_size} bytes; expected {expected_total} bytes"
+                    );
+                } else {
+                    completed = true;
+                    break;
+                }
+            } else {
+                completed = true;
+                break;
+            }
+        }
+        if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
+            thread::sleep(mirror_retry_delay(attempt));
+        }
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("Failed to read download result: {err}"))?;
-    if !output.status.success() {
+
+    if !completed {
         let _ = fs::remove_file(&temp);
         return Err(format!(
-            "Failed to download {}: {}",
-            url_host(url),
-            String::from_utf8_lossy(&output.stderr).trim()
+            "Failed to download {host} after {MIRROR_HTTP_MAX_ATTEMPTS} attempts: {last_error}"
         ));
     }
     let downloaded = fs::metadata(&temp).ok().map(|metadata| metadata.len());
@@ -2003,7 +2290,7 @@ where
         on_progress,
         install_kind,
         "downloading",
-        "codexClient.progressDownloadComplete",
+        "chatgptDesktop.progressDownloadComplete",
         downloaded,
         expected_total,
         Some(2),
@@ -2036,7 +2323,7 @@ fn emit_step_progress<F>(
     step: Option<u64>,
     step_total: Option<u64>,
 ) where
-    F: Fn(CodexClientProgress),
+    F: Fn(ChatGptDesktopProgress),
 {
     let percent = match (downloaded, total) {
         (Some(done), Some(total)) if total > 0 => {
@@ -2044,7 +2331,7 @@ fn emit_step_progress<F>(
         }
         _ => None,
     };
-    on_progress(CodexClientProgress {
+    on_progress(ChatGptDesktopProgress {
         install_kind: install_kind.to_string(),
         phase: phase.to_string(),
         message: message.into(),
@@ -2073,7 +2360,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn staged_package_path(release: &CodexClientRelease) -> Result<PathBuf, String> {
+fn staged_package_path(release: &ChatGptDesktopRelease) -> Result<PathBuf, String> {
     let dir = staging_dir()?;
     let lower = release.package_moniker.to_ascii_lowercase();
     let file = if lower.ends_with(".msix") || lower.ends_with(".dmg") || lower.ends_with(".zip") {
@@ -2147,48 +2434,80 @@ fn download_temp_path(path: &Path) -> PathBuf {
 fn staging_dir() -> Result<PathBuf, String> {
     let paths = app_paths().map_err(|err| err.to_string())?;
     ensure_dirs(&paths).map_err(|err| err.to_string())?;
-    let dir = paths.downloads_dir.join("codex-client");
+    let dir = paths.downloads_dir.join("chatgpt-desktop");
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     Ok(dir)
 }
 
-fn load_settings() -> Result<CodexClientSettings, String> {
-    let Some(json) = storage::load_state_json(CODEX_CLIENT_SETTINGS_STATE_KEY)? else {
-        let settings = CodexClientSettings::default();
-        save_settings(&settings)?;
-        return Ok(settings);
+fn load_settings() -> Result<ChatGptDesktopSettings, String> {
+    let (json, migrate_legacy) = match storage::load_state_json(CHATGPT_DESKTOP_SETTINGS_STATE_KEY)?
+    {
+        Some(json) => (json, false),
+        None => match storage::load_state_json(LEGACY_CODEX_CLIENT_SETTINGS_STATE_KEY)? {
+            Some(json) => (json, true),
+            None => {
+                let settings = ChatGptDesktopSettings::default();
+                save_settings(&settings)?;
+                return Ok(settings);
+            }
+        },
     };
-    let mut settings: CodexClientSettings = serde_json::from_str(&json)
-        .map_err(|err| format!("Failed to parse Codex settings: {err}"))?;
+    let mut settings: ChatGptDesktopSettings = serde_json::from_str(&json)
+        .map_err(|err| format!("Failed to parse ChatGPT Desktop settings: {err}"))?;
+    let mut settings_changed = false;
     settings.source = normalize_source(&settings.source);
     settings.custom_url = String::new();
     settings.signed_only = true;
     if settings.install_root.trim().is_empty() {
         settings.install_root = default_install_root();
+        settings_changed = true;
+    } else if cfg!(target_os = "macos")
+        && settings.install_root == format!("/Applications/{LEGACY_CODEX_MACOS_APP_NAME}")
+        && !Path::new(&settings.install_root).exists()
+    {
+        settings.install_root = default_macos_install_root();
+        settings_changed = true;
+    }
+    if migrate_legacy || settings_changed {
+        save_settings(&settings)?;
+    }
+    if migrate_legacy {
+        let _ = storage::delete_state_json(LEGACY_CODEX_CLIENT_SETTINGS_STATE_KEY);
     }
     Ok(settings)
 }
 
-fn save_settings(settings: &CodexClientSettings) -> Result<(), String> {
+fn save_settings(settings: &ChatGptDesktopSettings) -> Result<(), String> {
     let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
-    storage::save_state_json(CODEX_CLIENT_SETTINGS_STATE_KEY, &json)
-        .map_err(|err| format!("Failed to save Codex settings: {err}"))
+    storage::save_state_json(CHATGPT_DESKTOP_SETTINGS_STATE_KEY, &json)
+        .map_err(|err| format!("Failed to save ChatGPT Desktop settings: {err}"))
 }
 
 fn save_marker(marker: &ManagedInstallMarker) -> Result<(), String> {
     let json = serde_json::to_string_pretty(marker).map_err(|err| err.to_string())?;
-    storage::save_state_json(CODEX_CLIENT_MARKER_STATE_KEY, &json)
-        .map_err(|err| format!("Failed to save Codex managed marker: {err}"))
+    storage::save_state_json(CHATGPT_DESKTOP_MARKER_STATE_KEY, &json)
+        .map_err(|err| format!("Failed to save ChatGPT Desktop managed marker: {err}"))
 }
 
 fn load_marker() -> Option<ManagedInstallMarker> {
-    storage::load_state_json(CODEX_CLIENT_MARKER_STATE_KEY)
+    if let Some(marker) = storage::load_state_json(CHATGPT_DESKTOP_MARKER_STATE_KEY)
         .ok()
         .flatten()
         .and_then(|text| serde_json::from_str(&text).ok())
+    {
+        return Some(marker);
+    }
+    let marker = storage::load_state_json(LEGACY_CODEX_CLIENT_MARKER_STATE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|text| serde_json::from_str(&text).ok())?;
+    if save_marker(&marker).is_ok() {
+        let _ = storage::delete_state_json(LEGACY_CODEX_CLIENT_MARKER_STATE_KEY);
+    }
+    Some(marker)
 }
 
-fn install_class(installed: Option<&InstalledCodexClient>) -> String {
+fn install_class(installed: Option<&InstalledChatGptDesktop>) -> String {
     let Some(installed) = installed else {
         return "none".to_string();
     };
@@ -2207,7 +2526,7 @@ fn install_class(installed: Option<&InstalledCodexClient>) -> String {
     }
 }
 
-fn validate_install_target(settings: &CodexClientSettings) -> Result<(), String> {
+fn validate_install_target(settings: &ChatGptDesktopSettings) -> Result<(), String> {
     let path = expand_env_path(&settings.install_root)?;
     validate_install_path_for_platform(&path)
 }
@@ -2260,7 +2579,7 @@ fn validate_install_root(path: &Path) -> Result<(), String> {
     }
     if path.exists() && !is_empty_dir(path)? && !is_existing_portable_root(path) {
         return Err(
-            "Install location must be an empty folder or an existing Codex portable directory."
+        "Install location must be an empty folder or an existing ChatGPT Desktop portable directory."
                 .to_string(),
         );
     }
@@ -2343,7 +2662,7 @@ fn default_install_root() -> String {
             .to_string_lossy()
             .to_string()
     } else if cfg!(target_os = "macos") {
-        "/Applications/Codex.app".to_string()
+        default_macos_install_root()
     } else {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -2353,6 +2672,10 @@ fn default_install_root() -> String {
             .to_string_lossy()
             .to_string()
     }
+}
+
+fn default_macos_install_root() -> String {
+    format!("/Applications/{CHATGPT_MACOS_APP_NAME}")
 }
 
 fn platform_label() -> String {
@@ -2399,357 +2722,116 @@ fn path_mtime(path: &Path) -> Option<String> {
         .map(|time| time.to_rfc3339())
 }
 
-fn ps_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-fn terminate_codex_process_for_uninstall(
-    root: Option<&Path>,
-    notes: &mut Vec<String>,
-) -> Result<(), String> {
-    if !cfg!(target_os = "windows") {
-        return Ok(());
-    }
-    let root_filter = root
-        .map(|path| ps_quote(&path.to_string_lossy()))
-        .unwrap_or_else(|| "$null".to_string());
-    let script = format!(
-        r#"
-$RootFilter = {root_filter}
-if ($null -ne $RootFilter) {{
-  try {{ $RootFilter = [System.IO.Path]::GetFullPath($RootFilter).TrimEnd('\') }} catch {{}}
-}}
-function Get-TargetCodexProcess {{
-  $all = Get-Process -Name Codex -ErrorAction SilentlyContinue
-  foreach ($p in $all) {{
-    if ($null -eq $RootFilter) {{
-      $p
-      continue
-    }}
-    try {{
-      $path = [string]$p.Path
-      if (-not $path) {{ continue }}
-      $full = [System.IO.Path]::GetFullPath($path)
-      if ($full.Equals($RootFilter, [System.StringComparison]::OrdinalIgnoreCase) -or
-          $full.StartsWith($RootFilter + '\', [System.StringComparison]::OrdinalIgnoreCase)) {{
-        $p
-      }}
-    }} catch {{}}
-  }}
-}}
-$procs = @(Get-TargetCodexProcess)
-$targetIds = @($procs | ForEach-Object {{ $_.Id }})
-foreach ($p in $procs) {{
-  try {{
-    if ($p.MainWindowHandle -ne 0) {{ [void]$p.CloseMainWindow() }}
-  }} catch {{}}
-}}
-$deadline = (Get-Date).AddSeconds(8)
-while ((Get-Date) -lt $deadline) {{
-  Start-Sleep -Milliseconds 250
-  $remaining = @()
-  foreach ($id in $targetIds) {{
-    $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-    if ($null -ne $p) {{ $remaining += $p }}
-  }}
-  if ($remaining.Count -eq 0) {{ break }}
-}}
-$remaining = @()
-foreach ($id in $targetIds) {{
-  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-  if ($null -ne $p) {{ $remaining += $p }}
-}}
-$forced = 0
-foreach ($p in $remaining) {{
-  try {{
-    Stop-Process -Id $p.Id -Force -ErrorAction Stop
-    $forced += 1
-  }} catch {{}}
-}}
-Start-Sleep -Milliseconds 300
-$still = @()
-foreach ($id in $targetIds) {{
-  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-  if ($null -ne $p) {{ $still += $p }}
-}}
-[pscustomobject]@{{
-  total = [int]$targetIds.Count
-  forced = [int]$forced
-  remaining = [int]$still.Count
-}} | ConvertTo-Json -Compress
-"#
-    );
-    let json = run_powershell(&script)?;
-    let value: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|err| format!("Failed to parse Codex process termination result: {err}"))?;
-    let total = value
-        .get("total")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(0);
-    let forced = value
-        .get("forced")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(0);
-    let remaining = value
-        .get("remaining")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(0);
-    if remaining > 0 {
-        return Err(
-            "A Codex desktop process is still running; uninstall was not continued.".to_string(),
-        );
-    }
-    if total > 0 {
-        if forced > 0 {
-            notes.push(format!(
-                "Codex desktop was running; force-closed {forced} process(es) before uninstalling."
-            ));
-        } else {
-            notes.push("Codex desktop was running and was closed before uninstalling.".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn terminate_codex_process_for_restart(
-    root: Option<&Path>,
+fn close_chatgpt_desktop_processes(
+    installed: &InstalledChatGptDesktop,
     notes: &mut Vec<String>,
 ) -> Result<(), String> {
     if cfg!(target_os = "macos") {
-        let _ = root;
-        return terminate_macos_codex_process_for_restart(notes);
+        let app = Path::new(&installed.path);
+        let was_running = package::macos_app_running(app);
+        let process_name = macos_process_name_for_installed(installed);
+        package::quit_macos_app_bundle(app)
+            .map_err(|err| format!("Failed to close {process_name}: {err}"))?;
+        if was_running {
+            notes.push("Closed the running ChatGPT desktop process.".to_string());
+        }
+        return Ok(());
     }
 
     if !cfg!(target_os = "windows") {
         return Ok(());
     }
-    let root_filter = root
-        .map(|path| ps_quote(&path.to_string_lossy()))
-        .unwrap_or_else(|| "$null".to_string());
-    let script = format!(
-        r#"
-$RootFilter = {root_filter}
-if ($null -ne $RootFilter) {{
-  try {{ $RootFilter = [System.IO.Path]::GetFullPath($RootFilter).TrimEnd('\') }} catch {{}}
-}}
-function Get-TargetCodexProcess {{
-  $all = Get-Process -Name Codex -ErrorAction SilentlyContinue
-  foreach ($p in $all) {{
-    if ($null -eq $RootFilter) {{
-      $p
-      continue
-    }}
-    try {{
-      $path = [string]$p.Path
-      if (-not $path) {{ continue }}
-      $full = [System.IO.Path]::GetFullPath($path)
-      if ($full.Equals($RootFilter, [System.StringComparison]::OrdinalIgnoreCase) -or
-          $full.StartsWith($RootFilter + '\', [System.StringComparison]::OrdinalIgnoreCase)) {{
-        $p
-      }}
-    }} catch {{}}
-  }}
-}}
-$procs = @(Get-TargetCodexProcess)
-$targetIds = @($procs | ForEach-Object {{ $_.Id }})
-foreach ($p in $procs) {{
-  try {{
-    if ($p.MainWindowHandle -ne 0) {{ [void]$p.CloseMainWindow() }}
-  }} catch {{}}
-}}
-$deadline = (Get-Date).AddSeconds(8)
-while ((Get-Date) -lt $deadline) {{
-  Start-Sleep -Milliseconds 250
-  $remaining = @()
-  foreach ($id in $targetIds) {{
-    $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-    if ($null -ne $p) {{ $remaining += $p }}
-  }}
-  if ($remaining.Count -eq 0) {{ break }}
-}}
-$remaining = @()
-foreach ($id in $targetIds) {{
-  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-  if ($null -ne $p) {{ $remaining += $p }}
-}}
-$forced = 0
-foreach ($p in $remaining) {{
-  try {{
-    Stop-Process -Id $p.Id -Force -ErrorAction Stop
-    $forced += 1
-  }} catch {{}}
-}}
-Start-Sleep -Milliseconds 300
-$still = @()
-foreach ($id in $targetIds) {{
-  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-  if ($null -ne $p) {{ $still += $p }}
-}}
-[pscustomobject]@{{
-  total = [int]$targetIds.Count
-  forced = [int]$forced
-  remaining = [int]$still.Count
-}} | ConvertTo-Json -Compress
-"#
-    );
-    let json = run_powershell(&script)?;
-    let value: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|err| format!("Failed to parse Codex process restart result: {err}"))?;
-    let total = value
-        .get("total")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(0);
-    let forced = value
-        .get("forced")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(0);
-    let remaining = value
-        .get("remaining")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(0);
-    if remaining > 0 {
-        return Err(
-            "A Codex desktop process is still running; restart was not continued.".to_string(),
-        );
-    }
-    if total > 0 {
-        if forced > 0 {
+
+    let report = if installed.source == "msix" {
+        process_control::close_appx_package_for_update("ChatGPT Desktop", PACKAGE_IDENTITY)?
+    } else {
+        process_control::close_processes_for_update(
+            "ChatGPT Desktop",
+            &[CODEX_EXE_NAME],
+            Some(Path::new(&installed.path)),
+        )?
+    };
+    if report.total > 0 {
+        if report.forced > 0 {
             notes.push(format!(
-                "Force-closed {forced} running Codex desktop process(es)."
+                "Force-closed {} running ChatGPT desktop process(es).",
+                report.forced
             ));
         } else {
-            notes.push("Closed the running Codex desktop process.".to_string());
+            notes.push("Closed the running ChatGPT desktop process.".to_string());
         }
     }
     Ok(())
 }
 
-fn terminate_macos_codex_process_for_restart(notes: &mut Vec<String>) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Ok(());
-    }
-
-    let pids = macos_codex_process_ids()?;
-    if pids.is_empty() {
-        return Ok(());
-    }
-
-    for pid in &pids {
-        let _ = hidden_command("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output();
-    }
-    wait_for_macos_codex_process_exit(&pids, Duration::from_secs(8));
-
-    let remaining_after_term = pids
-        .iter()
-        .copied()
-        .filter(|pid| macos_codex_pid_alive(*pid))
-        .collect::<Vec<_>>();
-    let mut forced = 0;
-    for pid in &remaining_after_term {
-        let output = hidden_command("kill")
-            .args(["-KILL", &pid.to_string()])
-            .output()
-            .map_err(|err| format!("Failed to force-close Codex desktop: {err}"))?;
-        if output.status.success() {
-            forced += 1;
-        }
-    }
-    wait_for_macos_codex_process_exit(&remaining_after_term, Duration::from_millis(500));
-
-    let remaining = pids
-        .iter()
-        .copied()
-        .filter(|pid| macos_codex_pid_alive(*pid))
-        .count();
-    if remaining > 0 {
-        return Err(
-            "A Codex desktop process is still running; restart was not continued.".to_string(),
-        );
-    }
-
-    if forced > 0 {
-        notes.push(format!(
-            "Force-closed {forced} running Codex desktop process(es)."
-        ));
-    } else {
-        notes.push("Closed the running Codex desktop process.".to_string());
-    }
-    Ok(())
+fn macos_process_name_for_installed(installed: &InstalledChatGptDesktop) -> String {
+    let app = Path::new(&installed.path);
+    package::macos_app_executable_name(app)
+        .or_else(|| {
+            app.file_stem()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "ChatGPT".to_string())
 }
 
-fn macos_codex_process_ids() -> Result<Vec<u32>, String> {
-    if !cfg!(target_os = "macos") {
-        return Ok(Vec::new());
-    }
-    let output = hidden_command("pgrep")
-        .args(["-x", "Codex"])
-        .output()
-        .map_err(|err| format!("Failed to inspect running Codex processes: {err}"))?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    let current_pid = std::process::id();
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| *pid != current_pid)
-        .collect())
+fn macos_tool_command(installed: Option<&InstalledChatGptDesktop>) -> String {
+    installed
+        .and_then(|item| {
+            Path::new(&item.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| CHATGPT_MACOS_APP_NAME.to_string())
 }
 
-fn wait_for_macos_codex_process_exit(pids: &[u32], timeout: Duration) {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
-    let started_at = Instant::now();
-    while started_at.elapsed() < timeout {
-        if pids.iter().all(|pid| !macos_codex_pid_alive(*pid)) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+fn macos_open_command(installed: &InstalledChatGptDesktop, args: &[String]) -> Vec<String> {
+    let mut command = vec![
+        "open".to_string(),
+        "-a".to_string(),
+        installed.path.clone(),
+        "--args".to_string(),
+    ];
+    command.extend(args.iter().cloned());
+    command
 }
 
-fn macos_codex_pid_alive(pid: u32) -> bool {
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
-    hidden_command("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn launch_installed_codex(installed: &InstalledCodexClient, args: &[String]) -> Result<(), String> {
+fn launch_installed_codex(
+    installed: &InstalledChatGptDesktop,
+    args: &[String],
+) -> Result<(), String> {
     if installed.source == "portable" {
         let exe = Path::new(&installed.path).join(CODEX_EXE_NAME);
         hidden_command(exe)
             .args(args)
             .spawn()
             .map(|_| ())
-            .map_err(|err| format!("Failed to launch Codex: {err}"))?;
+            .map_err(|err| format!("Failed to launch ChatGPT Desktop: {err}"))?;
     } else if cfg!(target_os = "windows") {
         package::launch_msix_package_with_args(PACKAGE_IDENTITY, args)
             .map(|_| ())
-            .map_err(|err| format!("Failed to launch Codex with patch arguments: {err}"))?;
+            .map_err(|err| {
+                format!("Failed to launch ChatGPT Desktop with patch arguments: {err}")
+            })?;
     } else if cfg!(target_os = "macos") {
-        let path = Path::new(&installed.path);
-        hidden_command("open")
-            .arg(path)
-            .arg("--args")
-            .args(args)
+        let command = macos_open_command(installed, args);
+        hidden_command(&command[0])
+            .args(&command[1..])
             .spawn()
             .map(|_| ())
-            .map_err(|err| format!("Failed to launch Codex with patch arguments: {err}"))?;
+            .map_err(|err| {
+                format!("Failed to launch ChatGPT Desktop with patch arguments: {err}")
+            })?;
     } else {
-        return Err("Launching Codex is not supported on the current platform.".to_string());
+        return Err(
+            "Launching ChatGPT Desktop is not supported on the current platform.".to_string(),
+        );
     }
     Ok(())
 }
 
-fn sync_history_if_enabled(settings: &CodexClientSettings) -> Result<(), String> {
+fn sync_history_if_enabled(settings: &ChatGptDesktopSettings) -> Result<(), String> {
     if !settings.sync_history_on_launch {
         return Ok(());
     }
@@ -2757,7 +2839,7 @@ fn sync_history_if_enabled(settings: &CodexClientSettings) -> Result<(), String>
     let _ = activity_log::append(
         Severity::Info,
         format!(
-            "Synchronized Codex history provider to {} ({} session files, {} sqlite rows).",
+            "Synchronized ChatGPT Desktop history provider to {} ({} session files, {} sqlite rows).",
             report.target_provider, report.changed_session_files, report.sqlite_rows_updated
         ),
     );
@@ -2767,7 +2849,7 @@ fn sync_history_if_enabled(settings: &CodexClientSettings) -> Result<(), String>
 const COMPUTER_USE_GUARD_POST_LAUNCH_SECONDS: &[u64] = &[1, 3, 7, 15, 30, 60];
 const COMPUTER_USE_GUARD_STABLE_ATTEMPTS: usize = 3;
 
-fn ensure_official_remote_plugin_cache_if_enabled(settings: &CodexClientSettings) {
+fn ensure_official_remote_plugin_cache_if_enabled(settings: &ChatGptDesktopSettings) {
     if !settings.official_remote_plugin_cache_on_launch {
         return;
     }
@@ -2801,7 +2883,7 @@ fn ensure_official_remote_plugin_cache_if_enabled(settings: &CodexClientSettings
     }
 }
 
-fn ensure_computer_use_guard_if_enabled(settings: &CodexClientSettings) -> Result<(), String> {
+fn ensure_computer_use_guard_if_enabled(settings: &ChatGptDesktopSettings) -> Result<(), String> {
     if !settings.computer_use_guard_on_launch {
         return Ok(());
     }
@@ -2819,7 +2901,7 @@ fn ensure_computer_use_guard_if_enabled(settings: &CodexClientSettings) -> Resul
     Ok(())
 }
 
-fn start_computer_use_guard_watchdog_if_enabled(settings: &CodexClientSettings) {
+fn start_computer_use_guard_watchdog_if_enabled(settings: &ChatGptDesktopSettings) {
     if !settings.computer_use_guard_on_launch || !cfg!(target_os = "windows") {
         return;
     }
@@ -2871,7 +2953,7 @@ struct CodexModelCatalog {
 }
 
 fn codex_enhancement_settings_from(
-    settings: &CodexClientSettings,
+    settings: &ChatGptDesktopSettings,
 ) -> CodexEnhancementInjectionSettings {
     CodexEnhancementInjectionSettings {
         plugin_marketplace_unlock: settings.plugin_marketplace_unlock_on_launch,
@@ -3149,12 +3231,12 @@ struct CdpTarget {
 
 fn inject_codex_enhancements(
     debug_port: u16,
-    settings: CodexEnhancementInjectionSettings,
-) -> Result<(), String> {
+    settings: &CodexEnhancementInjectionSettings,
+) -> Result<String, String> {
     let mut last_error = None;
     for _ in 0..CODEX_PATCH_INJECTION_RETRY_COUNT {
-        match try_inject_codex_enhancements(debug_port, &settings) {
-            Ok(()) => return Ok(()),
+        match try_inject_codex_enhancements(debug_port, settings) {
+            Ok(websocket_url) => return Ok(websocket_url),
             Err(err) => {
                 last_error = Some(err);
                 thread::sleep(Duration::from_millis(CODEX_PATCH_INJECTION_RETRY_MS));
@@ -3166,10 +3248,11 @@ fn inject_codex_enhancements(
 
 fn spawn_codex_enhancement_injection(debug_port: u16, settings: CodexEnhancementInjectionSettings) {
     thread::spawn(
-        move || match inject_codex_enhancements(debug_port, settings) {
-            Ok(()) => {
+        move || match inject_codex_enhancements(debug_port, &settings) {
+            Ok(active_websocket_url) => {
                 let _ =
                     activity_log::append(Severity::Ok, "Applied Codex launch enhancement patch.");
+                watch_codex_enhancement_target(debug_port, &settings, active_websocket_url);
             }
             Err(err) => {
                 let _ = activity_log::append(
@@ -3181,16 +3264,67 @@ fn spawn_codex_enhancement_injection(debug_port: u16, settings: CodexEnhancement
     );
 }
 
+fn watch_codex_enhancement_target(
+    debug_port: u16,
+    settings: &CodexEnhancementInjectionSettings,
+    mut active_websocket_url: String,
+) {
+    let mut consecutive_misses = 0;
+    loop {
+        thread::sleep(Duration::from_millis(CODEX_PATCH_WATCHDOG_POLL_MS));
+        let next_target = pick_cdp_target(debug_port).and_then(|target| {
+            target
+                .web_socket_debugger_url
+                .filter(|websocket_url| !websocket_url.is_empty())
+                .ok_or_else(|| {
+                    "Selected Codex CDP target has no WebSocket debugger URL.".to_string()
+                })
+        });
+        match next_target {
+            Ok(websocket_url) => {
+                if websocket_url != active_websocket_url {
+                    let script = match codex_enhancement_script(settings) {
+                        Ok(script) => script,
+                        Err(_) => return,
+                    };
+                    match evaluate_cdp_script(&websocket_url, &script) {
+                        Ok(()) => {
+                            active_websocket_url = websocket_url;
+                            consecutive_misses = 0;
+                            let _ = activity_log::append(
+                                Severity::Ok,
+                                "Reapplied Codex enhancements to a recreated desktop page.",
+                            );
+                        }
+                        Err(_) => consecutive_misses += 1,
+                    }
+                } else {
+                    consecutive_misses = 0;
+                }
+            }
+            Err(_) => consecutive_misses += 1,
+        }
+        if consecutive_misses >= CODEX_PATCH_WATCHDOG_MAX_MISSES {
+            let _ = activity_log::append(
+                Severity::Info,
+                "Stopped the Codex enhancement page watchdog after the desktop CDP endpoint closed.",
+            );
+            return;
+        }
+    }
+}
+
 fn try_inject_codex_enhancements(
     debug_port: u16,
     settings: &CodexEnhancementInjectionSettings,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let target = pick_cdp_target(debug_port)?;
     let ws_url = target
         .web_socket_debugger_url
         .ok_or_else(|| "Selected Codex CDP target has no WebSocket debugger URL.".to_string())?;
     let script = codex_enhancement_script(settings)?;
-    evaluate_cdp_script(&ws_url, &script)
+    evaluate_cdp_script(&ws_url, &script)?;
+    Ok(ws_url)
 }
 
 fn pick_cdp_target(debug_port: u16) -> Result<CdpTarget, String> {
@@ -3210,28 +3344,10 @@ fn pick_cdp_target(debug_port: u16) -> Result<CdpTarget, String> {
                     let targets = response
                         .json::<Vec<CdpTarget>>()
                         .map_err(|err| format!("Failed to parse CDP targets: {err}"))?;
-                    if let Some(target) = targets.iter().find(|target| {
-                        target.target_type == "page"
-                            && target
-                                .web_socket_debugger_url
-                                .as_deref()
-                                .is_some_and(|item| !item.is_empty())
-                            && format!("{} {}", target.title, target.url)
-                                .to_ascii_lowercase()
-                                .contains("codex")
-                    }) {
-                        return Ok(target.clone());
+                    match pick_cdp_target_from_targets(&targets) {
+                        Ok(target) => return Ok(target),
+                        Err(err) => errors.push(format!("{url}: {err}")),
                     }
-                    if let Some(target) = targets.iter().find(|target| {
-                        target.target_type == "page"
-                            && target
-                                .web_socket_debugger_url
-                                .as_deref()
-                                .is_some_and(|item| !item.is_empty())
-                    }) {
-                        return Ok(target.clone());
-                    }
-                    errors.push(format!("{url}: no page target"));
                 }
                 Err(err) => errors.push(format!("{url}: {err}")),
             },
@@ -3242,6 +3358,37 @@ fn pick_cdp_target(debug_port: u16) -> Result<CdpTarget, String> {
         "Failed to find Codex CDP target: {}",
         errors.join("; ")
     ))
+}
+
+fn pick_cdp_target_from_targets(targets: &[CdpTarget]) -> Result<CdpTarget, String> {
+    targets
+        .iter()
+        .filter(|target| {
+            target.target_type == "page"
+                && target
+                    .web_socket_debugger_url
+                    .as_deref()
+                    .is_some_and(|websocket_url| !websocket_url.is_empty())
+        })
+        .find(|target| is_codex_or_chatgpt_desktop_page(target))
+        .cloned()
+        .ok_or_else(|| "no injectable Codex or ChatGPT Desktop page target".to_string())
+}
+
+fn is_codex_or_chatgpt_desktop_page(target: &CdpTarget) -> bool {
+    let haystack = format!("{} {}", target.title, target.url).to_ascii_lowercase();
+    haystack.contains("codex") || is_chatgpt_desktop_page(&target.title, &target.url)
+}
+
+fn is_chatgpt_desktop_page(title: &str, url: &str) -> bool {
+    let title = title.trim().to_ascii_lowercase();
+    let url = url.trim().to_ascii_lowercase();
+    title == "chatgpt"
+        && (url == "https://chatgpt.com"
+            || url.starts_with("https://chatgpt.com/")
+            || url == "https://chat.openai.com"
+            || url.starts_with("https://chat.openai.com/")
+            || url.starts_with("data:text/html"))
 }
 
 fn evaluate_cdp_script(websocket_url: &str, script: &str) -> Result<(), String> {
@@ -3316,11 +3463,16 @@ fn codex_enhancement_script(
 ) -> Result<String, String> {
     let settings_json = serde_json::to_string(settings)
         .map_err(|err| format!("Failed to serialize Codex enhancement settings: {err}"))?;
+    let plugin_marketplaces_json =
+        serde_json::to_string(&codex_plugin_marketplaces_for_injection())
+            .map_err(|err| format!("Failed to serialize Codex plugin marketplaces: {err}"))?;
     let script = r#"
 (() => {
   const codestudioLiteInjectedSettings = __CODESTUDIO_LITE_SETTINGS__;
-  const codestudioLiteCodexEnhancementsVersion = "3";
+  const codestudioLiteLocalPluginMarketplaces = __CODESTUDIO_LITE_PLUGIN_MARKETPLACES__;
+  const codestudioLiteCodexEnhancementsVersion = "5";
   window.__codestudioLiteCodexEnhancementSettings = codestudioLiteInjectedSettings;
+  window.__codestudioLitePluginMarketplaces = codestudioLiteLocalPluginMarketplaces;
   function codestudioLiteSettings() {
     return window.__codestudioLiteCodexEnhancementSettings || codestudioLiteInjectedSettings;
   }
@@ -3338,11 +3490,14 @@ fn codex_enhancement_script(
   }
   window.__codestudioLiteCodexEnhancements = codestudioLiteCodexEnhancementsVersion;
   const styleId = "codestudio-lite-codex-enhancement-style";
-  const pluginMarketplaceUnlockVersion = "2";
+  const pluginMarketplaceUnlockVersion = "3";
   const codexPluginAutoExpandVersion = "1";
   const codexPluginAutoExpandMaxClicks = 80;
   const codexPluginAutoExpandClickDelayMs = 90;
-  const codexAppServerModelRequestPatchVersion = "1";
+  const codexModelJsonResponsePatchVersion = "2";
+  const codexModelMessagePatchVersion = "2";
+  const codexStatsigModelWhitelistPatchVersion = "2";
+  const codexAppServerModelRequestPatchVersion = "2";
   const codexServiceTierRequestOverrideVersion = "3";
   const codexServiceTierBadgeClass = "codestudio-lite-service-tier-badge";
   const codexServiceTierBadgeVersion = "3";
@@ -3352,7 +3507,13 @@ fn codex_enhancement_script(
   const codexThreadServiceTierDraftBindWindowMs = 60 * 1000;
   const codexDefaultServiceTierSetting = { key: "default-service-tier", default: null };
   const codexServiceTierFallbackFastValue = "priority";
-  const codexServiceTierSupportedFastModels = new Set(["gpt-5.4", "gpt-5.5"]);
+  const codexServiceTierSupportedFastModels = new Set([
+    "gpt-5.4",
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ]);
   const codexThreadServiceTierModes = new Set(["inherit", "standard", "fast"]);
   const codexServiceTierControlModes = new Set(["inherit", "global-standard", "global-fast", "custom"]);
   const modulePromises = new Map();
@@ -3502,31 +3663,30 @@ fn codex_enhancement_script(
     }
     const next = { ...params };
     const hadMarketplaceKinds = Object.prototype.hasOwnProperty.call(next, "marketplaceKinds");
-    if (hadMarketplaceKinds) delete next.marketplaceKinds;
+    const nextKinds = Array.isArray(next.marketplaceKinds)
+      ? next.marketplaceKinds.map((kind) => restorePluginMarketplaceName(kind))
+      : ["local"];
+    if (!nextKinds.includes("vertical")) nextKinds.push("vertical");
+    next.marketplaceKinds = Array.from(new Set(nextKinds));
     recordPluginUnlockDiagnostic("plugin_marketplace_request_expanded", {
       hadMarketplaceKinds,
+      marketplaceKinds: next.marketplaceKinds,
       cwdCount: Array.isArray(next.cwds) ? next.cwds.length : 0,
     });
     return next;
-  }
-
-  function pluginMarketplaceAliasForName(name) {
-    if (name === "openai-curated") return "codestudio-lite-openai-curated";
-    if (name === "openai-primary-runtime") return "codestudio-lite-openai-primary-runtime";
-    return "";
   }
 
   function displayNameForPluginMarketplaceName(name, fallback) {
     if (name === "openai-bundled" || name === "codestudio-lite-openai-bundled") return "OpenAI插件1(CodeStudio)";
     if (name === "openai-curated" || name === "codestudio-lite-openai-curated") return "OpenAI插件2(CodeStudio)";
     if (name === "openai-primary-runtime" || name === "codestudio-lite-openai-primary-runtime") return "OpenAI插件3(CodeStudio)";
+    if (name === "openai-api-curated" || name === "codestudio-lite-openai-api-curated") return "OpenAI插件4(CodeStudio)";
+    if (name === "openai-curated-remote" || name === "codestudio-lite-openai-curated-remote") return "OpenAI插件5(CodeStudio)";
     return fallback;
   }
 
   function patchPluginMarketplaceObject(marketplace) {
     if (!marketplace || typeof marketplace !== "object" || marketplace.__codestudioLiteMarketplaceUnlockPatched) return false;
-    const alias = pluginMarketplaceAliasForName(marketplace.name);
-    if (alias) marketplace.name = alias;
     const displayName = displayNameForPluginMarketplaceName(marketplace.name, marketplace.displayName || marketplace.title || marketplace.label || marketplace.name);
     if (!displayName || displayName === marketplace.name) return false;
     marketplace.displayName = displayName;
@@ -3547,16 +3707,104 @@ fn codex_enhancement_script(
     return true;
   }
 
+  function cloneCodexPluginMarketplace(value) {
+    if (!value || typeof value !== "object") return null;
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function pluginMarketplacePluginKey(plugin) {
+    if (!plugin || typeof plugin !== "object") return "";
+    return String(plugin.name || plugin.id || plugin.pluginName || "").trim();
+  }
+
+  function normalizeLocalPluginMarketplacePlugin(plugin, marketplaceName) {
+    const cloned = cloneCodexPluginMarketplace(plugin);
+    if (!cloned || typeof cloned !== "object") return null;
+    const name = String(cloned.name || cloned.id || cloned.pluginName || "").trim();
+    if (!name) return null;
+    if (!cloned.name) cloned.name = name;
+    if (!cloned.id) cloned.id = `${name}@${marketplaceName}`;
+    if (!cloned.marketplaceName) cloned.marketplaceName = marketplaceName;
+    if (!cloned.marketplacePath) cloned.marketplacePath = marketplaceName;
+    if (!cloned.interface || typeof cloned.interface !== "object") cloned.interface = {};
+    if (!cloned.interface.displayName) cloned.interface.displayName = name;
+    if (!Array.isArray(cloned.keywords)) cloned.keywords = [];
+    return cloned;
+  }
+
+  function mergePluginMarketplacePlugins(target, source) {
+    if (!target || !source || !Array.isArray(source.plugins)) return 0;
+    if (!Array.isArray(target.plugins)) target.plugins = [];
+    const marketplaceName = restorePluginMarketplaceName(target.name || source.name || "");
+    const existing = new Set(target.plugins.map(pluginMarketplacePluginKey).filter(Boolean));
+    let added = 0;
+    source.plugins.forEach((plugin) => {
+      const key = pluginMarketplacePluginKey(plugin);
+      if (!key || existing.has(key)) return;
+      const cloned = normalizeLocalPluginMarketplacePlugin(plugin, marketplaceName);
+      if (!cloned) return;
+      target.plugins.push(cloned);
+      existing.add(key);
+      added += 1;
+    });
+    return added;
+  }
+
+  function mergeLocalPluginMarketplaces(result) {
+    if (!result || typeof result !== "object" || !Array.isArray(result.marketplaces)) {
+      return { addedMarketplaces: 0, addedPlugins: 0 };
+    }
+    const localMarketplaces = Array.isArray(window.__codestudioLitePluginMarketplaces)
+      ? window.__codestudioLitePluginMarketplaces
+      : [];
+    if (!localMarketplaces.length) return { addedMarketplaces: 0, addedPlugins: 0 };
+    const byName = new Map();
+    result.marketplaces.forEach((marketplace) => {
+      const name = restorePluginMarketplaceName(marketplace?.name || "");
+      if (name) byName.set(name, marketplace);
+    });
+    let addedMarketplaces = 0;
+    let addedPlugins = 0;
+    localMarketplaces.forEach((marketplace) => {
+      const name = restorePluginMarketplaceName(marketplace?.name || "");
+      if (!name) return;
+      const existing = byName.get(name);
+      if (existing) {
+        addedPlugins += mergePluginMarketplacePlugins(existing, marketplace);
+        return;
+      }
+      const cloned = cloneCodexPluginMarketplace(marketplace);
+      if (!cloned) return;
+      cloned.plugins = Array.isArray(cloned.plugins)
+        ? cloned.plugins.map((plugin) => normalizeLocalPluginMarketplacePlugin(plugin, name)).filter(Boolean)
+        : [];
+      result.marketplaces.push(cloned);
+      byName.set(name, cloned);
+      addedMarketplaces += 1;
+      addedPlugins += cloned.plugins.length;
+    });
+    if (addedMarketplaces > 0 || addedPlugins > 0) {
+      recordPluginUnlockDiagnostic("plugin_marketplace_local_merged", { addedMarketplaces, addedPlugins });
+    }
+    return { addedMarketplaces, addedPlugins };
+  }
+
   function restorePluginMarketplaceName(name) {
     if (name === "codestudio-lite-openai-bundled" || name === "codex-plus-openai-bundled") return "openai-bundled";
     if (name === "codestudio-lite-openai-curated" || name === "codex-plus-openai-curated") return "openai-curated";
     if (name === "codestudio-lite-openai-primary-runtime" || name === "codex-plus-openai-primary-runtime") return "openai-primary-runtime";
+    if (name === "codestudio-lite-openai-api-curated" || name === "codex-plus-openai-api-curated") return "openai-api-curated";
+    if (name === "codestudio-lite-openai-curated-remote" || name === "codex-plus-openai-curated-remote") return "openai-curated-remote";
     return name;
   }
 
   function codexPluginOfficialMarketplaceName(name) {
     const restored = restorePluginMarketplaceName(name);
-    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime";
+    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime" || restored === "openai-api-curated" || restored === "openai-curated-remote";
   }
 
   function isCodexPluginBuildFlavorFilter(callback, sample) {
@@ -3643,6 +3891,7 @@ fn codex_enhancement_script(
     let patchedCount = 0;
     try {
       if (Array.isArray(result?.marketplaces)) {
+        mergeLocalPluginMarketplaces(result);
         result.marketplaces.forEach((marketplace) => {
           if (patchPluginMarketplaceObject(marketplace)) patchedCount += 1;
         });
@@ -4022,10 +4271,11 @@ fn codex_enhancement_script(
         if (value[key].length !== before) changed = true;
       }
     }
-    if (value.defaultModel == null && names.length > 0) {
-      value.defaultModel = codexPlusModelDescriptor(names[0]);
+    const customNames = codexPlusModelUnlockEnabled() ? codexPlusModelNames() : [];
+    if (value.defaultModel == null && customNames.length > 0) {
+      value.defaultModel = codexPlusModelDescriptor(customNames[0]);
       changed = true;
-    } else if (typeof value.defaultModel === "string" && names.includes(value.defaultModel) && value.model == null) {
+    } else if (typeof value.defaultModel === "string" && customNames.includes(value.defaultModel) && value.model == null) {
       value.model = value.defaultModel;
       changed = true;
     }
@@ -4064,8 +4314,8 @@ fn codex_enhancement_script(
   }
 
   function installModelJsonResponsePatch() {
-    if (window.__codestudioLiteModelJsonResponsePatchInstalled === "1") return;
-    window.__codestudioLiteModelJsonResponsePatchInstalled = "1";
+    if (window.__codestudioLiteModelJsonResponsePatchInstalled === codexModelJsonResponsePatchVersion) return;
+    window.__codestudioLiteModelJsonResponsePatchInstalled = codexModelJsonResponsePatchVersion;
     window.__codestudioLiteModelJsonResponseOriginals = window.__codestudioLiteModelJsonResponseOriginals || {};
     const originals = window.__codestudioLiteModelJsonResponseOriginals;
     originals.responseJson = originals.responseJson || Response.prototype.json;
@@ -4113,13 +4363,13 @@ fn codex_enhancement_script(
   function patchStatsigModelWhitelist() {
     statsigClients().forEach((client) => {
       if (typeof client.getDynamicConfig !== "function") return;
-      if (!client.__codestudioLiteModelWhitelistPatched) {
+      if (client.__codestudioLiteModelWhitelistPatched !== codexStatsigModelWhitelistPatchVersion) {
         const originalGetDynamicConfig = client.getDynamicConfig.bind(client);
         client.getDynamicConfig = (name, options) => {
           const result = originalGetDynamicConfig(name, options);
           return patchStatsigModelDynamicConfig(result);
         };
-        client.__codestudioLiteModelWhitelistPatched = true;
+        client.__codestudioLiteModelWhitelistPatched = codexStatsigModelWhitelistPatchVersion;
       }
       try {
         patchStatsigModelDynamicConfig(client.getDynamicConfig("107580212", { disableExposureLog: true }));
@@ -4157,8 +4407,8 @@ fn codex_enhancement_script(
   }
 
   function patchAppServerModelMessages() {
-    if (window.__codestudioLiteModelMessagePatchInstalled) return;
-    window.__codestudioLiteModelMessagePatchInstalled = true;
+    if (window.__codestudioLiteModelMessagePatchInstalled === codexModelMessagePatchVersion) return;
+    window.__codestudioLiteModelMessagePatchInstalled = codexModelMessagePatchVersion;
     const originalDispatchEvent = window.dispatchEvent;
     window.dispatchEvent = function patchedCodestudioLiteDispatchEvent(event) {
       try {
@@ -5235,7 +5485,91 @@ fn codex_enhancement_script(
   return true;
 })()
 "#;
-    Ok(script.replace("__CODESTUDIO_LITE_SETTINGS__", &settings_json))
+    Ok(script
+        .replace("__CODESTUDIO_LITE_SETTINGS__", &settings_json)
+        .replace(
+            "__CODESTUDIO_LITE_PLUGIN_MARKETPLACES__",
+            &plugin_marketplaces_json,
+        ))
+}
+
+fn codex_plugin_marketplaces_for_injection() -> serde_json::Value {
+    let Ok(home) = codex_home_dir() else {
+        return json!([]);
+    };
+    codex_plugin_marketplaces_for_injection_from_home(&home)
+}
+
+fn codex_plugin_marketplaces_for_injection_from_home(home: &Path) -> serde_json::Value {
+    let marketplace_path = home
+        .join(".tmp")
+        .join("plugins-remote")
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    let Ok(text) = fs::read_to_string(&marketplace_path) else {
+        return json!([]);
+    };
+    let Ok(mut marketplace) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return json!([]);
+    };
+    let marketplace_name = marketplace
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let marketplace_root = marketplace_path
+        .ancestors()
+        .nth(3)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".tmp").join("plugins-remote"));
+    if let Some(plugins) = marketplace
+        .get_mut("plugins")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for plugin in plugins {
+            let Some(plugin_object) = plugin.as_object_mut() else {
+                continue;
+            };
+            let plugin_name = plugin_object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if plugin_name.is_empty() {
+                continue;
+            }
+            let manifest_path = marketplace_root
+                .join("plugins")
+                .join(&plugin_name)
+                .join(".codex-plugin")
+                .join("plugin.json");
+            if let Ok(manifest_text) = fs::read_to_string(manifest_path) {
+                if let Ok(serde_json::Value::Object(manifest)) =
+                    serde_json::from_str::<serde_json::Value>(&manifest_text)
+                {
+                    for (key, value) in manifest {
+                        plugin_object.entry(key).or_insert(value);
+                    }
+                }
+            }
+            plugin_object
+                .entry("id".to_string())
+                .or_insert_with(|| json!(format!("{plugin_name}@{marketplace_name}")));
+            plugin_object
+                .entry("marketplaceName".to_string())
+                .or_insert_with(|| json!(marketplace_name.clone()));
+            plugin_object
+                .entry("marketplacePath".to_string())
+                .or_insert_with(|| json!(marketplace_name.clone()));
+        }
+    }
+    if let Some(object) = marketplace.as_object_mut() {
+        object.entry("path".to_string()).or_insert_with(|| {
+            serde_json::Value::String(marketplace_path.to_string_lossy().to_string())
+        });
+    }
+    serde_json::Value::Array(vec![marketplace])
 }
 
 fn portable_registration<'a>(
@@ -5295,5 +5629,5 @@ fn url_host(url: &str) -> &str {
 
 #[cfg(test)]
 #[cfg(target_os = "windows")]
-#[path = "codex_client_tests.rs"]
-mod codex_client_tests;
+#[path = "chatgpt_desktop_tests.rs"]
+mod chatgpt_desktop_tests;

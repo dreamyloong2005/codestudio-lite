@@ -186,6 +186,29 @@ pub fn detect_macos_app(
     None
 }
 
+pub fn macos_bundle_executable_name(app: &Path) -> Option<String> {
+    read_macos_plist_value(app, "CFBundleExecutable")
+        .filter(|value| !value.is_empty() && !value.contains('/') && !value.contains('\\'))
+}
+
+pub fn macos_app_executable_name(app: &Path) -> Option<String> {
+    macos_bundle_executable_name(app).or_else(|| {
+        app.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+            .then(|| "Codex".to_string())
+    })
+}
+
+pub fn macos_app_running(app: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    macos_app_process_names(app)
+        .iter()
+        .any(|process_name| macos_process_running(process_name))
+}
+
 pub fn install_msix_package(
     path: &Path,
     package_identity: &str,
@@ -1080,9 +1103,84 @@ pub fn quit_macos_app(app_name: &str) -> Result<(), String> {
     }
 }
 
+pub fn quit_macos_app_bundle(app: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    let display_name = app
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ChatGPT");
+    let script = read_macos_plist_value(app, "CFBundleIdentifier")
+        .filter(|bundle_id| !bundle_id.is_empty())
+        .map(|bundle_id| {
+            format!(
+                "tell application id \"{}\" to quit",
+                bundle_id.replace('"', "\\\"")
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "tell application \"{}\" to quit",
+                display_name.replace('"', "\\\"")
+            )
+        });
+    let _ = hidden_command("osascript").args(["-e", &script]).output();
+    thread::sleep(Duration::from_secs(3));
+
+    let process_names = macos_app_process_names(app);
+    if !process_names
+        .iter()
+        .any(|process_name| macos_process_running(process_name))
+    {
+        return Ok(());
+    }
+    for process_name in &process_names {
+        let _ = hidden_command("pkill")
+            .args(["-TERM", "-x", process_name])
+            .output();
+    }
+    thread::sleep(Duration::from_secs(1));
+    if !process_names
+        .iter()
+        .any(|process_name| macos_process_running(process_name))
+    {
+        return Ok(());
+    }
+    for process_name in &process_names {
+        let _ = hidden_command("pkill")
+            .args(["-KILL", "-x", process_name])
+            .output();
+    }
+    thread::sleep(Duration::from_millis(500));
+    let remaining = process_names
+        .iter()
+        .filter(|process_name| macos_process_running(process_name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "macOS app processes are still running: {}.",
+            remaining.join(", ")
+        ))
+    }
+}
+
 pub fn install_macos_dmg(
     dmg_path: &Path,
     app_name: &str,
+    destination: &Path,
+    bundle_identifier: Option<&str>,
+) -> Result<MacosDmgInstallReport, String> {
+    install_macos_dmg_with_app_candidates(dmg_path, &[app_name], destination, bundle_identifier)
+}
+
+pub fn install_macos_dmg_with_app_candidates(
+    dmg_path: &Path,
+    app_names: &[&str],
     destination: &Path,
     bundle_identifier: Option<&str>,
 ) -> Result<MacosDmgInstallReport, String> {
@@ -1090,6 +1188,9 @@ pub fn install_macos_dmg(
         return Err(
             "Installing macOS DMG packages is not supported on the current platform.".to_string(),
         );
+    }
+    if app_names.is_empty() {
+        return Err("No macOS app bundle names were provided for the DMG.".to_string());
     }
     if !dmg_path.is_file() {
         return Err("The macOS DMG installer does not exist.".to_string());
@@ -1126,7 +1227,7 @@ pub fn install_macos_dmg(
     }
 
     let install_result =
-        install_macos_app_from_mount(&mount_point, app_name, destination, bundle_identifier);
+        install_macos_app_from_mount(&mount_point, app_names, destination, bundle_identifier);
     let detach_result = detach_macos_mount(&mount_point);
     let _ = fs::remove_dir_all(&mount_point);
 
@@ -1257,6 +1358,26 @@ fn macos_process_running(process_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn macos_app_process_names(app: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(executable) = macos_app_executable_name(app) {
+        names.push(executable);
+    }
+    if let Some(display_name) = app
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    {
+        if !names.iter().any(|name| name == display_name) {
+            names.push(display_name.to_string());
+        }
+    }
+    if names.is_empty() {
+        names.push("ChatGPT".to_string());
+    }
+    names
+}
+
 fn command_available(command: &str) -> bool {
     hidden_command("which")
         .arg(command)
@@ -1278,11 +1399,11 @@ fn temporary_macos_mount_point() -> PathBuf {
 
 fn install_macos_app_from_mount(
     mount_point: &Path,
-    app_name: &str,
+    app_names: &[&str],
     destination: &Path,
     bundle_identifier: Option<&str>,
 ) -> Result<MacosDmgInstallReport, String> {
-    let source_app = find_macos_app_bundle(mount_point, app_name)?;
+    let source_app = find_macos_app_bundle_from_candidates(mount_point, app_names)?;
     let parent = destination
         .parent()
         .ok_or_else(|| "The macOS app install path has no parent directory.".to_string())?;
@@ -1345,7 +1466,22 @@ fn install_macos_app_from_mount(
     Ok(MacosDmgInstallReport { installed, notes })
 }
 
-fn find_macos_app_bundle(root: &Path, app_name: &str) -> Result<PathBuf, String> {
+fn find_macos_app_bundle_from_candidates(
+    root: &Path,
+    app_names: &[&str],
+) -> Result<PathBuf, String> {
+    for app_name in app_names {
+        if let Some(path) = find_macos_app_bundle(root, app_name)? {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "None of the supported macOS app bundles were found in the DMG: {}.",
+        app_names.join(", ")
+    ))
+}
+
+fn find_macos_app_bundle(root: &Path, app_name: &str) -> Result<Option<PathBuf>, String> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir)
@@ -1363,14 +1499,14 @@ fn find_macos_app_bundle(root: &Path, app_name: &str) -> Result<PathBuf, String>
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name == app_name)
             {
-                return Ok(path);
+                return Ok(Some(path));
             }
             if file_type.is_dir() {
                 stack.push(path);
             }
         }
     }
-    Err(format!("{app_name} was not found in the DMG."))
+    Ok(None)
 }
 
 fn detach_macos_mount(mount_point: &Path) -> Result<(), String> {
@@ -1440,7 +1576,8 @@ fn ps_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        claude_msix_payload_cleanup_script, desktop_package_fallback_script, plist_string_value,
+        claude_msix_payload_cleanup_script, desktop_package_fallback_script,
+        find_macos_app_bundle_from_candidates, macos_app_executable_name, plist_string_value,
     };
 
     #[test]
@@ -1464,6 +1601,46 @@ mod tests {
             plist_string_value(plist, "CFBundleShortVersionString").as_deref(),
             Some("1.2.3")
         );
+    }
+
+    #[test]
+    fn macos_bundle_helpers_support_chatgpt_app_and_plist_executable() {
+        let root = std::env::temp_dir().join(format!(
+            "codestudio-lite-macos-package-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let codex_app = root.join("Codex.app");
+        let chatgpt_app = root.join("ChatGPT.app");
+        std::fs::create_dir_all(codex_app.join("Contents")).unwrap();
+        std::fs::create_dir_all(chatgpt_app.join("Contents")).unwrap();
+        std::fs::write(
+            chatgpt_app.join("Contents").join("Info.plist"),
+            r#"<plist><dict><key>CFBundleExecutable</key><string>ChatGPT</string></dict></plist>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_macos_app_bundle_from_candidates(
+                &root,
+                &["ChatGPT.app", "Codex.app", "OpenAI Codex.app"]
+            )
+            .unwrap(),
+            chatgpt_app
+        );
+        assert_eq!(
+            macos_app_executable_name(&chatgpt_app).as_deref(),
+            Some("ChatGPT")
+        );
+        assert_eq!(
+            macos_app_executable_name(&codex_app).as_deref(),
+            Some("Codex")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1,7 +1,7 @@
 pub mod activity_log;
 pub mod backup;
+pub mod chatgpt_desktop;
 pub mod claude_desktop;
-pub mod codex_client;
 pub mod detect;
 pub mod doctor;
 pub mod gateway;

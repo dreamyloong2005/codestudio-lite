@@ -138,6 +138,7 @@ fn is_codex_family_app(app: &str) -> bool {
         app.trim().to_ascii_lowercase().as_str(),
         "codex"
             | "codex-cli"
+            | "chatgpt-desktop"
             | "codex-app"
             | "codex-client"
             | "codex-desktop"

@@ -271,6 +271,8 @@ export default defineConfig({
           base: {
             width: "100%",
             minWidth: 0,
+            minHeight: 0,
+            height: "100%",
             "& .cs-top-strip, & .cs-panel, & .cs-tool-card": {
               animation: "surface-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) backwards",
               animationDelay: "calc(min(var(--surface-index, 0), 8) * 28ms)"
@@ -708,6 +710,13 @@ export default defineConfig({
               borderColor: "#111111",
               background: "#111111"
             },
+            "&[data-tool-icon-tone='chatgpt-desktop-current'], &[data-tool-icon-tone='chatgpt-desktop-legacy']": {
+              borderColor: "rgba(15, 23, 42, 0.1)",
+              background: "#fff"
+            },
+            "&[data-tool-icon-tone='chatgpt-desktop-current'] img": {
+              filter: "invert(1)"
+            },
             "& img": {
               display: "block",
               width: "22px",
@@ -724,7 +733,7 @@ export default defineConfig({
               height: "24px",
               borderRadius: "6px"
             },
-            "&[data-tool-icon-tone='codex-app'] img": {
+            "&[data-tool-icon-tone='chatgpt-desktop-legacy'] img": {
               width: "32px",
               height: "32px",
               borderRadius: "7px"
@@ -764,7 +773,7 @@ export default defineConfig({
                   height: "18px",
                   borderRadius: "4px"
                 },
-                "&[data-tool-icon-tone='codex-app'] img": {
+                "&[data-tool-icon-tone='chatgpt-desktop-legacy'] img": {
                   width: "24px",
                   height: "24px",
                   borderRadius: "5px"
@@ -794,7 +803,7 @@ export default defineConfig({
                   height: "20px",
                   borderRadius: "5px"
                 },
-                "&[data-tool-icon-tone='codex-app'] img": {
+                "&[data-tool-icon-tone='chatgpt-desktop-legacy'] img": {
                   width: "26px",
                   height: "26px"
                 },
@@ -827,7 +836,11 @@ export default defineConfig({
                 borderColor: "#007ACC",
                 background: "#007ACC"
               },
-              "codex-app": {
+              "chatgpt-desktop-current": {
+                borderColor: "rgba(15, 23, 42, 0.1)",
+                background: "#fff"
+              },
+              "chatgpt-desktop-legacy": {
                 borderColor: "rgba(15, 23, 42, 0.1)",
                 background: "#fff"
               },
@@ -2128,10 +2141,11 @@ export default defineConfig({
           description: "Embedded terminal route shell.",
           base: {
             display: "grid",
-            gridTemplateRows: "auto 1fr",
+            gridTemplateRows: "auto minmax(0, 1fr)",
             gap: "14px",
             minHeight: 0,
-            height: "100%"
+            height: "100%",
+            overflow: "hidden"
           }
         },
         terminalPanelHeaderRecipe: {
@@ -2627,6 +2641,55 @@ export default defineConfig({
             alignItems: "start",
             "@media (max-width: 860px)": {
               gridTemplateColumns: "1fr"
+            }
+          }
+        },
+        profileModeSwitcherRecipe: {
+          className: "cs-profile-mode-switcher",
+          description: "Profiles configuration-file and gateway segmented control.",
+          base: {
+            display: "grid",
+            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            gap: "3px",
+            width: "220px",
+            maxWidth: "100%",
+            minWidth: 0,
+            padding: "3px",
+            border: "1px solid var(--border)",
+            borderRadius: "8px",
+            background: "var(--surface-strong)",
+            "& button": {
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              minWidth: 0,
+              minHeight: "30px",
+              border: 0,
+              borderRadius: "6px",
+              background: "transparent",
+              color: "var(--text-soft)",
+              padding: "0 10px",
+              fontSize: "11px",
+              fontWeight: "800",
+              whiteSpace: "nowrap",
+              transition:
+                "background var(--motion-quick), color var(--motion-quick), box-shadow var(--motion-quick)",
+              _hover: {
+                background: "var(--surface-hover)",
+                color: "var(--text)"
+              },
+              _focusVisible: {
+                outline: "2px solid color-mix(in srgb, var(--accent) 45%, transparent)",
+                outlineOffset: "1px"
+              }
+            },
+            "& button[data-selected='true']": {
+              background: "var(--surface)",
+              color: "var(--accent)",
+              boxShadow: "0 1px 3px color-mix(in srgb, var(--modal-shadow) 20%, transparent)"
+            },
+            "@media (max-width: 860px)": {
+              width: "100%"
             }
           }
         },

@@ -6,9 +6,9 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "
 
 test("Codex Computer Use Guard is exposed as a launch option", () => {
   const types = read("src/types.ts");
-  const store = read("src/lib/codexClientStore.ts");
+  const store = read("src/lib/chatgptDesktopStore.ts");
   const api = read("src/lib/api.ts");
-  const route = read("src/routes/CodexClient.svelte");
+  const route = read("src/routes/ChatGPTDesktop.svelte");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
@@ -21,19 +21,19 @@ test("Codex Computer Use Guard is exposed as a launch option", () => {
   assert.match(api, /computerUseGuardOnLaunch: request\.computerUseGuardOnLaunch \?\?/);
   assert.match(api, /computerUseGuardOnLaunch: false/);
   assert.match(route, /checked=\{settingsDraft\.computerUseGuardOnLaunch\}/);
-  assert.match(route, /updateCodexClientDraft\(\{ computerUseGuardOnLaunch: event\.currentTarget\.checked \}\)/);
-  assert.match(route, /codexClient\.computerUseGuardOnLaunch/);
-  assert.match(route, /codexClient\.computerUseGuardOnLaunchHint/);
+  assert.match(route, /updateChatGPTDesktopDraft\(\{ computerUseGuardOnLaunch: event\.currentTarget\.checked \}\)/);
+  assert.match(route, /chatgptDesktop\.computerUseGuardOnLaunch/);
+  assert.match(route, /chatgptDesktop\.computerUseGuardOnLaunchHint/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
-    assert.match(dictionary, /"codexClient\.computerUseGuardOnLaunch"/);
-    assert.match(dictionary, /"codexClient\.computerUseGuardOnLaunchHint"/);
+    assert.match(dictionary, /"chatgptDesktop\.computerUseGuardOnLaunch"/);
+    assert.match(dictionary, /"chatgptDesktop\.computerUseGuardOnLaunchHint"/);
   }
 });
 
 test("Codex launch runs Computer Use Guard before and after starting the app", () => {
   const coreMod = read("src-tauri/src/core/mod.rs");
-  const core = read("src-tauri/src/core/codex_client.rs");
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const launchBody = core
     .split("pub fn launch() -> Result<(), String> {")
     .at(1)
