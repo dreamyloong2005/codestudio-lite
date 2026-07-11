@@ -30,6 +30,13 @@ export function profileIdsFromItems<T extends SortableProfileLike>(items: readon
   return items.map((item) => item.id);
 }
 
+export function profileListContentKey<T extends SortableProfileLike>(
+  scope: string,
+  items: readonly T[]
+) {
+  return `${scope}:${JSON.stringify(items)}`;
+}
+
 export function sortableOrderChanged(left: readonly string[], right: readonly string[]) {
   return left.length !== right.length || left.some((id, index) => id !== right[index]);
 }

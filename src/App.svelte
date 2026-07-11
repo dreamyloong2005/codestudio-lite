@@ -24,6 +24,7 @@
   import { applyChatGPTDesktopBrandingFromDetection } from "./lib/chatgptDesktopBranding";
   import { ensureChatGPTDesktopLoaded } from "./lib/chatgptDesktopStore";
   import { setLocale, t } from "./lib/i18n";
+  import { updateGatewayProfileDisplay, upsertProfileDraftInSummary } from "./lib/profileSummary";
   import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./lib/refreshCache";
   import { applyTheme } from "./lib/theme";
   import { disposeTerminalSession } from "./lib/terminalSessionStore";
@@ -41,6 +42,7 @@
     GatewayStatus,
     PrivacyFilterMode,
     ProviderApplyMode,
+    ProfileDraft,
     ProfileSummary,
     ToolStatus,
     WizardPrefill
@@ -199,6 +201,17 @@
     }
   }
 
+  function applySavedProfile(profile: ProfileDraft) {
+    const nextSummary = upsertProfileDraftInSummary(profileSummary, profile);
+    if (nextSummary) {
+      applyProfileSummary(nextSummary);
+    }
+    const nextGatewayStatus = updateGatewayProfileDisplay(gatewayStatus, profile);
+    if (nextGatewayStatus) {
+      applyGatewayStatus(nextGatewayStatus);
+    }
+  }
+
   function gatewayStatusUiChanged(current: GatewayStatus | null, next: GatewayStatus | null) {
     if (!current || !next) {
       return current !== next;
@@ -350,7 +363,10 @@
     }
   }
 
-  async function refreshAfterProfileChange() {
+  async function refreshAfterProfileChange(profile?: ProfileDraft) {
+    if (profile) {
+      applySavedProfile(profile);
+    }
     // Profile changes only need the lightweight summary/gateway refresh in the
     // foreground. The heavier environment scan stays in the background.
     await refreshProfileAndGatewayOnly();
@@ -529,9 +545,9 @@
         {:else if route === "claudeDesktop"}
           <ClaudeDesktop />
         {:else if route === "wizard"}
-          <SetupWizard {snapshot} prefill={wizardPrefill} onProfileSaved={async (mode) => {
-            await refreshAfterProfileChange();
-            profileManagementMode = mode;
+          <SetupWizard {snapshot} prefill={wizardPrefill} onProfileSaved={(profile) => {
+            applySavedProfile(profile);
+            profileManagementMode = profile.mode;
             route = "profiles";
           }} />
         {:else if route === "profiles"}

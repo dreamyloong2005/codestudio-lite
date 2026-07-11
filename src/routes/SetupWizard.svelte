@@ -40,6 +40,7 @@
     DetectionSnapshot,
     InstallState,
     PreviewProfileWriteResult,
+    ProfileDraft,
     ProfileWritePreviewItem,
     ProfileModelMapping,
     ProfileModelOption,
@@ -138,7 +139,7 @@
     fontWeight: 800
   });
 
-  export let onProfileSaved: (mode: ProviderApplyMode) => void | Promise<void> = () => {};
+  export let onProfileSaved: (profile: ProfileDraft) => void | Promise<void> = () => {};
   export let prefill: WizardPrefill | null = null;
   export let snapshot: DetectionSnapshot | null = null;
 
@@ -653,7 +654,7 @@
     try {
       const profile = await saveProfileDraft(buildProfileDraftRequest());
       savedProfileName = profile.name;
-      await onProfileSaved(profile.mode);
+      await onProfileSaved(profile);
     } catch (err) {
       saveError = errorLabel(err instanceof Error ? err.message : String(err));
     } finally {

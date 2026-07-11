@@ -18,7 +18,7 @@ test("App owns the active profile-management mode and returns every saved profil
   assert.match(app, /let profileManagementMode: ProviderApplyMode = "config";/);
   assert.match(
     app,
-    /onProfileSaved=\{async \(mode\) => \{[\s\S]*?profileManagementMode = mode;[\s\S]*?route = "profiles";/
+    /onProfileSaved=\{\(profile\) => \{[\s\S]*?applySavedProfile\(profile\);[\s\S]*?profileManagementMode = profile\.mode;[\s\S]*?route = "profiles";/
   );
   assert.doesNotMatch(app, /route = mode === "gateway" \? "gateway" : "profiles"/);
 
@@ -31,6 +31,24 @@ test("App owns the active profile-management mode and returns every saved profil
   assert.doesNotMatch(gatewayInvocation, /\{snapshot\}/);
   assert.doesNotMatch(gatewayInvocation, /onProfileSwitched=/);
   assert.doesNotMatch(gatewayInvocation, /onCreateProfile=/);
+});
+
+test("saved and edited profiles update the shared summary before background refresh", () => {
+  const app = read("src/App.svelte");
+  const profiles = read("src/routes/Profiles.svelte");
+  const wizard = read("src/routes/SetupWizard.svelte");
+
+  assert.match(app, /function applySavedProfile\(profile: ProfileDraft\)/);
+  assert.match(
+    app,
+    /async function refreshAfterProfileChange\(profile\?: ProfileDraft\) \{[\s\S]*?applySavedProfile\(profile\);[\s\S]*?await refreshProfileAndGatewayOnly\(\);/
+  );
+  assert.match(profiles, /const updated = await updateProfileDraft\(\{[\s\S]*?await onProfileSwitched\(updated\);/);
+  assert.match(profiles, /const duplicated = await duplicateProfileDraft\(\{ profileId: profile\.id \}\);[\s\S]*?await onProfileSwitched\(duplicated\);/);
+  assert.match(profiles, /const nextKey = profileListContentKey\(`\$\{mode\}:\$\{group\?\.id \?\? ""\}`, nextProfiles\);/);
+  assert.doesNotMatch(profiles, /profileIdsFromItems\(nextProfiles\)\.join\("\|"\)/);
+  assert.match(wizard, /export let onProfileSaved: \(profile: ProfileDraft\) => void \| Promise<void>/);
+  assert.match(wizard, /const profile = await saveProfileDraft\([\s\S]*?await onProfileSaved\(profile\);/);
 });
 
 test("Access Profiles exposes a header switch for configuration-file and gateway profiles", () => {

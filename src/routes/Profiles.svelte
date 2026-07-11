@@ -81,7 +81,8 @@
   import {
     nextSortableProfileIds,
     profileDragDisabled as resolveProfileDragDisabled,
-    profileIdsFromItems
+    profileIdsFromItems,
+    profileListContentKey
   } from "../lib/profileSortable";
   import type {
     ApplyProfileResult,
@@ -104,7 +105,7 @@
   export let snapshot: DetectionSnapshot | null = null;
   export let modeFilter: ProviderApplyMode = "config";
   export let embedded = false;
-  export let onProfileSwitched: () => void | Promise<void> = () => {};
+  export let onProfileSwitched: (profile?: ProfileDraft) => void | Promise<void> = () => {};
   export let onCreateProfile: (prefill?: WizardPrefill) => void = () => {};
 
   const profileViewOptions: Array<{ value: ProviderApplyMode; labelKey: TranslationKey }> = [
@@ -989,7 +990,7 @@
     editError = null;
 
     try {
-      await updateProfileDraft({
+      const updated = await updateProfileDraft({
         profileId: pendingEdit.id,
         name: editForm.name,
         icon: normalizedProfileIcon(editForm.icon),
@@ -1002,7 +1003,7 @@
         baseUrl: normalizeBaseUrl(editForm.baseUrl),
         apiKey: editForm.apiKey.trim().length > 0 ? editForm.apiKey : null
       });
-      await onProfileSwitched();
+      await onProfileSwitched(updated);
       pendingEdit = null;
       editForm = emptyEditForm();
     } catch (err) {
@@ -1066,7 +1067,7 @@
 
     try {
       const duplicated = await duplicateProfileDraft({ profileId: profile.id });
-      await onProfileSwitched();
+      await onProfileSwitched(duplicated);
       profileIoMessage = $t("profiles.duplicateSuccess", { name: duplicated.name });
     } catch (err) {
       profileIoError = errorLabel(err instanceof Error ? err.message : String(err));
@@ -1428,7 +1429,7 @@
 
   function syncSortableProfiles(group: ProfileGroup | null, mode: ProviderApplyMode) {
     const nextProfiles = group?.profiles ?? [];
-    const nextKey = `${mode}:${group?.id ?? ""}:${profileIdsFromItems(nextProfiles).join("|")}`;
+    const nextKey = profileListContentKey(`${mode}:${group?.id ?? ""}`, nextProfiles);
     if (nextKey === sortableListKey) {
       return;
     }

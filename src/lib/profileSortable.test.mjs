@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   profileDragDisabled,
+  profileListContentKey,
   nextSortableProfileIds,
   profileIdsFromItems,
   sortableArrayMove,
@@ -21,6 +22,15 @@ test("profileIdsFromItems returns the persisted order payload", () => {
     profileIdsFromItems([{ id: "official" }, { id: "alpha" }, { id: "beta" }]),
     ["official", "alpha", "beta"]
   );
+});
+
+test("profileListContentKey changes when saved profile data changes without an id change", () => {
+  const original = [{ id: "alpha", name: "Original", updatedAt: "2026-07-12T00:00:00Z" }];
+  const cloned = [{ ...original[0] }];
+  const renamed = [{ ...original[0], name: "Renamed", updatedAt: "2026-07-12T00:01:00Z" }];
+
+  assert.equal(profileListContentKey("config:codex", original), profileListContentKey("config:codex", cloned));
+  assert.notEqual(profileListContentKey("config:codex", original), profileListContentKey("config:codex", renamed));
 });
 
 test("sortableOrderChanged detects real order changes only", () => {
