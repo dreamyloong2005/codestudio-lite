@@ -5,11 +5,13 @@ import test from "node:test";
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 
 test("Claude Desktop exposes Anthropic Messages protocol in config profile mode", () => {
+  const catalog = read("src/lib/profiles/catalog.ts");
+  assert.match(catalog, /id:\s*"claude-desktop"[\s\S]*?configProtocols:\s*\["anthropic-messages"\]/);
   for (const source of [
     read("src/routes/SetupWizard.svelte"),
     read("src/routes/Profiles.svelte")
   ]) {
-    assert.match(source, /"claude-desktop":\s*\["anthropic-messages"\]/);
+    assert.match(source, /configProtocolIdsForTool/);
     assert.match(source, /if \(mode === "gateway"\) \{\s*return protocolOptions;\s*\}/);
   }
 });

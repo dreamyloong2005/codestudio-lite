@@ -5,8 +5,11 @@ use crate::core::detector::{
     claude_desktop_windows_known_stale_msix_manifest, claude_desktop_windows_package_identities,
     claude_desktop_windows_stale_msix_manifest,
 };
+use crate::core::download_http::{self, DownloadHttpTransport};
 #[cfg(target_os = "windows")]
 use crate::core::platform::package;
+#[cfg(target_os = "windows")]
+use crate::core::platform::powershell_failure_message;
 use crate::core::platform::{hidden_command, powershell_exe};
 #[cfg(not(target_os = "macos"))]
 use crate::core::process_control;
@@ -2033,9 +2036,10 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
                 })?;
                 if !output.status.success() {
                     let _ = fs::remove_file(&script_path);
-                    return Err(format!(
-                        "PowerShell execution failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
+                    return Err(powershell_failure_message(
+                        output.status.code(),
+                        &output.stdout,
+                        &output.stderr,
                     ));
                 }
                 let _ = fs::remove_file(&script_path);
@@ -4070,7 +4074,9 @@ fn read_node_inspector_targets() -> Result<Vec<serde_json::Value>, String> {
 }
 
 fn read_node_inspector_targets_from_port(port: u16) -> Result<Vec<serde_json::Value>, String> {
-    reqwest::blocking::get(format!("http://127.0.0.1:{port}/json"))
+    download_http::download_http_client(Duration::from_secs(3), DownloadHttpTransport::Direct)?
+        .get(format!("http://127.0.0.1:{port}/json"))
+        .send()
         .map_err(|err| {
             format!("Failed to read Claude Node inspector targets on port {port}: {err}")
         })?

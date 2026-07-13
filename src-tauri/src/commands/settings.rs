@@ -6,7 +6,9 @@ use tauri::AppHandle;
 #[tauri::command]
 pub fn ensure_app_dirs() -> Result<ProfileSummary, String> {
     profile::ensure_app_dirs()?;
-    profile::load_profile_summary().map_err(|err| err.to_string())
+    // Lightweight UI refreshes after profile edits must not reconcile/import from
+    // on-disk tool configs. Environment detection owns that sync path instead.
+    profile::load_profile_summary_without_native_sync().map_err(|err| err.to_string())
 }
 
 #[tauri::command]

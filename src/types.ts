@@ -376,6 +376,7 @@ export interface ProfileDraft {
   provider: string;
   protocol: string;
   model: string;
+  reviewModel: string | null;
   modelMappings: ProfileModelMapping[];
   baseUrl: string;
   authRef: string | null;
@@ -464,6 +465,7 @@ export interface SaveProfileDraftRequest {
   provider: string;
   protocol?: string | null;
   model: string;
+  reviewModel?: string | null;
   modelMappings?: ProfileModelMapping[] | null;
   baseUrl: string;
   secretProvided: boolean;
@@ -479,6 +481,7 @@ export interface UpdateProfileDraftRequest {
   provider: string;
   protocol?: string | null;
   model: string;
+  reviewModel?: string | null;
   modelMappings?: ProfileModelMapping[] | null;
   baseUrl: string;
   apiKey?: string | null;
@@ -507,6 +510,7 @@ export interface PreviewProfileWriteRequest {
   provider: string;
   protocol?: string | null;
   model: string;
+  reviewModel?: string | null;
   modelMappings?: ProfileModelMapping[] | null;
   baseUrl: string;
   secretProvided: boolean;

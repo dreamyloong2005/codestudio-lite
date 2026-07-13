@@ -32,6 +32,29 @@ fn npm_global_actions_repair_node_and_npm_path_first() {
 }
 
 #[test]
+fn pi_install_update_and_uninstall_keep_the_upstream_npm_contract() {
+    let definition = install_definition("pi").expect("Pi install definition");
+
+    assert_eq!(manager_label(&definition.action), "npm");
+    assert_eq!(
+        command_preview(&definition.action),
+        "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
+    );
+    assert_eq!(
+        update_command_preview_for_tool("pi", &definition.action),
+        "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest"
+    );
+    assert_eq!(
+        uninstall_command_preview_for_tool("pi", &definition.action),
+        "npm uninstall -g @earendil-works/pi-coding-agent"
+    );
+    assert_eq!(
+        path_repair_tool_ids_for_action(&definition.action),
+        vec!["node", "npm"]
+    );
+}
+
+#[test]
 fn path_repair_stage_result_is_prerequisite_stage() {
     let repair = RepairToolPathResult {
         success: true,

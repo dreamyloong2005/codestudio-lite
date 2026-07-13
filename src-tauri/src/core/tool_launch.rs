@@ -2,7 +2,9 @@ use crate::core::claude_desktop_patch;
 use crate::core::credentials;
 use crate::core::platform::resolve_command;
 use crate::core::profile;
-use crate::core::tool_registry::{ai_tools, system_tools};
+use crate::core::tool_catalog::{
+    ai_tools, canonical_tool_id as canonical_profile_app, system_tools,
+};
 use crate::core::types::{
     ProfileDraft, ProviderApplyMode, ToolLaunchPlan, ToolLaunchProfileOption, ToolLaunchShellOption,
 };
@@ -27,7 +29,7 @@ pub fn plan_tool_launch(tool_id: &str) -> Result<ToolLaunchPlan, String> {
         .ok_or_else(|| format!("Tool '{tool_id}' is not supported for launch."))?;
     let command = launch_command_for_tool(tool.id, tool.command);
     let shells = detect_shells();
-    let profiles = profile::load_profile_summary()?
+    let profiles = profile::load_profile_summary_without_native_sync()?
         .drafts
         .into_iter()
         .filter(|draft| canonical_profile_app(&draft.app) == canonical_tool_id)
@@ -156,22 +158,6 @@ fn resolve_command_from_launch_command(command: &str) -> Option<String> {
 
 fn provider_is_official(provider: &str) -> bool {
     provider.trim().eq_ignore_ascii_case("official")
-}
-
-fn canonical_profile_app(app: &str) -> String {
-    match app.trim().to_ascii_lowercase().as_str() {
-        "codex" | "codex-cli" | "chatgpt-desktop" | "codex-app" | "codex-client"
-        | "codex-desktop" | "codex-vscode" | "codex-code-vscode" | "codex-vs-code" => {
-            "codex".to_string()
-        }
-        "claude-desktop" | "claude-app" | "claude-client" => "claude-desktop".to_string(),
-        "claude-vscode" | "claude-code-vscode" | "claude-vs-code" => "claude".to_string(),
-        "gemini-code-assist" | "gemini-vscode" | "gemini-code-vscode" | "gemini-vs-code" => {
-            "gemini-code-assist".to_string()
-        }
-        "hermes" | "hermes-agent" => "hermes".to_string(),
-        other => other.to_string(),
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -432,6 +418,7 @@ mod tests {
             provider: "apikey.fun".to_string(),
             protocol: protocol.to_string(),
             model: "model-a".to_string(),
+            review_model: None,
             model_mappings: Vec::new(),
             base_url: "https://api.example.test/v1".to_string(),
             auth_ref: None,
@@ -488,6 +475,23 @@ mod tests {
             launch_command_for_tool("gemini-code-assist", "code"),
             "code"
         );
+    }
+
+    #[test]
+    fn pi_aliases_use_the_registry_launch_command_and_profile_family() {
+        let definition = ai_tools()
+            .into_iter()
+            .find(|tool| tool.id == "pi")
+            .expect("Pi registry definition");
+
+        assert_eq!(definition.name, "Pi Agent");
+        assert_eq!(definition.command, "pi");
+        assert_eq!(
+            launch_command_for_tool(definition.id, definition.command),
+            "pi"
+        );
+        assert_eq!(canonical_profile_app("pi-agent"), "pi");
+        assert_eq!(canonical_profile_app("pi-coding-agent"), "pi");
     }
 
     #[test]

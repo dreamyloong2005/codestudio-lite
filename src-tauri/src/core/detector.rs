@@ -1,13 +1,14 @@
 use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path};
 use crate::core::chatgpt_desktop;
+use crate::core::download_http;
 use crate::core::env_health;
 use crate::core::npm_global;
 use crate::core::platform::{hidden_command_with_args, package, resolve_command};
 use crate::core::process_control;
 use crate::core::profile;
 use crate::core::storage;
-use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
+use crate::core::tool_catalog::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
     ClaudeDesktopInstallKinds, ConfigState, DesktopInstallKindInfo, DetectionSnapshot,
     DetectionSource, InstallState, Problem, Severity, ToolCategory, ToolStatus,
@@ -1296,18 +1297,8 @@ fn wait_for_claude_desktop_update_cache(wait_budget: Duration) -> Option<String>
 }
 
 fn read_claude_desktop_latest_version_from_url(url: &str) -> Option<String> {
-    let response = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_millis(3000))
-        .user_agent("CodeStudio Lite")
-        .build()
-        .ok()?
-        .get(url)
-        .send()
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let latest = response.json::<ClaudeDesktopLatest>().ok()?;
+    let text = download_http::fetch_text(url, Duration::from_millis(3000), 1).ok()?;
+    let latest = serde_json::from_str::<ClaudeDesktopLatest>(&text).ok()?;
     normalized_version_label(&latest.version)
 }
 
@@ -1506,6 +1497,7 @@ fn npm_package_for_tool(tool_id: &str) -> Option<&'static str> {
         "gemini" => Some("@google/gemini-cli"),
         "opencode" => Some("opencode-ai"),
         "openclaw" => Some("openclaw"),
+        "pi" => Some("@earendil-works/pi-coding-agent"),
         "pnpm" => Some("pnpm"),
         "npm" => Some("npm"),
         _ => None,
@@ -1546,6 +1538,10 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
         "opencode" => Some(npm_global_update_command("opencode-ai")),
         "openclaw" => Some(npm_global_update_command("openclaw")),
         "hermes" => Some("hermes update".to_string()),
+        "grok" => Some("grok update".to_string()),
+        "pi" => Some(
+            "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest".to_string(),
+        ),
         "node" if cfg!(target_os = "macos") => Some(
             r#"bash -lc 'set -e; tmp="$(mktemp -d)"; trap '"'"'rm -rf "$tmp"'"'"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"'"'"lts":"[^"]*"'"'"' | sed -E '"'"'s/.*"version":"([^"]+)".*/\1/'"'"')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /'"#.to_string(),
         ),
@@ -1869,6 +1865,21 @@ mod tests {
         assert!(tools.iter().any(|tool| tool.id == "codex-vscode"));
         assert!(tools.iter().any(|tool| tool.id == "claude-vscode"));
         assert!(tools.iter().any(|tool| tool.id == "gemini-code-assist"));
+    }
+
+    #[test]
+    fn pi_detection_uses_the_upstream_npm_package_and_update_command() {
+        assert_eq!(
+            npm_package_for_tool("pi"),
+            Some("@earendil-works/pi-coding-agent")
+        );
+        assert_eq!(
+            update_command_for_tool("pi").as_deref(),
+            Some("npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest")
+        );
+        assert!(ai_tools_for_environment(false)
+            .iter()
+            .any(|tool| tool.id == "pi" && tool.command == "pi"));
     }
 
     #[test]

@@ -3,6 +3,7 @@ use crate::core::app_paths::{app_paths, display_path, ensure_dirs};
 use crate::core::codex_plugin_marketplace;
 use crate::core::codex_provider_sync;
 use crate::core::computer_use_guard;
+use crate::core::download_http;
 use crate::core::platform::{hidden_command, package};
 use crate::core::process_control;
 use crate::core::storage;
@@ -11,14 +12,13 @@ use crate::core::types::{
     DesktopInstallKindInfo, InstallState, Severity, ToolCategory, ToolStatus,
 };
 use chrono::Utc;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -58,8 +58,6 @@ const CODEX_PATCH_INJECTION_RETRY_COUNT: usize = 30;
 const CODEX_PATCH_INJECTION_RETRY_MS: u64 = 500;
 const CODEX_PATCH_WATCHDOG_POLL_MS: u64 = 2_000;
 const CODEX_PATCH_WATCHDOG_MAX_MISSES: usize = 15;
-const MIRROR_HTTP_MAX_ATTEMPTS: usize = 4;
-const MIRROR_HTTP_RETRY_DELAY_MS: u64 = 500;
 const MIRROR_METADATA_TIMEOUT_SECS: u64 = 30;
 const MIRROR_PACKAGE_TIMEOUT_SECS: u64 = 600;
 pub const CHATGPT_DESKTOP_PROGRESS_EVENT: &str = "chatgpt-desktop://progress";
@@ -2050,89 +2048,12 @@ fn checksum_for_name(text: &str, expected_name: &str) -> Option<String> {
     })
 }
 
-fn mirror_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
-    let mut builder = reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .user_agent("CodeStudio Lite");
-    if cfg!(target_os = "macos") {
-        builder = builder.http1_only();
-    }
-    builder
-        .build()
-        .map_err(|err| format!("Failed to create ChatGPT Desktop HTTP client: {err}"))
-}
-
-fn mirror_should_retry_status(status: StatusCode) -> bool {
-    status == StatusCode::REQUEST_TIMEOUT
-        || status == StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-}
-
-fn mirror_retry_delay(attempt: usize) -> Duration {
-    Duration::from_millis(
-        (MIRROR_HTTP_RETRY_DELAY_MS * attempt.max(1) as u64)
-            .min(MIRROR_HTTP_RETRY_DELAY_MS * MIRROR_HTTP_MAX_ATTEMPTS as u64),
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DownloadResponseMode {
-    Truncate,
-    Append,
-    Complete,
-}
-
-fn download_response_mode(
-    status: StatusCode,
-    resume_offset: u64,
-    expected_total: Option<u64>,
-) -> Result<DownloadResponseMode, String> {
-    if status == StatusCode::RANGE_NOT_SATISFIABLE
-        && resume_offset > 0
-        && expected_total == Some(resume_offset)
-    {
-        return Ok(DownloadResponseMode::Complete);
-    }
-    if status == StatusCode::PARTIAL_CONTENT {
-        return Ok(if resume_offset > 0 {
-            DownloadResponseMode::Append
-        } else {
-            DownloadResponseMode::Truncate
-        });
-    }
-    if status == StatusCode::OK {
-        return Ok(DownloadResponseMode::Truncate);
-    }
-    Err(format!("HTTP {status}"))
-}
-
 fn fetch_text(url: &str) -> Result<String, String> {
-    let client = mirror_http_client(Duration::from_secs(MIRROR_METADATA_TIMEOUT_SECS))?;
-    let host = url_host(url);
-    let mut last_error = "unknown transfer failure".to_string();
-    for attempt in 1..=MIRROR_HTTP_MAX_ATTEMPTS {
-        match client.get(url).send() {
-            Ok(response) if !response.status().is_success() => {
-                let status = response.status();
-                let detail = format!("HTTP {status}");
-                if !mirror_should_retry_status(status) {
-                    return Err(format!("Failed to read {host}: {detail}"));
-                }
-                last_error = detail;
-            }
-            Ok(response) => match response.text() {
-                Ok(text) => return Ok(text),
-                Err(err) => last_error = err.to_string(),
-            },
-            Err(err) => last_error = err.to_string(),
-        }
-        if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
-            thread::sleep(mirror_retry_delay(attempt));
-        }
-    }
-    Err(format!(
-        "Failed to read {host} after {MIRROR_HTTP_MAX_ATTEMPTS} attempts: {last_error}"
-    ))
+    download_http::fetch_text(
+        url,
+        Duration::from_secs(MIRROR_METADATA_TIMEOUT_SECS),
+        download_http::DOWNLOAD_HTTP_MAX_ATTEMPTS,
+    )
 }
 
 fn download_to_file<F>(
@@ -2145,14 +2066,7 @@ fn download_to_file<F>(
 where
     F: Fn(ChatGptDesktopProgress),
 {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("Failed to create download directory: {err}"))?;
-    }
     let temp = download_temp_path(path);
-    if temp.exists() {
-        let _ = fs::remove_file(&temp);
-    }
     emit_step_progress(
         on_progress,
         install_kind,
@@ -2163,154 +2077,37 @@ where
         Some(2),
         Some(4),
     );
-    let client = mirror_http_client(Duration::from_secs(MIRROR_PACKAGE_TIMEOUT_SECS))?;
-    let host = url_host(url);
-    let mut last_error = "unknown transfer failure".to_string();
-    let mut completed = false;
-    for attempt in 1..=MIRROR_HTTP_MAX_ATTEMPTS {
-        let resume_offset = fs::metadata(&temp)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let mut request = client.get(url);
-        if resume_offset > 0 {
-            request = request.header(reqwest::header::RANGE, format!("bytes={resume_offset}-"));
-        }
-
-        let mut response = match request.send() {
-            Ok(response) => response,
-            Err(err) => {
-                last_error = err.to_string();
-                if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
-                    thread::sleep(mirror_retry_delay(attempt));
-                }
-                continue;
-            }
-        };
-        let status = response.status();
-        let mode = match download_response_mode(status, resume_offset, expected_total) {
-            Ok(mode) => mode,
-            Err(detail) if mirror_should_retry_status(status) => {
-                last_error = detail;
-                if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
-                    thread::sleep(mirror_retry_delay(attempt));
-                }
-                continue;
-            }
-            Err(detail) => {
-                let _ = fs::remove_file(&temp);
-                return Err(format!("Failed to download {host}: {detail}"));
-            }
-        };
-        if mode == DownloadResponseMode::Complete {
-            completed = true;
-            break;
-        }
-
-        let append = mode == DownloadResponseMode::Append;
-        let mut downloaded = if append { resume_offset } else { 0 };
-        let total = expected_total.or_else(|| {
-            response
-                .content_length()
-                .map(|remaining| downloaded.saturating_add(remaining))
-        });
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(append)
-            .truncate(!append)
-            .open(&temp)
-            .map_err(|err| format!("Failed to create download file: {err}"))?;
-        let mut buffer = [0_u8; 64 * 1024];
-        let mut last_emit = Instant::now() - Duration::from_secs(2);
-        let mut read_failed = false;
-        loop {
-            let size = match response.read(&mut buffer) {
-                Ok(size) => size,
-                Err(err) => {
-                    last_error = format!("transfer interrupted after {downloaded} bytes: {err}");
-                    read_failed = true;
-                    break;
-                }
-            };
-            if size == 0 {
-                break;
-            }
-            file.write_all(&buffer[..size])
-                .map_err(|err| format!("Failed to write installer download: {err}"))?;
-            downloaded = downloaded.saturating_add(size as u64);
-            if last_emit.elapsed() >= Duration::from_millis(500) {
-                emit_step_progress(
-                    on_progress,
-                    install_kind,
-                    "downloading",
-                    "chatgptDesktop.progressDownloading",
-                    Some(downloaded),
-                    total,
-                    Some(2),
-                    Some(4),
-                );
-                last_emit = Instant::now();
-            }
-        }
-        file.flush()
-            .map_err(|err| format!("Failed to finish installer download: {err}"))?;
-        drop(file);
-
-        if !read_failed {
-            let final_size = fs::metadata(&temp)
-                .map_err(|err| format!("Failed to inspect installer download: {err}"))?
-                .len();
-            if let Some(expected_total) = expected_total {
-                if final_size != expected_total {
-                    last_error = format!(
-                        "transfer ended at {final_size} bytes; expected {expected_total} bytes"
-                    );
-                } else {
-                    completed = true;
-                    break;
-                }
-            } else {
-                completed = true;
-                break;
-            }
-        }
-        if attempt < MIRROR_HTTP_MAX_ATTEMPTS {
-            thread::sleep(mirror_retry_delay(attempt));
-        }
-    }
-
-    if !completed {
-        let _ = fs::remove_file(&temp);
-        return Err(format!(
-            "Failed to download {host} after {MIRROR_HTTP_MAX_ATTEMPTS} attempts: {last_error}"
-        ));
-    }
-    let downloaded = fs::metadata(&temp).ok().map(|metadata| metadata.len());
+    let downloaded = download_http::download_to_file(
+        url,
+        path,
+        &temp,
+        expected_total,
+        Duration::from_secs(MIRROR_PACKAGE_TIMEOUT_SECS),
+        download_http::DOWNLOAD_HTTP_MAX_ATTEMPTS,
+        |downloaded, total| {
+            emit_step_progress(
+                on_progress,
+                install_kind,
+                "downloading",
+                "chatgptDesktop.progressDownloading",
+                Some(downloaded),
+                total,
+                Some(2),
+                Some(4),
+            );
+        },
+    )?;
     emit_step_progress(
         on_progress,
         install_kind,
         "downloading",
         "chatgptDesktop.progressDownloadComplete",
-        downloaded,
-        expected_total,
+        Some(downloaded),
+        expected_total.or(Some(downloaded)),
         Some(2),
         Some(4),
     );
-    if path.exists() {
-        fs::remove_file(path).map_err(|err| {
-            format!(
-                "Failed to replace staged download {}: {err}",
-                display_path(path)
-            )
-        })?;
-    }
-    fs::rename(&temp, path).map_err(|err| {
-        let _ = fs::remove_file(&temp);
-        format!(
-            "Failed to save downloaded file to {}: {err}",
-            display_path(path)
-        )
-    })
+    Ok(())
 }
 
 fn emit_step_progress<F>(
@@ -5618,13 +5415,6 @@ fn open_folder(path: &Path) -> Result<(), String> {
             .map(|_| ())
             .map_err(|err| format!("Failed to open path: {err}"))
     }
-}
-
-fn url_host(url: &str) -> &str {
-    url.split("://")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or(url)
 }
 
 #[cfg(test)]

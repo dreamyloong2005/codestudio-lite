@@ -164,7 +164,14 @@
     : sessionExitCode !== null
         ? "exited"
         : "idle";
+  function handleEscape(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    handleBack();
+  }
 </script>
+
+<svelte:window on:keydown={handleEscape} />
 
 <section class={terminalPanelRecipe()}>
   <header class={terminalPanelHeaderRecipe()}>

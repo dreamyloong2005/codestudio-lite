@@ -8,7 +8,7 @@
   export let category: "ai_tool" | "system" | string | null | undefined = null;
   export let variant: "card" | "choice" | "heading" = "card";
 
-  type ToolIconTone = "default" | "light" | "codex" | "claude" | "gemini" | "openclaw" | "vscode" | "chatgpt-desktop-current" | "chatgpt-desktop-legacy" | "hermes";
+  type ToolIconTone = "default" | "light" | "codex" | "claude" | "gemini" | "openclaw" | "vscode" | "chatgpt-desktop-current" | "chatgpt-desktop-legacy" | "hermes" | "grok" | "pi";
 
   type IconDef = {
     src: string;
@@ -26,6 +26,8 @@
     opencode: { src: "/tool-icons/opencode.svg", tone: "light" },
     openclaw: { src: "/tool-icons/openclaw.svg", tone: "openclaw" },
     hermes: { src: "/tool-icons/hermes.png", tone: "hermes" },
+    grok: { src: "/tool-icons/grok.svg", tone: "grok" },
+    pi: { src: "/tool-icons/pi.svg", tone: "pi" },
     node: { src: "/tool-icons/nodejs.svg", tone: "light" },
     git: { src: "/tool-icons/git.svg", tone: "light" },
     npm: { src: "/tool-icons/npm.svg", tone: "light" },
@@ -64,6 +66,14 @@
       case "hermes":
       case "hermes-agent":
         return "hermes";
+      case "grok":
+      case "grok-cli":
+      case "grok-build":
+        return "grok";
+      case "pi":
+      case "pi-agent":
+      case "pi-coding-agent":
+        return "pi";
       case "gemini":
       case "gemini-cli":
         return "gemini";

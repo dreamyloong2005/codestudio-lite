@@ -99,12 +99,33 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
         .output()
         .map_err(|err| format!("Failed to start PowerShell: {err}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "PowerShell execution failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        return Err(powershell_failure_message(
+            output.status.code(),
+            &output.stdout,
+            &output.stderr,
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub(crate) fn powershell_failure_message(
+    exit_code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "no output was captured".to_string()
+    };
+    let status = exit_code
+        .map(|code| format!("exit code {code}"))
+        .unwrap_or_else(|| "termination status unavailable".to_string());
+    format!("PowerShell execution failed ({status}): {detail}")
 }
 
 fn configure_hidden_command(command: &mut Command) {
@@ -151,6 +172,7 @@ pub fn extra_command_dirs() -> Vec<PathBuf> {
         }
         if let Ok(paths) = app_paths() {
             dirs.push(paths.home_dir.join("AppData").join("Roaming").join("npm"));
+            dirs.push(paths.home_dir.join(".grok").join("bin"));
         }
         if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
             let local_app_data = PathBuf::from(local_app_data);
@@ -203,6 +225,7 @@ pub fn extra_command_dirs() -> Vec<PathBuf> {
         if let Ok(paths) = app_paths() {
             dirs.push(paths.home_dir.join(".npm-global").join("bin"));
             dirs.push(paths.home_dir.join(".local").join("bin"));
+            dirs.push(paths.home_dir.join(".grok").join("bin"));
             dirs.push(
                 paths
                     .home_dir
@@ -214,6 +237,10 @@ pub fn extra_command_dirs() -> Vec<PathBuf> {
                     .join("bin"),
             );
         }
+    } else if let Ok(paths) = app_paths() {
+        // Linux and other Unix targets: cover common user-local install roots.
+        dirs.push(paths.home_dir.join(".local").join("bin"));
+        dirs.push(paths.home_dir.join(".grok").join("bin"));
     }
     dirs
 }
@@ -340,5 +367,32 @@ mod tests {
                 "resolved PowerShell path should point at powershell.exe: {resolved}"
             );
         }
+    }
+
+    #[test]
+    fn powershell_failure_message_uses_stderr_then_stdout_then_status() {
+        assert_eq!(
+            powershell_failure_message(Some(7), b"stdout detail", b"stderr detail"),
+            "PowerShell execution failed (exit code 7): stderr detail"
+        );
+        assert_eq!(
+            powershell_failure_message(Some(8), b"stdout detail", b""),
+            "PowerShell execution failed (exit code 8): stdout detail"
+        );
+        assert_eq!(
+            powershell_failure_message(None, b"", b""),
+            "PowerShell execution failed (termination status unavailable): no output was captured"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runner_reports_stdout_and_exit_code_on_failure() {
+        let error = run_powershell("Write-Output 'stdout detail'; exit 8").unwrap_err();
+
+        assert_eq!(
+            error,
+            "PowerShell execution failed (exit code 8): stdout detail"
+        );
     }
 }

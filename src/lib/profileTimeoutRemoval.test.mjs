@@ -51,10 +51,11 @@ test("profile request and storage types do not include profile-level timeout", (
 test("profiles table and preview content do not persist profile-level timeout", () => {
   const storage = source("src-tauri/src/core/storage.rs");
   const api = source("src/lib/api.ts");
+  const browserWritePreview = source("src/lib/api/browserMock/profileWritePreview.ts");
 
   const profileTable = between(storage, "CREATE TABLE IF NOT EXISTS profiles", "CREATE TABLE IF NOT EXISTS active_profiles");
   assert.equal(profileTable.includes("timeout_seconds"), false);
-  assert.equal(between(api, "function mockProfileSqlPreviewContent", "function mockProfileIconPreview").includes("timeout_seconds"), false);
+  assert.equal(between(browserWritePreview, "function profileSqlPreview", "return JSON.stringify").includes("timeout_seconds"), false);
   assert.equal(api.includes("Network provider checks are not sent yet. Timeout is set"), false);
 });
 
@@ -69,7 +70,7 @@ test("base URL inputs do not auto-prefix https", () => {
 });
 
 test("mock Codex official preview uses the managed actor-authorization contract", () => {
-  const api = source("src/lib/api.ts");
+  const api = source("src/lib/api/browserMock/nativePreview.ts");
   const officialBranch = between(
     api,
     'if (profile.provider === "official")',
@@ -88,7 +89,7 @@ test("mock Codex official preview uses the managed actor-authorization contract"
 });
 
 test("mock Codex direct and gateway previews use auth.json plus the managed actor header", () => {
-  const api = source("src/lib/api.ts");
+  const api = source("src/lib/api/browserMock/nativePreview.ts");
   const directBranch = between(
     api,
     'const providerId = "custom";',

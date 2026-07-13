@@ -367,10 +367,10 @@
     if (profile) {
       applySavedProfile(profile);
     }
-    // Profile changes only need the lightweight summary/gateway refresh in the
-    // foreground. The heavier environment scan stays in the background.
+    // Profile mutations must not kick off environment detection. That path
+    // reconciles native tool configs and can import a ghost draft when the
+    // on-disk file has not been rewritten yet for the just-edited profile.
     await refreshProfileAndGatewayOnly();
-    void refreshDashboard({ quiet: true, scheduleFollowup: false, showRefreshIndicator: false, waitForUpdates: false });
   }
 
   async function refreshCurrentRouteAfterSwitch(currentRoute: Route) {

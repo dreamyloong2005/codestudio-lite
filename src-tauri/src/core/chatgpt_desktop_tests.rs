@@ -1,4 +1,6 @@
 use super::*;
+use reqwest::StatusCode;
+use std::io::Write;
 
 fn installed(source: &str) -> InstalledChatGptDesktop {
     InstalledChatGptDesktop {
@@ -269,34 +271,44 @@ fn download_temp_path_is_unique_for_the_same_target() {
 
 #[test]
 fn mirror_retry_policy_is_bounded_and_only_retries_transient_http_statuses() {
-    assert_eq!(MIRROR_HTTP_MAX_ATTEMPTS, 4);
-    assert!(mirror_should_retry_status(StatusCode::REQUEST_TIMEOUT));
-    assert!(mirror_should_retry_status(StatusCode::TOO_MANY_REQUESTS));
-    assert!(mirror_should_retry_status(StatusCode::BAD_GATEWAY));
-    assert!(!mirror_should_retry_status(StatusCode::NOT_FOUND));
-    assert!(mirror_retry_delay(3) > mirror_retry_delay(1));
+    assert_eq!(download_http::DOWNLOAD_HTTP_MAX_ATTEMPTS, 4);
+    assert!(download_http::download_http_should_retry_status(
+        StatusCode::REQUEST_TIMEOUT
+    ));
+    assert!(download_http::download_http_should_retry_status(
+        StatusCode::TOO_MANY_REQUESTS
+    ));
+    assert!(download_http::download_http_should_retry_status(
+        StatusCode::BAD_GATEWAY
+    ));
+    assert!(!download_http::download_http_should_retry_status(
+        StatusCode::NOT_FOUND
+    ));
 }
 
 #[test]
 fn resumed_download_response_modes_never_append_a_full_response() {
     assert_eq!(
-        download_response_mode(StatusCode::OK, 1024, Some(2048)).unwrap(),
-        DownloadResponseMode::Truncate
+        download_http::download_response_mode(StatusCode::OK, 1024, Some(2048)).unwrap(),
+        download_http::DownloadResponseMode::Truncate
     );
     assert_eq!(
-        download_response_mode(StatusCode::PARTIAL_CONTENT, 1024, Some(2048)).unwrap(),
-        DownloadResponseMode::Append
+        download_http::download_response_mode(StatusCode::PARTIAL_CONTENT, 1024, Some(2048))
+            .unwrap(),
+        download_http::DownloadResponseMode::Append
     );
     assert_eq!(
-        download_response_mode(StatusCode::RANGE_NOT_SATISFIABLE, 2048, Some(2048)).unwrap(),
-        DownloadResponseMode::Complete
+        download_http::download_response_mode(StatusCode::RANGE_NOT_SATISFIABLE, 2048, Some(2048))
+            .unwrap(),
+        download_http::DownloadResponseMode::Complete
     );
-    assert!(download_response_mode(StatusCode::NOT_FOUND, 0, Some(2048)).is_err());
+    assert!(download_http::download_response_mode(StatusCode::NOT_FOUND, 0, Some(2048)).is_err());
 }
 
 #[test]
-fn mirror_transfers_avoid_system_libressl_and_resume_partial_packages() {
+fn mirror_transfers_use_shared_proxy_fallback_without_system_curl() {
     let source = include_str!("chatgpt_desktop.rs");
+    let shared = include_str!("download_http.rs");
     let fetch_body = source
         .split("fn fetch_text")
         .nth(1)
@@ -308,12 +320,12 @@ fn mirror_transfers_avoid_system_libressl_and_resume_partial_packages() {
         .and_then(|body| body.split("fn emit_step_progress").next())
         .expect("download_to_file should exist");
 
-    assert!(source.contains("builder.http1_only()"));
-    assert!(fetch_body.contains("mirror_http_client"));
+    assert!(shared.contains("builder.http1_only()"));
+    assert!(shared.contains("builder.no_proxy()"));
+    assert!(shared.contains("DownloadHttpTransport::MacosSystemProxy"));
+    assert!(fetch_body.contains("download_http::fetch_text"));
     assert!(!fetch_body.contains("hidden_command(\"curl\")"));
-    assert!(download_body.contains("mirror_http_client"));
-    assert!(download_body.contains("reqwest::header::RANGE"));
-    assert!(download_body.contains("OpenOptions"));
+    assert!(download_body.contains("download_http::download_to_file"));
     assert!(!download_body.contains("hidden_command(\"curl\")"));
 }
 

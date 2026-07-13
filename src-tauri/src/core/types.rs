@@ -534,6 +534,8 @@ pub struct ProfileDraft {
     pub protocol: String,
     pub model: String,
     #[serde(default)]
+    pub review_model: Option<String>,
+    #[serde(default)]
     pub model_mappings: Vec<ProfileModelMapping>,
     pub base_url: String,
     #[serde(default)]
@@ -671,6 +673,8 @@ pub struct SaveProfileDraftRequest {
     pub protocol: Option<String>,
     pub model: String,
     #[serde(default)]
+    pub review_model: Option<String>,
+    #[serde(default)]
     pub model_mappings: Option<Vec<ProfileModelMapping>>,
     pub base_url: String,
     pub secret_provided: bool,
@@ -693,6 +697,8 @@ pub struct UpdateProfileDraftRequest {
     #[serde(default)]
     pub protocol: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub review_model: Option<String>,
     #[serde(default)]
     pub model_mappings: Option<Vec<ProfileModelMapping>>,
     pub base_url: String,
@@ -735,6 +741,8 @@ pub struct PreviewProfileWriteRequest {
     #[serde(default)]
     pub protocol: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub review_model: Option<String>,
     #[serde(default)]
     pub model_mappings: Option<Vec<ProfileModelMapping>>,
     pub base_url: String,

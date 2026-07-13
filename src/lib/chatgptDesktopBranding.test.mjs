@@ -60,6 +60,7 @@ test("desktop branding defaults to current and only rewrites the product phrase"
   const enUS = read("src/lib/locales/en-US.ts");
   const profiles = read("src/routes/Profiles.svelte");
   const wizard = read("src/routes/SetupWizard.svelte");
+  const profileCatalog = read("src/lib/profiles/catalog.ts");
 
   assert.match(branding, /writable<ChatGPTDesktopProductGeneration>\("current"\)/);
   assert.match(branding, /generation \?\? "current"/);
@@ -69,9 +70,10 @@ test("desktop branding defaults to current and only rewrites the product phrase"
   assert.match(i18n, /derived\(\[locale, chatgptDesktopGeneration\]/);
   assert.match(i18n, /brandChatGPTDesktopText\([\s\S]*?\$generation/);
   assert.match(enUS, /"app\.nav\.chatgptDesktop": "ChatGPT Desktop"/);
-  assert.match(profiles, /codex:\s*"Codex"/);
-  assert.doesNotMatch(profiles, /codex:\s*"ChatGPT/);
-  assert.match(wizard, /id:\s*"codex"[\s\S]*?label:\s*"Codex"/);
+  assert.match(profileCatalog, /id:\s*"codex"[\s\S]*?label:\s*"Codex"/);
+  assert.doesNotMatch(profileCatalog, /id:\s*"codex"[\s\S]*?label:\s*"ChatGPT/);
+  assert.match(profiles, /PROFILE_TOOL_LABELS/);
+  assert.match(wizard, /PROFILE_TOOL_CATALOG/);
 });
 
 test("current desktop icon is the inverted CLI mark and legacy keeps the original artwork", () => {

@@ -1,6 +1,7 @@
 use crate::core::activity_log;
 use crate::core::app_paths::app_paths;
 use crate::core::detector;
+use crate::core::download_http;
 use crate::core::env_health;
 use crate::core::npm_global;
 use crate::core::platform::{
@@ -9,7 +10,7 @@ use crate::core::platform::{
 };
 use crate::core::process_control;
 use crate::core::storage;
-use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
+use crate::core::tool_catalog::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
     ClaudeDesktopInstallKinds, ClaudeDesktopPlan, InstallState, RepairToolPathRequest,
     RepairToolPathResult, Severity, ToolInstallCommand, ToolInstallPlan, ToolInstallPrerequisite,
@@ -20,15 +21,16 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 enum InstallAction {
     NpmGlobal(&'static str),
+    NpmGlobalIgnoreScripts(&'static str),
     Winget(&'static str),
     MacosDmgApp {
         label: &'static str,
@@ -860,6 +862,7 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "gemini-code-assist" => InstallAction::VsCodeExtension("Google.geminicodeassist"),
         "opencode" => InstallAction::NpmGlobal("opencode-ai"),
         "openclaw" => InstallAction::NpmGlobal("openclaw"),
+        "pi" => InstallAction::NpmGlobalIgnoreScripts("@earendil-works/pi-coding-agent"),
         "hermes" => {
             if cfg!(target_os = "macos") {
                 InstallAction::InteractiveShellScript(
@@ -947,7 +950,7 @@ fn build_plan(
     }
 
     match &definition.action {
-        InstallAction::NpmGlobal(_) => {
+        InstallAction::NpmGlobal(_) | InstallAction::NpmGlobalIgnoreScripts(_) => {
             steps.push(ToolInstallStep {
                 label: "Check npm".to_string(),
                 detail: "Local npm must be available; npm usually ships with Node.js LTS."
@@ -1618,7 +1621,7 @@ fn run_path_repairs_before_action(
 fn path_repair_tool_ids_for_action(action: &InstallAction) -> Vec<&'static str> {
     let mut ids = Vec::new();
     match action {
-        InstallAction::NpmGlobal(_) => {
+        InstallAction::NpmGlobal(_) | InstallAction::NpmGlobalIgnoreScripts(_) => {
             ids.push("node");
             ids.push("npm");
         }
@@ -1709,7 +1712,9 @@ fn action_interactive_for_tool(definition: &InstallDefinition) -> bool {
 
 fn dependency_satisfied(action: &InstallAction) -> bool {
     match action {
-        InstallAction::NpmGlobal(_) => command_available("npm"),
+        InstallAction::NpmGlobal(_) | InstallAction::NpmGlobalIgnoreScripts(_) => {
+            command_available("npm")
+        }
         InstallAction::MacosDmgApp { .. } => {
             cfg!(target_os = "macos") && macos_dmg_dependencies_available()
         }
@@ -1732,6 +1737,9 @@ fn run_install_action(
     match action {
         InstallAction::NpmGlobal(package) => {
             run_npm_global_command(&["install", "-g", package], progress)
+        }
+        InstallAction::NpmGlobalIgnoreScripts(package) => {
+            run_npm_global_command(&["install", "-g", "--ignore-scripts", package], progress)
         }
         InstallAction::Winget(package_id) => run_action_command_elevated_on_windows(
             "winget",
@@ -1803,6 +1811,18 @@ fn run_update_action(
             let package = format!("{package}@latest");
             run_npm_global_command_owned(
                 vec!["install".to_string(), "-g".to_string(), package],
+                progress,
+            )
+        }
+        InstallAction::NpmGlobalIgnoreScripts(package) => {
+            let package = format!("{package}@latest");
+            run_npm_global_command_owned(
+                vec![
+                    "install".to_string(),
+                    "-g".to_string(),
+                    "--ignore-scripts".to_string(),
+                    package,
+                ],
                 progress,
             )
         }
@@ -1912,6 +1932,9 @@ fn run_uninstall_action_for_tool(
             run_action_command("code", &["--uninstall-extension", extension_id], progress)
         }
         InstallAction::NpmGlobal(package) => {
+            run_npm_global_command(&["uninstall", "-g", package], progress)
+        }
+        InstallAction::NpmGlobalIgnoreScripts(package) => {
             run_npm_global_command(&["uninstall", "-g", package], progress)
         }
         InstallAction::PowerShellScript(_, _)
@@ -3055,23 +3078,13 @@ fn remove_stale_claude_desktop_windows_exe_uninstall_entries(
 }
 
 fn read_claude_desktop_latest_metadata(url: &str) -> Result<ClaudeDesktopLatestMetadata, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent("CodeStudio Lite")
-        .build()
-        .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|err| format!("Failed to read Claude Desktop latest metadata: {err}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to read Claude Desktop latest metadata: HTTP {}",
-            response.status()
-        ));
-    }
-    let latest = response
-        .json::<ClaudeDesktopLatestMetadata>()
+    let text = download_http::fetch_text(
+        url,
+        Duration::from_secs(20),
+        download_http::DOWNLOAD_HTTP_MAX_ATTEMPTS,
+    )
+    .map_err(|err| format!("Failed to read Claude Desktop latest metadata: {err}"))?;
+    let latest = serde_json::from_str::<ClaudeDesktopLatestMetadata>(&text)
         .map_err(|err| format!("Failed to parse Claude Desktop latest metadata: {err}"))?;
     if latest.version.trim().is_empty() || latest.hash.trim().is_empty() {
         return Err("Claude Desktop latest metadata is incomplete.".to_string());
@@ -3137,47 +3150,15 @@ fn download_url_to_file(
     path: &Path,
     progress: Option<&InstallProgressContext>,
 ) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("Failed to create download directory: {err}"))?;
-    }
     let temp = path.with_extension("download");
-    if temp.exists() {
-        let _ = fs::remove_file(&temp);
-    }
-
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(600))
-        .user_agent("CodeStudio Lite")
-        .build()
-        .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
-    let mut response = client
-        .get(url)
-        .send()
-        .map_err(|err| format!("Failed to download installer: {err}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Failed to download installer: HTTP {}",
-            response.status()
-        ));
-    }
-    let total = response.content_length();
-    let mut file =
-        fs::File::create(&temp).map_err(|err| format!("Failed to create download file: {err}"))?;
-    let mut downloaded = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    let mut last_emit = Instant::now() - Duration::from_secs(2);
-    loop {
-        let size = response
-            .read(&mut buffer)
-            .map_err(|err| format!("Failed while downloading installer: {err}"))?;
-        if size == 0 {
-            break;
-        }
-        file.write_all(&buffer[..size])
-            .map_err(|err| format!("Failed to write installer: {err}"))?;
-        downloaded += size as u64;
-        if last_emit.elapsed() >= Duration::from_millis(750) {
+    download_http::download_to_file(
+        url,
+        path,
+        &temp,
+        None,
+        Duration::from_secs(600),
+        download_http::DOWNLOAD_HTTP_MAX_ATTEMPTS,
+        |downloaded, total| {
             emit_install_download_progress(progress, downloaded, total);
             emit_install_progress(
                 progress,
@@ -3186,20 +3167,8 @@ fn download_url_to_file(
                 None,
                 false,
             );
-            last_emit = Instant::now();
-        }
-    }
-    file.flush()
-        .map_err(|err| format!("Failed to finish installer download: {err}"))?;
-    fs::rename(&temp, path).map_err(|err| format!("Failed to save downloaded file: {err}"))?;
-    emit_install_download_progress(progress, downloaded, total);
-    emit_install_progress(
-        progress,
-        "stdout",
-        format_download_progress(downloaded, total),
-        None,
-        false,
-    );
+        },
+    )?;
     Ok(())
 }
 
@@ -3592,7 +3561,7 @@ foreach ($part in $parts) {
 
 fn manager_label(action: &InstallAction) -> &'static str {
     match action {
-        InstallAction::NpmGlobal(_) => "npm",
+        InstallAction::NpmGlobal(_) | InstallAction::NpmGlobalIgnoreScripts(_) => "npm",
         InstallAction::Winget(_) => "winget",
         InstallAction::MacosDmgApp { .. } => "official-dmg",
         InstallAction::ClaudeDesktopWindowsMsix => "official-msix",
@@ -3610,6 +3579,9 @@ fn manager_label(action: &InstallAction) -> &'static str {
 fn command_preview(action: &InstallAction) -> String {
     match action {
         InstallAction::NpmGlobal(package) => npm_global_command_preview("install", package),
+        InstallAction::NpmGlobalIgnoreScripts(package) => {
+            npm_global_command_preview_with_options("install", package, true)
+        }
         InstallAction::Winget(package_id) => {
             format!("winget install --id {package_id} --exact --accept-source-agreements --accept-package-agreements --disable-interactivity")
         }
@@ -3637,7 +3609,20 @@ fn command_preview(action: &InstallAction) -> String {
 }
 
 fn npm_global_command_preview(action: &str, package: &str) -> String {
-    let command = format!("npm {action} -g {package}");
+    npm_global_command_preview_with_options(action, package, false)
+}
+
+fn npm_global_command_preview_with_options(
+    action: &str,
+    package: &str,
+    ignore_scripts: bool,
+) -> String {
+    let extra_args = if ignore_scripts && action == "install" {
+        " --ignore-scripts"
+    } else {
+        ""
+    };
+    let command = format!("npm {action} -g{extra_args} {package}");
     if !cfg!(target_os = "macos") {
         return command;
     }
@@ -3659,6 +3644,9 @@ fn update_command_preview(action: &InstallAction) -> String {
     match action {
         InstallAction::NpmGlobal(package) => {
             npm_global_command_preview("install", &format!("{package}@latest"))
+        }
+        InstallAction::NpmGlobalIgnoreScripts(package) => {
+            npm_global_command_preview_with_options("install", &format!("{package}@latest"), true)
         }
         InstallAction::Winget(package_id) => {
             format!("winget upgrade --id {package_id} --exact --accept-source-agreements --accept-package-agreements --disable-interactivity")
@@ -3697,6 +3685,7 @@ fn uninstall_supported_for_tool(tool_id: &str, action: &InstallAction) -> bool {
     matches!(
         action,
         InstallAction::NpmGlobal(_)
+            | InstallAction::NpmGlobalIgnoreScripts(_)
             | InstallAction::Winget(_)
             | InstallAction::MacosDmgApp { .. }
             | InstallAction::ClaudeDesktopWindowsMsix
@@ -3723,6 +3712,9 @@ fn uninstall_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> 
     }
     match action {
         InstallAction::NpmGlobal(package) => npm_global_command_preview("uninstall", package),
+        InstallAction::NpmGlobalIgnoreScripts(package) => {
+            npm_global_command_preview("uninstall", package)
+        }
         InstallAction::Winget(package_id) => {
             format!("winget uninstall --id {package_id} --exact")
         }
@@ -3823,6 +3815,10 @@ fn update_process_targets(tool_id: &str) -> UpdateProcessTargets {
         "openclaw" => UpdateProcessTargets {
             process_names: vec!["openclaw"],
             command_line_markers: vec!["openclaw"],
+        },
+        "pi" => UpdateProcessTargets {
+            process_names: vec!["pi", "Pi"],
+            command_line_markers: vec!["@earendil-works/pi-coding-agent"],
         },
         "hermes" => UpdateProcessTargets {
             process_names: vec!["hermes", "Hermes"],

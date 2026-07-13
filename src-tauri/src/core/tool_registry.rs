@@ -114,6 +114,28 @@ pub fn ai_tools() -> Vec<ToolDefinition> {
             config_relative_path: Some(".hermes/config.yaml"),
             install_command: hermes_install_command(),
         },
+        ToolDefinition {
+            id: "grok",
+            name: "Grok",
+            category: ToolCategory::AiTool,
+            command: "grok",
+            version_args: &["--version"],
+            version_output_contains: None,
+            config_relative_path: Some(".grok/config.toml"),
+            install_command: grok_install_command(),
+        },
+        ToolDefinition {
+            id: "pi",
+            name: "Pi Agent",
+            category: ToolCategory::AiTool,
+            command: "pi",
+            version_args: &["--version"],
+            version_output_contains: None,
+            config_relative_path: Some(".pi/agent/models.json"),
+            install_command: Some(
+                "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+            ),
+        },
     ]
 }
 
@@ -217,6 +239,18 @@ fn hermes_install_command() -> Option<&'static str> {
         Some(HERMES_UNIX_INSTALL_COMMAND)
     } else {
         Some(HERMES_UNIX_INSTALL_COMMAND)
+    }
+}
+
+const GROK_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://x.ai/cli/install.sh | bash";
+
+fn grok_install_command() -> Option<&'static str> {
+    if cfg!(target_os = "windows") {
+        Some(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://x.ai/cli/install.ps1 | iex\"",
+        )
+    } else {
+        Some(GROK_UNIX_INSTALL_COMMAND)
     }
 }
 

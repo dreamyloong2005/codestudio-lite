@@ -9,7 +9,7 @@ use crate::core::types::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Clone)]
 pub struct StoredAppConfig {
@@ -88,9 +88,13 @@ pub fn save_app_config(config: &StoredAppConfig) -> Result<(), String> {
 
 pub fn load_profiles() -> Result<Vec<ProfileDraft>, String> {
     let conn = connection()?;
+    load_profiles_with_conn(&conn)
+}
+
+fn load_profiles_with_conn(conn: &Connection) -> Result<Vec<ProfileDraft>, String> {
     let mut statement = conn
         .prepare(
-            "SELECT id, name, icon, remark, app, mode, provider, protocol, model, model_mappings_json,
+            "SELECT id, name, icon, remark, app, mode, provider, protocol, model, review_model, model_mappings_json,
                     base_url, auth_ref,
                     created_at, updated_at, last_test_status, sort_order
              FROM profiles
@@ -111,16 +115,17 @@ pub fn load_profiles() -> Result<Vec<ProfileDraft>, String> {
                     provider: row.get(6)?,
                     protocol: row.get(7)?,
                     model: row.get(8)?,
+                    review_model: row.get(9)?,
                     model_mappings: Vec::new(),
-                    base_url: row.get(10)?,
-                    auth_ref: row.get(11)?,
-                    created_at: row.get(12)?,
-                    updated_at: row.get(13)?,
-                    last_test_status: row.get(14)?,
+                    base_url: row.get(11)?,
+                    auth_ref: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                    last_test_status: row.get(15)?,
                     usage_enabled: false,
-                    sort_order: row.get(15)?,
+                    sort_order: row.get(16)?,
                 },
-                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })
         .map_err(|err| err.to_string())?;
@@ -136,13 +141,17 @@ pub fn load_profiles() -> Result<Vec<ProfileDraft>, String> {
 
 pub fn save_profile(profile: &ProfileDraft) -> Result<(), String> {
     let conn = connection()?;
+    save_profile_with_conn(&conn, profile)
+}
+
+fn save_profile_with_conn(conn: &Connection, profile: &ProfileDraft) -> Result<(), String> {
     let model_mappings_json = serialize_profile_model_mappings(&profile.model_mappings)?;
     conn.execute(
         "INSERT INTO profiles (
-            id, name, icon, remark, app, mode, provider, protocol, model, model_mappings_json,
+            id, name, icon, remark, app, mode, provider, protocol, model, review_model, model_mappings_json,
             base_url, auth_ref,
             created_at, updated_at, last_test_status, sort_order
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(id) DO UPDATE SET
             name=excluded.name,
             icon=excluded.icon,
@@ -152,6 +161,7 @@ pub fn save_profile(profile: &ProfileDraft) -> Result<(), String> {
             provider=excluded.provider,
             protocol=excluded.protocol,
             model=excluded.model,
+            review_model=excluded.review_model,
             model_mappings_json=excluded.model_mappings_json,
             base_url=excluded.base_url,
             auth_ref=excluded.auth_ref,
@@ -169,6 +179,7 @@ pub fn save_profile(profile: &ProfileDraft) -> Result<(), String> {
             profile.provider,
             profile.protocol,
             profile.model,
+            profile.review_model,
             model_mappings_json,
             profile.base_url,
             profile.auth_ref,
@@ -785,6 +796,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
           provider TEXT NOT NULL,
           protocol TEXT NOT NULL,
           model TEXT NOT NULL,
+          review_model TEXT,
           model_mappings_json TEXT NOT NULL DEFAULT '[]',
           base_url TEXT NOT NULL,
           auth_ref TEXT,
@@ -885,6 +897,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
     ensure_profiles_icon_column(conn)?;
     ensure_profiles_remark_column(conn)?;
     ensure_profiles_sort_order_column(conn)?;
+    ensure_profiles_review_model_column(conn)?;
     ensure_profiles_model_mappings_column(conn)?;
     ensure_gateway_request_privacy_columns(conn)?;
     ensure_chatgpt_desktop_state_table(conn)?;
@@ -966,6 +979,15 @@ fn ensure_profiles_model_mappings_column(conn: &Connection) -> Result<(), String
         [],
     )
     .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn ensure_profiles_review_model_column(conn: &Connection) -> Result<(), String> {
+    if table_has_column(conn, "profiles", "review_model")? {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE profiles ADD COLUMN review_model TEXT", [])
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -1797,6 +1819,82 @@ mod tests {
     }
 
     #[test]
+    fn profiles_schema_and_roundtrip_include_optional_review_model() {
+        assert_eq!(SCHEMA_VERSION, 9);
+        let conn = Connection::open_in_memory().expect("in-memory database should open");
+        conn.execute_batch(
+            "CREATE TABLE profiles (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              icon TEXT,
+              remark TEXT,
+              app TEXT NOT NULL,
+              mode TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              protocol TEXT NOT NULL,
+              model TEXT NOT NULL,
+              model_mappings_json TEXT NOT NULL DEFAULT '[]',
+              base_url TEXT NOT NULL,
+              auth_ref TEXT,
+              created_at TEXT,
+              updated_at TEXT,
+              last_test_status TEXT,
+              sort_order INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO profiles (
+              id, name, app, mode, provider, protocol, model, base_url, last_test_status
+            ) VALUES (
+              'legacy-profile', 'Legacy Codex', 'codex', 'config', 'compatible',
+              'openai-responses', 'gpt-5.5', 'https://legacy.example.test/v1', 'pending'
+            );",
+        )
+        .expect("legacy profiles schema should initialize");
+        initialize_schema(&conn).expect("schema should initialize");
+        assert!(table_has_column(&conn, "profiles", "review_model")
+            .expect("review model column should be inspectable"));
+        let profile = ProfileDraft {
+            id: "profile-with-review-model".to_string(),
+            name: "Reviewed Codex".to_string(),
+            icon: None,
+            remark: None,
+            app: "codex".to_string(),
+            is_builtin: false,
+            mode: ProviderApplyMode::Config,
+            provider: "compatible".to_string(),
+            protocol: "openai-responses".to_string(),
+            model: "gpt-5.5".to_string(),
+            review_model: Some("gpt-5.6-review".to_string()),
+            model_mappings: Vec::new(),
+            base_url: "https://example.test/v1".to_string(),
+            auth_ref: None,
+            created_at: None,
+            updated_at: None,
+            last_test_status: Some("pending".to_string()),
+            usage_enabled: false,
+            sort_order: 0,
+        };
+
+        save_profile_with_conn(&conn, &profile).expect("profile should save");
+        let loaded = load_profiles_with_conn(&conn).expect("profiles should load");
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded
+            .iter()
+            .find(|profile| profile.id == "legacy-profile")
+            .expect("legacy profile should remain")
+            .review_model
+            .is_none());
+        assert_eq!(
+            loaded
+                .iter()
+                .find(|profile| profile.id == "profile-with-review-model")
+                .expect("new profile should load")
+                .review_model
+                .as_deref(),
+            Some("gpt-5.6-review")
+        );
+    }
+
+    #[test]
     fn profiles_roundtrip_optional_remark() {
         let conn = Connection::open_in_memory().expect("in-memory database should open");
         initialize_schema(&conn).expect("schema should initialize");
@@ -1811,6 +1909,7 @@ mod tests {
             provider: "openai".to_string(),
             protocol: "openai-chat-completions".to_string(),
             model: String::new(),
+            review_model: None,
             model_mappings: Vec::new(),
             base_url: "https://example.test/v1".to_string(),
             auth_ref: None,

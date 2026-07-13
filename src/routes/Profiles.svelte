@@ -1,14 +1,5 @@
 <script lang="ts">
-  import { flip } from "svelte/animate";
   import { onDestroy } from "svelte";
-  import {
-    dragHandle,
-    dragHandleZone,
-    SHADOW_ITEM_MARKER_PROPERTY_NAME,
-    SHADOW_PLACEHOLDER_ITEM_ID,
-    TRIGGERS,
-    type DndEvent
-  } from "svelte-dnd-action";
   import {
     applyProfile,
     clearClaudeEnvironmentVariables,
@@ -25,11 +16,42 @@
     updateProfileDraft
   } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
+  import {
+    canonicalProfileToolId,
+    configProtocolIdsForTool,
+    OFFICIAL_PROFILE_NAME_KEYS,
+    PROFILE_PROTOCOL_OPTIONS,
+    PROFILE_TOOL_LABELS,
+    profileSupportsModelMappings as catalogSupportsModelMappings
+  } from "../lib/profiles/catalog";
+  import {
+    emptyProfileModelMappingForm,
+    modelMappingFormsFromProfile,
+    modelMappingsForRequest,
+    profileModelMappingsAreValid,
+    type ProfileModelMappingForm
+  } from "../lib/profiles/form";
+  import {
+    installedProfileToolIds as resolveInstalledProfileToolIds,
+    profileIsActive,
+    profileModeSections as buildProfileModeSections,
+    shouldShowNoInstalledProfiles,
+    type ProfileGroup
+  } from "../lib/profiles/grouping";
+  import {
+    normalizedProfileIcon,
+    profileDisplayName as resolveProfileDisplayName,
+    profileIconIsImage,
+    profileIconTextTooLong,
+    profileModelOptionLabel,
+    providerIsOfficial
+  } from "../lib/profiles/presentation";
   import AppIcon from "../components/AppIcon.svelte";
   import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import ModelSelectInput from "../components/ModelSelectInput.svelte";
+  import ProfileList from "../components/profiles/ProfileList.svelte";
+  import ProfileToolTabs from "../components/profiles/ProfileToolTabs.svelte";
   import StatusPill from "../components/StatusPill.svelte";
-  import ToolIcon from "../components/ToolIcon.svelte";
   import { css, cx } from "../../styled-system/css";
   import {
     actionButtonRecipe,
@@ -42,29 +64,18 @@
     iconButtonRecipe,
     nativeToggleRecipe,
     profileAvatarRecipe,
-    profileCardActionsRecipe,
-    profileCardMainRecipe,
-    profileCardRecipe,
-    profileCardStatusRecipe,
     profileDiffHeadingRecipe,
     profileDiffListRecipe,
     profileDiffPanelRecipe,
     profileDiffRowRecipe,
-    profileDragHandleRecipe,
     profileEmbeddedStackRecipe,
     profileFieldErrorRecipe,
     profileFormGridRecipe,
-    profileGridRecipe,
-    profileIdentityRecipe,
     profileIconActionsRecipe,
     profileIconEditorRecipe,
     profileInlineNoticeRecipe,
     profileModeLayoutRecipe,
     profileModeSwitcherRecipe,
-    profileSortableRowRecipe,
-    profileToolSectionRecipe,
-    profileToolSwitcherRecipe,
-    profileToolTabsRecipe,
     profileUsageCodeFieldRecipe,
     profileUsageResultCardRecipe,
     profileUsageResultGridRecipe,
@@ -78,12 +89,6 @@
     topStripRecipe,
     panelRecipe
   } from "../../styled-system/recipes";
-  import {
-    nextSortableProfileIds,
-    profileDragDisabled as resolveProfileDragDisabled,
-    profileIdsFromItems,
-    profileListContentKey
-  } from "../lib/profileSortable";
   import type {
     ApplyProfileResult,
     DetectionSnapshot,
@@ -113,19 +118,6 @@
     { value: "gateway", labelKey: "profiles.view.gateway" }
   ];
 
-  type ProfileGroup = {
-    id: string;
-    label: string;
-    activeProfileId: string | null;
-    activeProfileName: string | null;
-    profiles: ProfileDraft[];
-  };
-
-  type ProfileModeSection = {
-    mode: ProviderApplyMode;
-    groups: ProfileGroup[];
-  };
-
   type EditProfileForm = {
     name: string;
     icon: string;
@@ -134,17 +126,12 @@
     provider: string;
     protocol: string;
     model: string;
+    reviewModel: string;
     modelMappings: ProfileModelMappingForm[];
     baseUrl: string;
     apiKey: string;
   };
 
-  type ProfileModelMappingForm = {
-    alias: string;
-    model: string;
-    supports1m: boolean;
-    description: string;
-  };
 
   type UsageForm = {
     enabled: boolean;
@@ -200,13 +187,6 @@
   let profileUsageEntries: Record<string, ProfileUsageEntry> = {};
   let selectedToolId: string | null = null;
   let profileIconInput: HTMLInputElement | null = null;
-  let sortableProfiles: ProfileDraft[] = [];
-  let sortableSourceProfiles: ProfileDraft[] = [];
-  let sortableListKey = "";
-  let sortableActiveId: string | null = null;
-  let sortableSaving = false;
-  const profileFlipDurationMs = 220;
-  const profileDropTargetStyle = { outline: "none" };
   const modalPanelWideClass = css({
     width: "min(760px, calc(100vw - 40px))",
     "@supports (width: 100dvw)": {
@@ -333,34 +313,9 @@
     fontWeight: 800
   });
 
-  const toolOrder = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes"];
-  const toolLabels: Record<string, string> = {
-    codex: "Codex",
-    "claude-desktop": "Claude Desktop",
-    claude: "Claude Code",
-    gemini: "Gemini CLI",
-    "gemini-code-assist": "Gemini Code Assist",
-    opencode: "OpenCode",
-    openclaw: "OpenClaw",
-    hermes: "Hermes"
-  };
-  const officialProfileNameKeys: Record<string, TranslationKey> = {
-    codex: "profiles.officialProfile.codex",
-    "claude-desktop": "profiles.officialProfile.claudeDesktop",
-    claude: "profiles.officialProfile.claude",
-    gemini: "profiles.officialProfile.gemini",
-    "gemini-code-assist": "profiles.officialProfile.geminiCodeAssist",
-    opencode: "profiles.officialProfile.opencode",
-    openclaw: "profiles.officialProfile.openclaw",
-    hermes: "profiles.officialProfile.hermes"
-  };
-
-  const protocolOptions = [
-    { id: "openai-chat-completions", labelKey: "wizard.protocol.openaiChatCompletions" },
-    { id: "openai-responses", labelKey: "wizard.protocol.openaiResponses" },
-    { id: "anthropic-messages", labelKey: "wizard.protocol.anthropicMessages" },
-    { id: "google-gemini", labelKey: "wizard.protocol.googleGemini" }
-  ] as const;
+  const toolLabels = PROFILE_TOOL_LABELS;
+  const officialProfileNameKeys = OFFICIAL_PROFILE_NAME_KEYS as Record<string, TranslationKey>;
+  const protocolOptions = PROFILE_PROTOCOL_OPTIONS;
   type ProtocolOption = (typeof protocolOptions)[number];
   const usageTemplateOptions: Array<{ id: UsageScriptTemplateType; labelKey: TranslationKey }> = [
     { id: "general", labelKey: "profiles.usage.template.general" },
@@ -369,25 +324,13 @@
     { id: "token_plan", labelKey: "profiles.usage.template.tokenPlan" },
     { id: "custom", labelKey: "profiles.usage.template.custom" }
   ];
-  const configModeProtocolIdsByTool: Record<string, readonly string[]> = {
-    codex: ["openai-chat-completions", "openai-responses"],
-    "claude-desktop": ["anthropic-messages"],
-    claude: ["anthropic-messages"],
-    gemini: ["google-gemini"],
-    "gemini-code-assist": ["google-gemini"],
-    opencode: ["openai-chat-completions", "openai-responses"],
-    openclaw: ["openai-chat-completions"],
-    hermes: ["openai-chat-completions"]
-  };
 
-  $: installedProfileToolIds = buildInstalledProfileToolIds(snapshot);
+  $: installedProfileToolIds = resolveInstalledProfileToolIds(snapshot);
   $: normalizedModeFilter = (modeFilter === "gateway" ? "gateway" : "config") as ProviderApplyMode;
   $: profileModeSections = buildProfileModeSections(summary, installedProfileToolIds, normalizedModeFilter);
   $: profileToolGroups = profileModeSections.flatMap((section) => section.groups);
   $: syncSelectedProfileTool(profileToolGroups);
   $: selectedProfileGroup = profileToolGroups.find((group) => group.id === selectedToolId) ?? null;
-  $: syncSortableProfiles(selectedProfileGroup, normalizedModeFilter);
-  $: displayedProfiles = sortableProfiles;
   $: visibleProfileCount = selectedProfileGroup?.profiles.length ?? 0;
   $: selectedModePreview =
     applyPreview?.modePreviews.find((mode) => mode.mode === selectedApplyMode) ?? null;
@@ -396,6 +339,10 @@
     selectedNativeDiff?.writeEnabled && selectedNativeDiff.changes.length > 0
   );
   $: selectedModeSupported = selectedModePreview?.supported ?? false;
+  $: canApplyAndRestart =
+    pendingApply?.mode === "config" &&
+    selectedApplyMode === "config" &&
+    Boolean(selectedModePreview?.writesNativeConfig);
   $: applyEnvConflicts = applyResult?.envConflicts ?? applyPreview?.envConflicts ?? [];
   $: canSyncClaudeVsCodePlugin =
     Boolean(pendingApply) &&
@@ -412,7 +359,8 @@
   $: availableEditProtocolOptions = pendingEdit
     ? protocolOptionsFor(pendingEdit.app, editForm.mode)
     : protocolOptions;
-  $: editSupportsModelMappings = Boolean(pendingEdit) && profileSupportsModelMappings(pendingEdit?.app ?? "");
+  $: editSupportsModelMappings = Boolean(pendingEdit) && catalogSupportsModelMappings(pendingEdit?.app ?? "");
+  $: editSupportsReviewModel = Boolean(pendingEdit) && canonicalProfileToolId(pendingEdit?.app ?? "") === "codex";
   $: editModelMappingsValid =
     !editSupportsModelMappings || profileModelMappingsAreValid(editForm.modelMappings);
   $: editModelListId = pendingEdit
@@ -488,7 +436,7 @@
   });
 
   async function openApply(profile: ProfileDraft) {
-    if (isProfileActive(profile)) {
+    if (profileIsActive(summary, profile)) {
       return;
     }
     pendingApply = profile;
@@ -519,6 +467,7 @@
       provider: "",
       protocol: "openai-chat-completions",
       model: "",
+      reviewModel: "",
       modelMappings: [],
       baseUrl: "",
       apiKey: ""
@@ -912,6 +861,7 @@
       provider: profile.provider,
       protocol: profile.protocol,
       model: profile.model,
+      reviewModel: profile.reviewModel ?? "",
       modelMappings: modelMappingFormsFromProfile(profile),
       baseUrl: profile.baseUrl,
       apiKey: ""
@@ -999,6 +949,7 @@
         provider: editForm.provider,
         protocol: editForm.protocol,
         model: editForm.model,
+        reviewModel: editSupportsReviewModel ? editForm.reviewModel.trim() || null : null,
         modelMappings: modelMappingsForRequest(pendingEdit.app, editForm.modelMappings),
         baseUrl: normalizeBaseUrl(editForm.baseUrl),
         apiKey: editForm.apiKey.trim().length > 0 ? editForm.apiKey : null
@@ -1014,7 +965,7 @@
   }
 
   async function handleApplyWithOptions(profileId: string, restartAfterApply = false) {
-    if (pendingApply && isProfileActive(pendingApply)) {
+    if (pendingApply && profileIsActive(summary, pendingApply)) {
       applyError = $t("profiles.alreadyActiveBlocked");
       return;
     }
@@ -1171,10 +1122,6 @@
     return !providerIsOfficial(providerId);
   }
 
-  function providerIsOfficial(providerId: string) {
-    return providerId.trim() === "official";
-  }
-
   function domSafeId(value: string) {
     return value.replace(/[^a-zA-Z0-9_-]+/g, "-") || "model";
   }
@@ -1199,70 +1146,8 @@
     ].join("|");
   }
 
-  function modelOptionLabel(option: ProfileModelOption) {
-    const label = option.name && option.name !== option.id ? `${option.id} - ${option.name}` : option.id;
-    return option.supports1m ? `${label} (1M)` : label;
-  }
+  const modelOptionLabel = profileModelOptionLabel;
 
-  function profileSupportsModelMappings(toolId: string) {
-    return canonicalProfileToolId(toolId) === "claude";
-  }
-
-  function emptyProfileModelMappingForm(): ProfileModelMappingForm {
-    return {
-      alias: "",
-      model: "",
-      supports1m: false,
-      description: ""
-    };
-  }
-
-  function modelMappingFormsFromProfile(profile: ProfileDraft): ProfileModelMappingForm[] {
-    return (profile.modelMappings ?? []).map((mapping) => ({
-      alias: mapping.alias,
-      model: mapping.model,
-      supports1m: Boolean(mapping.supports1m),
-      description: mapping.description ?? ""
-    }));
-  }
-
-  function modelMappingsForRequest(
-    toolId: string,
-    mappings: ProfileModelMappingForm[]
-  ): ProfileModelMapping[] {
-    if (!profileSupportsModelMappings(toolId)) {
-      return [];
-    }
-    return mappings
-      .map((mapping) => ({
-        alias: mapping.alias.trim(),
-        model: mapping.model.trim(),
-        supports1m: Boolean(mapping.supports1m),
-        description: mapping.description.trim() || null
-      }))
-      .filter((mapping) => mapping.alias || mapping.model || mapping.description);
-  }
-
-  function profileModelMappingsAreValid(mappings: ProfileModelMappingForm[]) {
-    const aliases = new Set<string>();
-    for (const mapping of mappings) {
-      const alias = mapping.alias.trim();
-      const model = mapping.model.trim();
-      const description = mapping.description.trim();
-      if (!alias && !model && !description) {
-        continue;
-      }
-      if (!alias || !model) {
-        return false;
-      }
-      const aliasKey = alias.toLowerCase();
-      if (aliases.has(aliasKey)) {
-        return false;
-      }
-      aliases.add(aliasKey);
-    }
-    return true;
-  }
 
   function addEditModelMapping() {
     editForm = {
@@ -1305,62 +1190,9 @@
     return providerIsOfficial(profile.provider) ? $t("profiles.login.official") : $t("profiles.login.api");
   }
 
-  function profileEndpointLabel(profile: ProfileDraft) {
-    if (providerIsOfficial(profile.provider) && !profile.baseUrl.trim()) {
-      return $t("profiles.officialProfileEndpoint");
-    }
-    return profile.baseUrl;
-  }
-
-  function profileUrlLabel(profile: ProfileDraft) {
-    return profileEndpointLabel(profile) || $t("common.none");
-  }
-
-  function profileRemarkLabel(profile: ProfileDraft) {
-    return profile.remark?.trim() ?? "";
-  }
-
   function profileDisplayName(profile: ProfileDraft) {
-    const canonicalApp = canonicalProfileToolId(profile.app);
-    if (profileUsesToolIcon(profile)) {
-      const nameKey = officialProfileNameKeys[canonicalApp];
-      if (nameKey) {
-        return $t(nameKey);
-      }
-    }
-    const toolName = toolLabels[canonicalApp];
-    if (!toolName) {
-      return profile.name;
-    }
-    return profile.name
-      .replace(new RegExp(`^${escapeRegExp(toolName)}\\s*[-:/]?\\s*`, "i"), "")
-      .trim() || profile.name;
-  }
-
-  function profileIconValue(profile: ProfileDraft) {
-    const icon = profile.icon?.trim();
-    if (icon) {
-      return icon;
-    }
-    return profileDisplayName(profile).trim().charAt(0).toUpperCase() || "?";
-  }
-
-  function profileUsesToolIcon(profile: ProfileDraft) {
-    return profile.isBuiltin && providerIsOfficial(profile.provider);
-  }
-
-  function profileIconIsImage(value: string) {
-    return value.startsWith("data:image/");
-  }
-
-  function normalizedProfileIcon(value: string) {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  }
-
-  function profileIconTextTooLong(value: string) {
-    const trimmed = value.trim();
-    return trimmed.length > 0 && !profileIconIsImage(trimmed) && [...trimmed].length > 4;
+    const nameKey = officialProfileNameKeys[canonicalProfileToolId(profile.app)];
+    return resolveProfileDisplayName(profile, nameKey ? $t(nameKey) : undefined);
   }
 
   function triggerProfileIconImport() {
@@ -1402,75 +1234,15 @@
     });
   }
 
-  function escapeRegExp(value: string) {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
-  function profileCanSort() {
-    return !profileDragDisabled();
-  }
-
-  function profileDragDisabled() {
-    return resolveProfileDragDisabled({
-      deletingId,
-      applyingId,
-      editingId,
-      sortableSaving
-    });
-  }
-
-  function profileIsDndShadow(profile: ProfileDraft) {
-    return Boolean((profile as ProfileDraft & Record<string, unknown>)[SHADOW_ITEM_MARKER_PROPERTY_NAME]);
-  }
-
-  function profileSortableKey(profile: ProfileDraft) {
-    return `${profile.id}:${profileIsDndShadow(profile) ? "shadow" : "item"}`;
-  }
-
-  function syncSortableProfiles(group: ProfileGroup | null, mode: ProviderApplyMode) {
-    const nextProfiles = group?.profiles ?? [];
-    const nextKey = profileListContentKey(`${mode}:${group?.id ?? ""}`, nextProfiles);
-    if (nextKey === sortableListKey) {
-      return;
-    }
-    sortableListKey = nextKey;
-    sortableProfiles = nextProfiles;
-    sortableSourceProfiles = nextProfiles;
-    sortableActiveId = null;
-  }
-
-  function handleProfileDndConsider(event: CustomEvent<DndEvent<ProfileDraft>>) {
-    const currentProfiles = sortableProfiles;
-    const nextProfiles = event.detail.items;
-    if (event.detail.info.trigger === TRIGGERS.DRAG_STARTED) {
-      sortableSourceProfiles = currentProfiles.filter((profile) => profile.id !== SHADOW_PLACEHOLDER_ITEM_ID);
-      sortableActiveId = String(event.detail.info.id);
-    } else if (event.detail.info.trigger === TRIGGERS.DRAGGED_ENTERED || event.detail.info.trigger === TRIGGERS.DRAGGED_OVER_INDEX) {
-      sortableActiveId = String(event.detail.info.id);
-    }
-    sortableProfiles = nextProfiles;
-  }
-
-  async function handleProfileDndFinalize(event: CustomEvent<DndEvent<ProfileDraft>>) {
-    const nextProfiles = event.detail.items.filter((profile) => profile.id !== SHADOW_PLACEHOLDER_ITEM_ID);
-    sortableProfiles = nextProfiles;
-    if (event.detail.info.trigger === TRIGGERS.DRAG_STOPPED) {
-      sortableActiveId = null;
-    }
-    const nextIds = nextSortableProfileIds(sortableSourceProfiles, nextProfiles);
-    if (!nextIds || !selectedProfileGroup) {
-      sortableSourceProfiles = nextProfiles;
-      sortableActiveId = null;
-      return;
-    }
-    sortableSaving = true;
+  async function persistProfileOrder(profileIds: string[]) {
+    if (!selectedProfileGroup) return;
     try {
       profileIoError = null;
       profileIoMessage = null;
       const nextSummary = await reorderProfileDrafts({
         app: selectedProfileGroup.id,
         mode: normalizedModeFilter,
-        profileIds: nextIds
+        profileIds
       });
       summary = nextSummary;
       void (async () => {
@@ -1481,23 +1253,9 @@
         }
       })();
     } catch (err) {
-      sortableProfiles = sortableSourceProfiles;
       profileIoError = errorLabel(err instanceof Error ? err.message : String(err));
-    } finally {
-      sortableSaving = false;
-      sortableActiveId = null;
-      sortableSourceProfiles = sortableProfiles;
+      throw err;
     }
-  }
-
-  function styleDraggedProfileElement(element?: HTMLElement) {
-    if (!element) {
-      return;
-    }
-    element.setAttribute("data-sortable-active", "true");
-    element
-      .querySelector("[data-profile-card]")
-      ?.setAttribute("data-drag-active", "true");
   }
 
   function profileSupportsUsageQuery(profile: ProfileDraft) {
@@ -1617,9 +1375,17 @@
       "OpenCode custom providers are written to opencode.json using the OpenAI-compatible provider package.": "profiles.warning.opencodeConfigWrites",
       "OpenClaw providers are written in models.mode=merge so existing provider definitions can stay available.": "profiles.warning.openclawConfigWrites",
       "Hermes custom providers are written to ~/.hermes/config.yaml under the model section.": "profiles.warning.hermesConfigWrites",
+      "Grok custom models are written to ~/.grok/config.toml under [models] and [model.codestudio].": "profiles.warning.grokConfigWrites",
+      "Restart Grok or open a new session after applying so the model catalog reloads.": "profiles.warning.grokRestart",
+      "Official provider removes CodeStudio Lite managed Pi Agent provider entries.": "profiles.warning.piOfficialRestore",
+      "Pi Agent custom providers are written to ~/.pi/agent/models.json.": "profiles.warning.piConfigWrites",
+      "Gateway profiles write Pi Agent provider settings to the tool-scoped local gateway URL.": "profiles.warning.piGatewayWrites",
+      "Open /model in Pi after applying to select the managed provider model.": "profiles.warning.piSelectModel",
+      "Existing JSON comments are not preserved when CodeStudio Lite writes the file.": "profiles.warning.jsonCommentsLost",
       "Existing JSONC/JSON5 comments are not preserved when CodeStudio Lite writes the file.": "profiles.warning.jsoncCommentsLost",
       "Existing JSON5 comments are not preserved when CodeStudio Lite writes the file.": "profiles.warning.json5CommentsLost",
       "Existing YAML comments are not preserved when CodeStudio Lite writes the file.": "profiles.warning.yamlCommentsLost",
+      "Existing TOML comments are not preserved when CodeStudio Lite writes the file.": "profiles.warning.tomlCommentsLost",
       "Hermes config file mode currently targets OpenAI Chat Completions endpoints.": "profiles.warning.hermesChatOnly",
       "Hermes config profiles currently target OpenAI Chat Completions endpoints.": "profiles.warning.hermesChatOnly",
       "Selects Codex's official OpenAI provider.": "profiles.diff.selectOfficialProvider",
@@ -1691,7 +1457,19 @@
       "Stores the selected Provider API key for Hermes.": "profiles.diff.hermesApiKey",
       "Uses Hermes' OpenAI Chat Completions custom endpoint mode.": "profiles.diff.hermesApiMode",
       "Sets Hermes to the selected upstream model.": "profiles.diff.hermesModel",
-      "Model is optional; no Hermes model override will be written.": "profiles.diff.hermesModelOptional"
+      "Model is optional; no Hermes model override will be written.": "profiles.diff.hermesModelOptional",
+      "Points Pi Agent at the selected upstream Provider Base URL.": "profiles.diff.piBaseUrl",
+      "Selects the Pi Agent API adapter for this provider.": "profiles.diff.piApiAdapter",
+      "Stores the selected Provider API key for Pi Agent.": "profiles.diff.piApiKey",
+      "Registers the selected model under the managed Pi provider.": "profiles.diff.piModelRegistration",
+      "Uses system-role prompts for broader OpenAI-compatible endpoint support.": "profiles.diff.piSystemRoleCompat",
+      "Avoids unsupported reasoning_effort fields on compatible endpoints.": "profiles.diff.piReasoningCompat",
+      "Removes CodeStudio Lite managed Pi Agent provider entries.": "profiles.diff.piRemoveManagedProvider",
+      "Deletes the managed CodeStudio Lite Pi provider.": "profiles.diff.piRemoveManagedProvider",
+      "Points Pi Agent at the tool-scoped CodeStudio Lite Local Gateway.": "profiles.diff.piGatewayBaseUrl",
+      "Uses OpenAI Chat Completions against the Local Gateway.": "profiles.diff.gatewayOpenAiCompletions",
+      "Uses system-role prompts for Local Gateway compatibility.": "profiles.diff.piGatewaySystemRole",
+      "Registers the virtual gateway model under the managed Pi provider.": "profiles.diff.piGatewayModelRegistration"
     };
     const exactKey = exact[message];
     if (exactKey) {
@@ -1823,128 +1601,22 @@
     return message;
   }
 
-  function buildProfileModeSections(
-    profileSummary: ProfileSummary | null,
-    installedToolIds: Set<string> | null,
-    mode: ProviderApplyMode
-  ): ProfileModeSection[] {
-    const drafts = profileSummary?.drafts ?? [];
-    const activeByMode = profileSummary?.activeProfilesByMode ?? { config: {}, gateway: {} };
-    return [
-      {
-        mode,
-        groups: buildProfileGroups(
-          drafts.filter((profile) => profile.mode === mode && profileVisibleInProfiles(profile)),
-          activeByMode[mode],
-          installedToolIds
-        )
-      }
-    ];
-  }
-
-  function buildProfileGroups(
-    profiles: ProfileDraft[],
-    activeProfiles: Record<string, string>,
-    installedToolIds: Set<string> | null
-  ): ProfileGroup[] {
-    const grouped = new Map<string, ProfileDraft[]>();
-    for (const profile of profiles) {
-      const app = canonicalProfileToolId(profile.app);
-      if (installedToolIds && !installedToolIds.has(app)) {
-        continue;
-      }
-      grouped.set(app, [...(grouped.get(app) ?? []), { ...profile, app }]);
-    }
-
-    return [...grouped.entries()]
-      .sort(([left], [right]) => {
-        const leftIndex = toolOrder.indexOf(left);
-        const rightIndex = toolOrder.indexOf(right);
-        if (leftIndex === -1 && rightIndex === -1) {
-          return left.localeCompare(right);
-        }
-        if (leftIndex === -1) {
-          return 1;
-        }
-        if (rightIndex === -1) {
-          return -1;
-        }
-        return leftIndex - rightIndex;
-      })
-      .map(([app, appProfiles]) => {
-        const activeProfileId = activeProfileIdForApp(activeProfiles, app);
-        const sortedProfiles = [...appProfiles].sort((left, right) => {
-          if (left.isBuiltin !== right.isBuiltin) {
-            return left.isBuiltin ? -1 : 1;
-          }
-          const orderCompare = left.sortOrder - right.sortOrder;
-          if (orderCompare !== 0) {
-            return orderCompare;
-          }
-          return left.name.localeCompare(right.name);
-        });
-        const activeProfileName = sortedProfiles.find((profile) => profile.id === activeProfileId)?.name ?? null;
-        return {
-          id: app,
-          label: toolLabels[app] ?? app,
-          activeProfileId,
-          activeProfileName,
-          profiles: sortedProfiles
-        };
-      });
-  }
-
-  function buildInstalledProfileToolIds(detection: DetectionSnapshot | null): Set<string> | null {
-    if (!detection) {
-      return null;
-    }
-    return new Set(
-      detection.tools
-        .filter((tool) => tool.installState === "installed")
-        .map((tool) => canonicalProfileToolId(tool.id))
-    );
-  }
-
   function emptyProfilesMessageKey(
     profileSummary: ProfileSummary | null,
     visibleCount: number,
     installedToolIds: Set<string> | null
   ): TranslationKey {
-    if (profileSummary && installedToolIds && profileSummary.drafts.length > 0 && visibleCount === 0) {
+    if (shouldShowNoInstalledProfiles(profileSummary, visibleCount, installedToolIds)) {
       return "profiles.noInstalledToolProfiles";
     }
     return "profiles.noProfiles";
-  }
-
-  function canonicalProfileToolId(toolId: string) {
-    const normalized = toolId.trim().toLowerCase();
-    if (["chatgpt-desktop", "codex-app", "codex-client", "codex-desktop", "codex-cli", "codex-vscode", "codex-code-vscode", "codex-vs-code"].includes(normalized)) {
-      return "codex";
-    }
-    if (["claude-app", "claude-client"].includes(normalized)) {
-      return "claude-desktop";
-    }
-    if (["claude-vscode", "claude-code-vscode", "claude-vs-code"].includes(normalized)) {
-      return "claude";
-    }
-    if (["gemini-vscode", "gemini-code-vscode", "gemini-vs-code"].includes(normalized)) {
-      return "gemini-code-assist";
-    }
-    if (normalized === "hermes-agent") {
-      return "hermes";
-    }
-    return normalized;
-  }
-
-  function profileVisibleInProfiles(profile: ProfileDraft) {
-    return true;
   }
 
   function protocolOptionsFor(toolId: string, mode: ProviderApplyMode): readonly ProtocolOption[] {
     if (mode === "gateway") {
       return protocolOptions;
     }
-    const supportedIds = configModeProtocolIdsByTool[canonicalProfileToolId(toolId)] ?? [];
+    const supportedIds = configProtocolIdsForTool(toolId);
     return protocolOptions.filter((option) => supportedIds.includes(option.id));
   }
 
@@ -1963,29 +1635,6 @@
 
   function isProtocolAllowedForToolMode(toolId: string, mode: ProviderApplyMode, value: string) {
     return protocolOptionAvailable(protocolOptionsFor(toolId, mode), value);
-  }
-
-  function activeProfileIdForApp(activeProfiles: Record<string, string>, app: string) {
-    if (activeProfiles[app]) {
-      return activeProfiles[app];
-    }
-    if (app === "codex") {
-      return activeProfiles["chatgpt-desktop"]
-        ?? activeProfiles["codex-app"]
-        ?? activeProfiles["codex-client"]
-        ?? activeProfiles["codex-desktop"]
-        ?? null;
-    }
-    return null;
-  }
-
-  function isProfileActive(profile: ProfileDraft) {
-    if (!summary) {
-      return false;
-    }
-    const app = canonicalProfileToolId(profile.app);
-    const activeProfiles = summary.activeProfilesByMode[profile.mode];
-    return activeProfileIdForApp(activeProfiles, app) === profile.id;
   }
 
   function normalizeBaseUrl(value: string) {
@@ -2047,7 +1696,52 @@
     }
     return null;
   }
+  function handleModalEscape(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    if (pendingUsageProfile && usageBusy === null) {
+      closeUsage();
+    } else if (pendingEdit && editingId === null) {
+      closeEdit();
+    } else if (pendingDelete && deletingId === null) {
+      closeDelete();
+    } else if (pendingApply && applyingId === null) {
+      closeApply();
+    } else {
+      return;
+    }
+    event.preventDefault();
+  }
+
+  function handleModalEnter(event: KeyboardEvent) {
+    if (event.key !== "Enter" || keyboardTargetOwnsEnter(event.target)) return;
+    if (pendingUsageProfile && canSaveUsage && usageBusy === null) {
+      event.preventDefault();
+      void handleUsageSave();
+    } else if (pendingEdit && canSaveEdit) {
+      event.preventDefault();
+      void handleEditSave();
+    } else if (pendingDelete && deletingId === null) {
+      event.preventDefault();
+      void handleDeleteConfirm();
+    } else if (
+      pendingApply &&
+      !applyResult &&
+      applyingId === null &&
+      Boolean(applyPreview?.canApply) &&
+      selectedModeSupported
+    ) {
+      event.preventDefault();
+      void handleApplyWithOptions(pendingApply.id);
+    }
+  }
+
+  function keyboardTargetOwnsEnter(target: EventTarget | null) {
+    if (!(target instanceof HTMLElement)) return false;
+    return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName);
+  }
 </script>
+
+<svelte:window on:keydown={handleModalEscape} on:keydown={handleModalEnter} />
 
 <div class={embedded ? profileEmbeddedStackRecipe() : routeStackRecipe({ width: "full" })}>
   {#if !embedded}
@@ -2098,157 +1792,30 @@
     {/if}
     <div class={profileModeLayoutRecipe()}>
       {#if profileToolGroups.length > 0}
-        <section class={profileToolSwitcherRecipe()} aria-label={$t("profiles.toolSwitcherLabel")}>
-          <div class={profileToolTabsRecipe()} role="tablist">
-            {#each profileToolGroups as group}
-              {@const activeGroupProfile = group.profiles.find((profile) => profile.id === group.activeProfileId) ?? null}
-              <button
-                type="button"
-                data-selected={selectedToolId === group.id}
-                role="tab"
-                aria-selected={selectedToolId === group.id}
-                title={group.label}
-                on:click={() => selectProfileTool(group.id)}
-              >
-                <ToolIcon toolId={group.id} label={group.label} variant="choice" />
-                <span>
-                  <strong>{group.label}</strong>
-                  <small>{activeGroupProfile ? loginTypeLabel(activeGroupProfile) : $t("profiles.noActiveProfile")}</small>
-                </span>
-              </button>
-            {/each}
-          </div>
-        </section>
+        <ProfileToolTabs
+          groups={profileToolGroups}
+          {selectedToolId}
+          activeProfileLabel={loginTypeLabel}
+          onSelect={selectProfileTool}
+        />
 
         {#if selectedProfileGroup}
-          <section class={profileToolSectionRecipe()}>
-            <div
-              class={profileGridRecipe()}
-              role="list"
-              use:dragHandleZone={{
-                items: displayedProfiles,
-                flipDurationMs: profileFlipDurationMs,
-                dragDisabled: profileDragDisabled(),
-                dropFromOthersDisabled: true,
-                dropTargetStyle: profileDropTargetStyle,
-                transformDraggedElement: styleDraggedProfileElement,
-                zoneTabIndex: -1,
-                zoneItemTabIndex: -1
-              }}
-              on:consider={handleProfileDndConsider}
-              on:finalize={handleProfileDndFinalize}
-            >
-              {#each displayedProfiles as profile (profileSortableKey(profile))}
-                {@const isActive = selectedProfileGroup.activeProfileId === profile.id}
-                {@const cardActionKey = actionKey(profile.id, profile.mode)}
-                {@const profileIcon = profileIconValue(profile)}
-                <div
-                  class={profileSortableRowRecipe()}
-                  role="listitem"
-                  data-profile-sortable-id={profile.id}
-                  data-sortable-active={sortableActiveId === profile.id}
-                  data-is-dnd-shadow-item-hint={profileIsDndShadow(profile)}
-                  animate:flip={{ duration: profileFlipDurationMs }}
-                >
-                <article
-                  class={profileCardRecipe()}
-                  data-profile-card
-                  data-active={isActive}
-                  data-builtin={profile.isBuiltin}
-                  data-drag-active={sortableActiveId === profile.id}
-                >
-                  <div class={profileCardMainRecipe()}>
-                    <span
-                      class={profileDragHandleRecipe()}
-                      aria-label={$t("profiles.dragHandle")}
-                      aria-disabled={!profileCanSort()}
-                      data-profile-drag-handle={profile.id}
-                      use:dragHandle
-                    >
-                      <AppIcon name="drag" size={16} />
-                    </span>
-                    <div class={profileAvatarRecipe()} data-profile-avatar aria-hidden="true">
-                      {#if profileUsesToolIcon(profile)}
-                        <ToolIcon toolId={profile.app} label={profileDisplayName(profile)} variant="heading" />
-                      {:else if profileIconIsImage(profileIcon)}
-                        <img src={profileIcon} alt="" />
-                      {:else}
-                        <span>{profileIcon}</span>
-                      {/if}
-                    </div>
-                    <div class={profileIdentityRecipe()}>
-                      <h2>{profileDisplayName(profile)}</h2>
-                      <p>{profileUrlLabel(profile)}</p>
-                      {#if profileRemarkLabel(profile)}
-                        <p data-profile-remark>{profileRemarkLabel(profile)}</p>
-                      {/if}
-                    </div>
-                  </div>
-                  {#if profile.isBuiltin}
-                    <div class={profileCardStatusRecipe()}>
-                      <StatusPill
-                        status="info"
-                        label={$t("profiles.builtinOfficial")}
-                      />
-                    </div>
-                  {/if}
-                  <div class={profileCardActionsRecipe()}>
-                    <button
-                      class={actionButtonRecipe({ tone: "primary" })}
-                      disabled={isActive || applyingId !== null}
-                      title={isActive ? $t("profiles.alreadyActiveProfile") : $t("profiles.previewModeApply", { name: profile.name, mode: applyModeLabel(profile.mode) })}
-                      on:click={() => openApply(profile)}
-                    >
-                      <AppIcon name="apply" size={16} />
-                      {#if isActive}
-                        {$t("common.active")}
-                      {:else}
-                        {applyingId === cardActionKey && pendingApply?.id === profile.id ? $t("common.loading") : $t("common.apply")}
-                      {/if}
-                    </button>
-                    {#if profileCanOpenUsage(profile)}
-                      <button
-                        class={iconButtonRecipe()}
-                        title={$t("profiles.usage.open")}
-                        disabled={usageBusy !== null || applyingId !== null || editingId !== null}
-                        on:click={() => openUsage(profile)}
-                      >
-                        <AppIcon name="stats" size={16} />
-                      </button>
-                    {/if}
-                    {#if !profile.isBuiltin}
-                      <button class={iconButtonRecipe()} title={$t("profiles.editProfile")} disabled={duplicatingId !== null || deletingId !== null} on:click={() => openEdit(profile)}><AppIcon name="edit" size={16} /></button>
-                      <button
-                        class={iconButtonRecipe()}
-                        title={$t("profiles.duplicateProfile")}
-                        disabled={duplicatingId !== null || deletingId !== null || applyingId !== null || editingId !== null}
-                        on:click={() => handleDuplicate(profile)}
-                      >
-                        {#if duplicatingId === profile.id}
-                          <AppIcon name="loading" class={spinRecipe()} size={16} />
-                        {:else}
-                          <AppIcon name="copy" size={16} />
-                        {/if}
-                      </button>
-                      <button
-                        class={iconButtonRecipe({ danger: true })}
-                        title={$t("profiles.deleteProfile")}
-                        disabled={duplicatingId !== null || deletingId !== null || applyingId !== null || editingId !== null}
-                        on:click={() => openDelete(profile)}
-                      >
-                        {#if deletingId === profile.id}
-                          <AppIcon name="loading" class={spinRecipe()} size={16} />
-                        {:else}
-                          <AppIcon name="delete" size={16} />
-                        {/if}
-                      </button>
-                    {/if}
-                  </div>
-                </article>
-                </div>
-              {/each}
-            </div>
-          </section>
+          <ProfileList
+            profiles={selectedProfileGroup.profiles}
+            activeProfileId={selectedProfileGroup.activeProfileId}
+            toolId={selectedProfileGroup.id}
+            mode={normalizedModeFilter}
+            {applyingId}
+            {duplicatingId}
+            {deletingId}
+            {editingId}
+            onApply={openApply}
+            onUsage={openUsage}
+            onEdit={openEdit}
+            onDuplicate={handleDuplicate}
+            onDelete={openDelete}
+            onReorder={persistProfileOrder}
+          />
         {/if}
       {:else}
         <section class={panelRecipe()}>
@@ -2552,6 +2119,20 @@
               <small class={modelPickerStatusClass}>{editModelStatus}</small>
             {/if}
           </div>
+          {#if editSupportsReviewModel}
+            <div class={modelPickerClass}>
+              <label for={`${editModelListId}-review-input`}>{$t("profiles.reviewModelLabel")}</label>
+              <ModelSelectInput
+                id={`${editModelListId}-review-input`}
+                bind:value={editForm.reviewModel}
+                options={editModelOptions}
+                optionLabel={modelOptionLabel}
+                toggleTitle={$t("profiles.reviewModelLabel")}
+                placeholder={$t("profiles.reviewModelPlaceholder")}
+                disabled={editingId !== null}
+              />
+            </div>
+          {/if}
           {#if editSupportsModelMappings}
             <section class={modelMappingPanelClass}>
               <div class={modelMappingHeaderClass}>
@@ -2825,7 +2406,7 @@
             {applyResult ? $t("common.close") : $t("common.cancel")}
           </button>
           {#if !applyResult}
-            {#if selectedApplyMode === "config" && selectedModePreview?.writesNativeConfig}
+            {#if canApplyAndRestart}
               <button
                 class={actionButtonRecipe()}
                 disabled={applyingId !== null || !applyPreview?.canApply || !selectedModeSupported}

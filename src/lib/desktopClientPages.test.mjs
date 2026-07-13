@@ -434,6 +434,7 @@ test("ChatGPT Desktop owns the canonical desktop protocol while legacy identifie
   const storage = read("src-tauri/src/core/storage.rs");
   const profiles = read("src/routes/Profiles.svelte");
   const setupWizard = read("src/routes/SetupWizard.svelte");
+  const profileCatalog = read("src/lib/profiles/catalog.ts");
   const refreshCache = read("src/lib/refreshCache.ts");
 
   assert.match(api, /export async function detectChatGPTDesktopInstallKinds/);
@@ -454,11 +455,12 @@ test("ChatGPT Desktop owns the canonical desktop protocol while legacy identifie
   assert.match(storage, /CREATE TABLE IF NOT EXISTS chatgpt_desktop_state/);
   assert.match(storage, /SELECT install_kind, generated_at, state_json FROM codex_client_state/);
 
-  for (const source of [profiles, setupWizard, api]) {
-    assert.match(source, /"chatgpt-desktop"/);
-    assert.match(source, /"codex-app"/);
-    assert.match(source, /"codex-client"/);
-  }
+  assert.match(profileCatalog, /"chatgpt-desktop"/);
+  assert.match(profileCatalog, /"codex-app"/);
+  assert.match(profileCatalog, /"codex-client"/);
+  assert.match(profiles, /canonicalProfileToolId/);
+  assert.match(setupWizard, /canonicalProfileToolId/);
+  assert.match(api, /canonicalProfileToolId as canonicalProfileApp/);
   assert.match(refreshCache, /key === "chatgptDesktop"/);
   assert.match(refreshCache, /legacyKey = `\$\{STORAGE_PREFIX\}codexClient`/);
 });
@@ -469,6 +471,7 @@ test("Claude Desktop uses generic desktop-client copy and the Codex CLI boundary
   const types = read("src/types.ts");
   const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const toolLaunch = read("src-tauri/src/core/tool_launch.rs");
+  const toolCatalog = read("src-tauri/src/core/tool_catalog.rs");
   const dictionaries = [
     read("src/lib/locales/zh-CN.ts"),
     read("src/lib/locales/zh-TW.ts"),
@@ -485,7 +488,8 @@ test("Claude Desktop uses generic desktop-client copy and the Codex CLI boundary
 
   assert.match(types, /export type CodexAuthMethod/);
   assert.match(api, /codexAuth:/);
-  assert.match(toolLaunch, /"codex" \| "codex-cli"/);
+  assert.match(toolLaunch, /canonical_tool_id as canonical_profile_app/);
+  assert.match(toolCatalog, /"codex" \| "codex-cli"/);
   assert.match(core, /home_dir\.join\("\.codex"\)/);
   assert.match(core, /CODEX_EXE_NAME: &str = "Codex\.exe"/);
   assert.match(core, /PACKAGE_IDENTITY: &str = "OpenAI\.Codex"/);

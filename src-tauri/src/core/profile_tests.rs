@@ -17,6 +17,95 @@ fn test_app_config() -> AppConfig {
     }
 }
 
+#[test]
+fn new_gateway_profile_becomes_active_when_tool_has_no_gateway_profile() {
+    let mut config = test_app_config();
+    let profile = test_profile("claude", ProviderApplyMode::Gateway);
+    let drafts = vec![profile.clone()];
+
+    assert!(gateway_profile_will_auto_activate(
+        &config, &profile, &drafts
+    ));
+    assert!(activate_new_gateway_profile_if_unset(
+        &mut config,
+        &profile,
+        &drafts
+    ));
+    assert_eq!(
+        config.active_profiles_by_mode.gateway.get("claude"),
+        Some(&profile.id)
+    );
+}
+
+#[test]
+fn new_gateway_profile_replaces_a_stale_gateway_pointer() {
+    let mut config = test_app_config();
+    config
+        .active_profiles_by_mode
+        .gateway
+        .insert("claude".to_string(), "missing-profile".to_string());
+    let profile = test_profile("claude", ProviderApplyMode::Gateway);
+    let drafts = vec![profile.clone()];
+
+    assert!(gateway_profile_will_auto_activate(
+        &config, &profile, &drafts
+    ));
+    assert!(activate_new_gateway_profile_if_unset(
+        &mut config,
+        &profile,
+        &drafts
+    ));
+    assert_eq!(
+        config.active_profiles_by_mode.gateway.get("claude"),
+        Some(&profile.id)
+    );
+}
+
+#[test]
+fn new_gateway_profile_preserves_the_existing_active_profile() {
+    let mut config = test_app_config();
+    let mut active = test_profile("claude", ProviderApplyMode::Gateway);
+    active.id = "claude-active".to_string();
+    let mut created = test_profile("claude", ProviderApplyMode::Gateway);
+    created.id = "claude-created".to_string();
+    config
+        .active_profiles_by_mode
+        .gateway
+        .insert("claude".to_string(), active.id.clone());
+    let drafts = vec![active.clone(), created.clone()];
+
+    assert!(!gateway_profile_will_auto_activate(
+        &config, &created, &drafts
+    ));
+    assert!(!activate_new_gateway_profile_if_unset(
+        &mut config,
+        &created,
+        &drafts
+    ));
+    assert_eq!(
+        config.active_profiles_by_mode.gateway.get("claude"),
+        Some(&active.id)
+    );
+}
+
+#[test]
+fn new_direct_profile_does_not_change_gateway_activation() {
+    let mut config = test_app_config();
+    let profile = test_profile("claude", ProviderApplyMode::Config);
+    let drafts = vec![profile.clone()];
+
+    assert!(!gateway_profile_will_auto_activate(
+        &config, &profile, &drafts
+    ));
+    assert!(!activate_new_gateway_profile_if_unset(
+        &mut config,
+        &profile,
+        &drafts
+    ));
+    assert!(config.active_profiles_by_mode.gateway.is_empty());
+    assert!(config.active_profiles_by_mode.config.is_empty());
+}
+
 fn assert_codex_managed_provider_contract(value: &toml::Value, provider_id: &str) {
     assert_eq!(
         toml_lookup(
@@ -241,6 +330,7 @@ fn detects_codex_custom_native_profile() {
         r#"
 model_provider = "codestudio-openrouter"
 model = "gpt-5.5"
+review_model = "gpt-5.6-review"
 
 [model_providers.codestudio-openrouter]
 name = "CodeStudio OpenRouter"
@@ -263,6 +353,7 @@ requires_openai_auth = true
     );
     assert_eq!(detected.protocol, PROTOCOL_OPENAI_RESPONSES);
     assert_eq!(detected.model, "gpt-5.5");
+    assert_eq!(detected.review_model.as_deref(), Some("gpt-5.6-review"));
     assert_eq!(detected.base_url, "https://openrouter.ai/api/v1");
     assert_eq!(detected.api_key, "sk-router");
 }
@@ -443,6 +534,345 @@ fn auto_detected_native_profile_name_allows_provider_correction() {
 }
 
 #[test]
+fn grok_config_roundtrip_matches_custom_model_shape() {
+    let mut profile = test_profile("grok", ProviderApplyMode::Config);
+    profile.provider = "compatible".to_string();
+    profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    profile.model = "grok-4.5".to_string();
+    profile.base_url = "https://api.apikey.fun/v1".to_string();
+    profile.name = "Grok 4.5 (apikey.fun)".to_string();
+    store_test_profile_secret(&profile, "sk-test-grok");
+
+    let content = grok_config_content("", &profile).expect("grok config should render");
+    assert!(
+        content.contains("default = \"codestudio\""),
+        "unexpected grok config:\n{content}"
+    );
+    assert!(
+        content.contains("[model.codestudio]"),
+        "unexpected grok config:\n{content}"
+    );
+    assert!(
+        content.contains("api_backend = \"responses\""),
+        "unexpected grok config:\n{content}"
+    );
+    assert!(
+        content.contains("https://api.apikey.fun/v1"),
+        "unexpected grok config:\n{content}"
+    );
+    assert!(
+        content.contains("grok-4.5"),
+        "unexpected grok config:\n{content}"
+    );
+
+    let value: toml::Value = toml::from_str(&content).expect("rendered config should parse");
+    assert!(grok_config_matches_profile(&value, &profile));
+
+    let detected = detect_grok_native_profile(&value).expect("managed grok config should detect");
+    assert_eq!(detected.app, "grok");
+    assert_eq!(detected.protocol, PROTOCOL_OPENAI_RESPONSES);
+    assert_eq!(detected.model, "grok-4.5");
+    assert_eq!(detected.base_url, "https://api.apikey.fun/v1");
+    assert_eq!(detected.api_key, "sk-test-grok");
+}
+
+#[test]
+fn pi_config_roundtrip_supports_all_native_api_families() {
+    let cases = [
+        (
+            PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+            "openai-completions",
+            "https://api.example.test",
+            "https://api.example.test/v1",
+        ),
+        (
+            PROTOCOL_OPENAI_RESPONSES,
+            "openai-responses",
+            "https://api.example.test/v1",
+            "https://api.example.test/v1",
+        ),
+        (
+            PROTOCOL_ANTHROPIC_MESSAGES,
+            "anthropic-messages",
+            "https://api.example.test",
+            "https://api.example.test/",
+        ),
+        (
+            PROTOCOL_GOOGLE_GEMINI,
+            "google-generative-ai",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ),
+    ];
+
+    for (protocol, expected_api, base_url, expected_base_url) in cases {
+        let mut profile = test_profile("pi", ProviderApplyMode::Config);
+        profile.provider = "compatible".to_string();
+        profile.protocol = protocol.to_string();
+        profile.model = "gpt-5.5".to_string();
+        profile.base_url = base_url.to_string();
+        profile.name = "Pi Custom".to_string();
+        store_test_profile_secret(&profile, "sk-test-pi");
+
+        let content = pi_config_content(
+            r#"{
+  "providers": {
+    "keep": {
+      "baseUrl": "https://keep.example/v1",
+      "api": "openai-completions",
+      "apiKey": "keep-key",
+      "models": [{ "id": "keep-model" }]
+    }
+  },
+  "other": true
+}"#,
+            &profile,
+        )
+        .expect("Pi config should render");
+        let value = parse_json5_or_empty(&content, "Pi Agent models").expect("Pi JSON");
+
+        assert_eq!(
+            json_string_lookup(&value, &["providers", "codestudio", "baseUrl"]).as_deref(),
+            Some(expected_base_url)
+        );
+        assert_eq!(
+            json_string_lookup(&value, &["providers", "codestudio", "api"]).as_deref(),
+            Some(expected_api)
+        );
+        assert_eq!(
+            json_string_lookup(&value, &["providers", "codestudio", "apiKey"]).as_deref(),
+            Some("sk-test-pi")
+        );
+        assert_eq!(
+            value
+                .pointer("/providers/codestudio/models/0/id")
+                .and_then(serde_json::Value::as_str),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            value
+                .pointer("/providers/codestudio/models/0/name")
+                .and_then(serde_json::Value::as_str),
+            Some("Pi Custom")
+        );
+        assert!(value.pointer("/providers/keep").is_some());
+        assert_eq!(
+            value.get("other").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(pi_config_matches_profile(&value, &profile));
+
+        let detected = detect_pi_native_profile(&value).expect("managed Pi provider should detect");
+        assert_eq!(detected.app, "pi");
+        assert_eq!(detected.protocol, protocol);
+        assert_eq!(detected.model, "gpt-5.5");
+        assert_eq!(detected.base_url, expected_base_url);
+        assert_eq!(detected.api_key, "sk-test-pi");
+    }
+}
+
+#[test]
+fn pi_native_detection_skips_unusable_providers_before_a_valid_entry() {
+    let value = serde_json::json!({
+        "providers": {
+            "aaa-keyless": {
+                "baseUrl": "https://keyless.example/v1",
+                "api": "openai-completions",
+                "models": [{ "id": "ignored" }]
+            },
+            "bbb-local-gateway": {
+                "baseUrl": "http://127.0.0.1:43112/tools/pi/v1",
+                "api": "openai-completions",
+                "apiKey": "codestudio-local-test",
+                "models": [{ "id": "ignored" }]
+            },
+            "zzz-valid": {
+                "baseUrl": "https://api.valid.example/v1",
+                "api": "openai-responses",
+                "apiKey": "sk-valid",
+                "models": [{ "id": "gpt-5.5" }]
+            }
+        }
+    });
+
+    let detected = detect_pi_native_profile(&value).expect("valid provider should be imported");
+    assert_eq!(detected.provider, "zzz-valid");
+    assert_eq!(detected.protocol, PROTOCOL_OPENAI_RESPONSES);
+    assert_eq!(detected.model, "gpt-5.5");
+    assert_eq!(detected.api_key, "sk-valid");
+}
+
+#[test]
+fn pi_official_cleanup_preserves_unrelated_providers() {
+    let content = pi_official_config_content(
+        r#"{
+  "providers": {
+    "codestudio": { "baseUrl": "https://managed.example/v1" },
+    "codestudio-old": { "baseUrl": "https://old.example/v1" },
+    "keep": {
+      "baseUrl": "https://keep.example/v1",
+      "api": "openai-completions",
+      "apiKey": "keep-key",
+      "models": [{ "id": "keep-model" }]
+    }
+  },
+  "other": true
+}"#,
+    )
+    .expect("Pi official cleanup should render");
+    let value = parse_json5_or_empty(&content, "Pi Agent models").expect("Pi JSON");
+
+    assert!(value.pointer("/providers/codestudio").is_none());
+    assert!(value.pointer("/providers/codestudio-old").is_none());
+    assert!(value.pointer("/providers/keep").is_some());
+    assert_eq!(
+        value.get("other").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn pi_gateway_config_verification_and_cleanup_use_the_tool_scoped_client() {
+    let mut profile = test_profile("pi", ProviderApplyMode::Gateway);
+    profile.model = "gpt-5.5".to_string();
+    let client = gateway::client_config_for_tool("pi").expect("Pi gateway client");
+    let content = pi_gateway_config_content(
+        r#"{
+  "providers": {
+    "keep": {
+      "baseUrl": "https://keep.example/v1",
+      "api": "openai-completions",
+      "apiKey": "keep-key",
+      "models": [{ "id": "keep-model" }]
+    }
+  }
+}"#,
+        &profile,
+    )
+    .expect("Pi gateway config should render");
+    let value = parse_json5_or_empty(&content, "Pi Agent models").expect("Pi JSON");
+
+    assert_eq!(
+        json_string_lookup(&value, &["providers", "codestudio", "baseUrl"]).as_deref(),
+        Some(client.base_url.as_str())
+    );
+    assert_eq!(
+        json_string_lookup(&value, &["providers", "codestudio", "api"]).as_deref(),
+        Some("openai-completions")
+    );
+    assert_eq!(
+        json_string_lookup(&value, &["providers", "codestudio", "apiKey"]).as_deref(),
+        Some(client.token.as_str())
+    );
+    assert_eq!(
+        value
+            .pointer("/providers/codestudio/models/0/id")
+            .and_then(serde_json::Value::as_str),
+        Some("gpt-5.5")
+    );
+    assert!(value.pointer("/providers/keep").is_some());
+
+    let paths = test_paths();
+    let config_path = paths.home_dir.join(".pi").join("agent").join("models.json");
+    write_native_config(&config_path, &content).expect("Pi config should write");
+    assert!(verify_pi_gateway_config(&config_path, &profile).expect("Pi config should verify"));
+    write_native_config(
+        &config_path,
+        &content.replace("openai-completions", "openai-responses"),
+    )
+    .expect("tampered Pi config should write");
+    assert!(!verify_pi_gateway_config(&config_path, &profile)
+        .expect("tampered Pi config should be readable"));
+
+    let cleaned = pi_gateway_cleanup_config_content(&content, "pi")
+        .expect("Pi gateway cleanup should render");
+    let cleaned = parse_json5_or_empty(&cleaned, "Pi Agent models").expect("Pi JSON");
+    assert!(cleaned.pointer("/providers/codestudio").is_none());
+    assert!(cleaned.pointer("/providers/keep").is_some());
+}
+
+#[test]
+fn pi_native_paths_and_previews_cover_direct_official_and_gateway_modes() {
+    let paths = test_paths();
+    let expected_path = paths.home_dir.join(".pi").join("agent").join("models.json");
+    let mut direct = test_profile("pi", ProviderApplyMode::Config);
+    direct.provider = "compatible".to_string();
+    direct.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    direct.model = "gpt-5.5".to_string();
+    direct.base_url = "https://api.example.test/v1".to_string();
+
+    assert_eq!(
+        native_config_path_for_profile_mode(&direct, &paths, ProviderApplyMode::Config)
+            .expect("Pi direct path"),
+        Some(expected_path.clone())
+    );
+    assert_eq!(
+        native_config_path_for_profile_mode(&direct, &paths, ProviderApplyMode::Gateway)
+            .expect("Pi gateway path"),
+        Some(expected_path.clone())
+    );
+
+    let direct_preview =
+        build_native_config_preview(&direct, None, &paths, ProviderApplyMode::Config)
+            .expect("Pi direct preview should build")
+            .expect("Pi direct preview should exist");
+    assert_eq!(direct_preview.tool, "pi");
+    for key in [
+        "providers.codestudio.baseUrl",
+        "providers.codestudio.api",
+        "providers.codestudio.apiKey",
+        "providers.codestudio.models",
+    ] {
+        assert!(
+            direct_preview
+                .changes
+                .iter()
+                .any(|change| change.key == key),
+            "Pi direct preview is missing {key}"
+        );
+    }
+
+    let gateway = test_profile("pi", ProviderApplyMode::Gateway);
+    let gateway_preview =
+        build_native_config_preview(&gateway, None, &paths, ProviderApplyMode::Gateway)
+            .expect("Pi gateway preview should build")
+            .expect("Pi gateway preview should exist");
+    assert!(gateway_preview
+        .changes
+        .iter()
+        .any(|change| change.key == "providers.codestudio.api"
+            && change.after.as_deref() == Some("openai-completions")));
+
+    write_native_config(
+        &expected_path,
+        r#"{
+  "providers": {
+    "codestudio": {
+      "baseUrl": "https://managed.example/v1",
+      "api": "openai-responses",
+      "apiKey": "sk-managed",
+      "models": [{ "id": "managed" }]
+    },
+    "keep": { "baseUrl": "https://keep.example/v1" }
+  }
+}"#,
+    )
+    .expect("existing Pi config should write");
+    let official = builtin_official_profiles()
+        .into_iter()
+        .find(|profile| profile.app == "pi")
+        .expect("Pi official profile");
+    let official_preview =
+        build_native_config_preview(&official, None, &paths, ProviderApplyMode::Config)
+            .expect("Pi official preview should build")
+            .expect("Pi official preview should exist");
+    assert!(official_preview
+        .changes
+        .iter()
+        .any(|change| { change.key == "providers.codestudio" && change.action == "remove" }));
+}
+
+#[test]
 fn detects_codex_native_profile_with_api_key_from_auth_json() {
     let value: toml::Value = toml::from_str(
         r#"
@@ -532,6 +962,7 @@ http_headers = { "x-openai-actor-authorization" = "codestudio-lite" }
         provider: "apikey.fun".to_string(),
         protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
         model: "gpt-5.5".to_string(),
+        review_model: None,
         model_mappings: Vec::new(),
         base_url: "https://api.apikey.fun/v1".to_string(),
         auth_ref: Some("keychain:test/codex-auth-json/api_key".to_string()),
@@ -551,6 +982,154 @@ http_headers = { "x-openai-actor-authorization" = "codestudio-lite" }
         &value,
         Some(&serde_json::json!({ "OPENAI_API_KEY": "sk-other-auth-json" })),
         &profile,
+    ));
+}
+
+#[test]
+fn codex_review_model_matching_is_exact_for_custom_and_compatible_for_official() {
+    let mut custom = test_profile("codex", ProviderApplyMode::Config);
+    custom.provider = "compatible".to_string();
+    custom.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    custom.model = "gpt-5.5".to_string();
+    custom.review_model = Some("gpt-5.6-review".to_string());
+    let custom_config =
+        codex_direct_config_content("", &custom).expect("custom config should render");
+    let custom_value: toml::Value =
+        toml::from_str(&custom_config).expect("custom config should parse");
+    let auth = serde_json::json!({ "OPENAI_API_KEY": "sk-present" });
+
+    assert!(codex_direct_config_matches_profile_without_keychain(
+        &custom_value,
+        Some(&auth),
+        &custom,
+    ));
+    custom.review_model = Some("gpt-5.6-review-other".to_string());
+    assert!(!codex_direct_config_matches_profile_without_keychain(
+        &custom_value,
+        Some(&auth),
+        &custom,
+    ));
+    custom.review_model = None;
+    assert!(!codex_direct_config_matches_profile_without_keychain(
+        &custom_value,
+        Some(&auth),
+        &custom,
+    ));
+    let custom_follow_config =
+        codex_direct_config_content("", &custom).expect("follow config should render");
+    let mut custom_follow_value: toml::Value =
+        toml::from_str(&custom_follow_config).expect("follow config should parse");
+    assert_eq!(
+        read_toml_string(&custom_follow_value, "review_model").as_deref(),
+        Some("gpt-5.5")
+    );
+    assert!(codex_direct_config_matches_profile_without_keychain(
+        &custom_follow_value,
+        Some(&auth),
+        &custom,
+    ));
+    custom_follow_value
+        .as_table_mut()
+        .expect("custom config table")
+        .remove("review_model");
+    assert!(codex_direct_config_matches_profile_without_keychain(
+        &custom_follow_value,
+        Some(&auth),
+        &custom,
+    ));
+
+    let official_value: toml::Value = toml::from_str(
+        r#"
+model_provider = "openai"
+review_model = "gpt-5.6-review"
+
+[model_providers.openai]
+requires_openai_auth = false
+http_headers = { "x-openai-actor-authorization" = "codestudio-lite" }
+"#,
+    )
+    .expect("official config should parse");
+    let mut official = builtin_official_profiles()
+        .into_iter()
+        .find(|profile| profile.app == "codex")
+        .expect("codex official profile");
+
+    assert!(codex_official_config_matches_profile(
+        &official_value,
+        &official
+    ));
+    official.review_model = Some("gpt-5.6-review".to_string());
+    assert!(codex_official_config_matches_profile(
+        &official_value,
+        &official
+    ));
+    official.review_model = Some("gpt-5.6-review-other".to_string());
+    assert!(!codex_official_config_matches_profile(
+        &official_value,
+        &official
+    ));
+}
+
+#[test]
+fn detected_codex_profile_matching_includes_review_model() {
+    let mut profile = test_profile("codex", ProviderApplyMode::Config);
+    profile.provider = "openrouter.ai".to_string();
+    profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    profile.model = "gpt-5.5".to_string();
+    profile.review_model = Some("gpt-5.6-review".to_string());
+    profile.base_url = "https://openrouter.ai/api/v1".to_string();
+    store_test_profile_secret(&profile, "sk-router");
+
+    assert!(detected_native_profile_matches_existing_key(
+        &profile,
+        "codex",
+        "openrouter.ai",
+        PROTOCOL_OPENAI_RESPONSES,
+        "gpt-5.5",
+        Some("gpt-5.6-review"),
+        "https://openrouter.ai/api/v1",
+        "sk-router",
+    ));
+    assert!(!detected_native_profile_matches_existing_key(
+        &profile,
+        "codex",
+        "openrouter.ai",
+        PROTOCOL_OPENAI_RESPONSES,
+        "gpt-5.5",
+        Some("gpt-5.6-review-other"),
+        "https://openrouter.ai/api/v1",
+        "sk-router",
+    ));
+    profile.review_model = None;
+    assert!(detected_native_profile_matches_existing_key(
+        &profile,
+        "codex",
+        "openrouter.ai",
+        PROTOCOL_OPENAI_RESPONSES,
+        "gpt-5.5",
+        None,
+        "https://openrouter.ai/api/v1",
+        "sk-router",
+    ));
+    assert!(detected_native_profile_matches_existing_key(
+        &profile,
+        "codex",
+        "openrouter.ai",
+        PROTOCOL_OPENAI_RESPONSES,
+        "gpt-5.5",
+        Some("gpt-5.5"),
+        "https://openrouter.ai/api/v1",
+        "sk-router",
+    ));
+    assert!(!detected_native_profile_matches_existing_key(
+        &profile,
+        "codex",
+        "openrouter.ai",
+        PROTOCOL_OPENAI_RESPONSES,
+        "gpt-5.5",
+        Some("gpt-5.6-review"),
+        "https://openrouter.ai/api/v1",
+        "sk-router",
     ));
 }
 
@@ -580,6 +1159,7 @@ requires_openai_auth = true
         provider: "openrouter".to_string(),
         protocol: PROTOCOL_OPENAI_RESPONSES.to_string(),
         model: "gpt-5.5".to_string(),
+        review_model: None,
         model_mappings: Vec::new(),
         base_url: "https://openrouter.ai/api/v1".to_string(),
         auth_ref: Some("keychain:test/missing-secret/api_key".to_string()),
@@ -626,6 +1206,7 @@ fn startup_native_matching_uses_keychain_reference_without_loading_secret() {
         "anthropic.test",
         PROTOCOL_ANTHROPIC_MESSAGES,
         "claude-sonnet-4-6",
+        None,
         "https://api.anthropic.test/v1",
         "sk-native",
     ));
@@ -635,6 +1216,7 @@ fn startup_native_matching_uses_keychain_reference_without_loading_secret() {
         "anthropic.test",
         PROTOCOL_ANTHROPIC_MESSAGES,
         "claude-sonnet-4-6",
+        None,
         "https://api.anthropic.test/v1",
         "sk-native",
     ));
@@ -665,6 +1247,7 @@ fn claude_config_matching_requires_same_auth_token_for_same_url() {
         "anthropic.test",
         PROTOCOL_ANTHROPIC_MESSAGES,
         "claude-sonnet-4-6",
+        None,
         "https://api.anthropic.test/v1",
         "sk-old",
     ));
@@ -683,6 +1266,7 @@ fn claude_config_matching_requires_same_auth_token_for_same_url() {
         "anthropic.test",
         PROTOCOL_ANTHROPIC_MESSAGES,
         "claude-sonnet-4-6",
+        None,
         "https://api.anthropic.test/v1",
         "sk-new",
     ));
@@ -1042,17 +1626,126 @@ model_providers = { codestudio-local = { name = "CodeStudio Lite Local Gateway",
 }
 
 #[test]
+fn codex_review_model_is_written_and_blank_follows_primary_model() {
+    let current = "review_model = \"old-review\"\n";
+
+    let mut direct = test_profile("codex", ProviderApplyMode::Config);
+    direct.provider = "compatible".to_string();
+    direct.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    direct.model = "gpt-5.5".to_string();
+    direct.review_model = Some("  gpt-5.6-review  ".to_string());
+    let direct_content =
+        codex_direct_config_content(current, &direct).expect("direct config should render");
+    let direct_value: toml::Value =
+        toml::from_str(&direct_content).expect("direct config should parse");
+    assert_eq!(
+        read_toml_string(&direct_value, "review_model").as_deref(),
+        Some("gpt-5.6-review")
+    );
+    direct.review_model = None;
+    let direct_followed = codex_direct_config_content(&direct_content, &direct)
+        .expect("direct config should follow the primary model");
+    let direct_followed_value: toml::Value =
+        toml::from_str(&direct_followed).expect("direct config should parse");
+    assert_eq!(
+        read_toml_string(&direct_followed_value, "review_model").as_deref(),
+        Some("gpt-5.5")
+    );
+
+    let mut gateway = test_profile("codex", ProviderApplyMode::Gateway);
+    gateway.model = "gpt-5.5".to_string();
+    gateway.review_model = Some("gpt-5.6-review".to_string());
+    let gateway_content =
+        codex_gateway_config_content(current, &gateway).expect("gateway config should render");
+    let gateway_value: toml::Value =
+        toml::from_str(&gateway_content).expect("gateway config should parse");
+    assert_eq!(
+        read_toml_string(&gateway_value, "review_model").as_deref(),
+        Some("gpt-5.6-review")
+    );
+    gateway.review_model = None;
+    let gateway_followed = codex_gateway_config_content(&gateway_content, &gateway)
+        .expect("gateway config should follow the primary model");
+    let gateway_followed_value: toml::Value =
+        toml::from_str(&gateway_followed).expect("gateway config should parse");
+    assert_eq!(
+        read_toml_string(&gateway_followed_value, "review_model").as_deref(),
+        Some("gpt-5.5")
+    );
+    gateway.model.clear();
+    let gateway_default = codex_gateway_config_content(&gateway_followed, &gateway)
+        .expect("gateway config should follow its fallback model");
+    let gateway_default_value: toml::Value =
+        toml::from_str(&gateway_default).expect("gateway config should parse");
+    assert_eq!(
+        read_toml_string(&gateway_default_value, "review_model").as_deref(),
+        Some(GATEWAY_FALLBACK_MODEL)
+    );
+
+    let mut official = builtin_official_profiles()
+        .into_iter()
+        .find(|profile| profile.app == "codex")
+        .expect("codex official profile");
+    official.model = "gpt-5.5".to_string();
+    official.review_model = Some("gpt-5.6-review".to_string());
+    let official_content =
+        codex_official_config_content(current, &official).expect("official config should render");
+    let official_value: toml::Value =
+        toml::from_str(&official_content).expect("official config should parse");
+    assert_eq!(
+        read_toml_string(&official_value, "review_model").as_deref(),
+        Some("gpt-5.6-review")
+    );
+    official.review_model = None;
+    let official_followed = codex_official_config_content(&official_content, &official)
+        .expect("official config should follow the primary model");
+    let official_followed_value: toml::Value =
+        toml::from_str(&official_followed).expect("official config should parse");
+    assert_eq!(
+        read_toml_string(&official_followed_value, "review_model").as_deref(),
+        Some("gpt-5.5")
+    );
+    official.model.clear();
+    let official_without_model = codex_official_config_content(&official_followed, &official)
+        .expect("official config without a primary model should remove review model");
+    let official_without_model_value: toml::Value =
+        toml::from_str(&official_without_model).expect("official config should parse");
+    assert!(read_toml_string(&official_without_model_value, "review_model").is_none());
+}
+
+#[test]
+fn review_model_normalization_is_codex_only_and_blank_safe() {
+    assert_eq!(
+        normalize_profile_review_model("codex", Some("  gpt-5.6-review  ")),
+        Some("gpt-5.6-review".to_string())
+    );
+    assert_eq!(
+        normalize_profile_review_model("chatgpt-desktop", Some("gpt-5.6-review")),
+        Some("gpt-5.6-review".to_string())
+    );
+    assert_eq!(normalize_profile_review_model("codex", Some("  ")), None);
+    assert_eq!(
+        normalize_profile_review_model("claude", Some("gpt-5.6-review")),
+        None
+    );
+}
+
+#[test]
 fn codex_direct_config_without_model_does_not_write_legacy_default_model() {
     let mut profile = test_profile("codex", ProviderApplyMode::Config);
     profile.provider = "compatible".to_string();
     profile.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
     profile.model = String::new();
 
-    let config = codex_direct_config_content("model = \"old-model\"\n", &profile)
-        .expect("config should render");
+    let config = codex_direct_config_content(
+        "model = \"old-model\"\nreview_model = \"old-review\"\n",
+        &profile,
+    )
+    .expect("config should render");
     let value: toml::Value = toml::from_str(&config).expect("config should parse");
 
     assert!(read_toml_string(&value, "model").is_none());
+    assert!(read_toml_string(&value, "review_model").is_none());
     assert!(!config.contains("codestudio-default"));
 }
 
@@ -1899,6 +2592,90 @@ fn codex_native_previews_use_managed_actor_authorization_contract() {
 }
 
 #[test]
+fn codex_native_previews_include_review_model_override_and_primary_fallback() {
+    let paths = test_paths();
+    let config_path = paths.home_dir.join(".codex").join("config.toml");
+    write_native_config(&config_path, "review_model = \"old-review\"\n")
+        .expect("existing config should write");
+    let mut direct = test_profile("codex", ProviderApplyMode::Config);
+    direct.provider = "compatible".to_string();
+    direct.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    let gateway = test_profile("codex", ProviderApplyMode::Gateway);
+    let official = builtin_official_profiles()
+        .into_iter()
+        .find(|profile| profile.app == "codex")
+        .expect("codex official profile");
+
+    for (mut profile, mode) in [
+        (direct, ProviderApplyMode::Config),
+        (gateway, ProviderApplyMode::Gateway),
+        (official, ProviderApplyMode::Config),
+    ] {
+        profile.model = "gpt-5.5".to_string();
+        profile.review_model = Some("gpt-5.6-review".to_string());
+        let preview = build_native_config_preview(&profile, None, &paths, mode.clone())
+            .expect("preview should build")
+            .expect("Codex preview should be available");
+        let change = preview
+            .changes
+            .iter()
+            .find(|change| change.key == "review_model")
+            .expect("review model set diff should exist");
+        assert_eq!(change.after.as_deref(), Some("gpt-5.6-review"));
+
+        profile.review_model = None;
+        let preview = build_native_config_preview(&profile, None, &paths, mode)
+            .expect("preview should build")
+            .expect("Codex preview should be available");
+        let change = preview
+            .changes
+            .iter()
+            .find(|change| change.key == "review_model")
+            .expect("review model fallback diff should exist");
+        assert_eq!(change.action, "update");
+        assert_eq!(change.after.as_deref(), Some("gpt-5.5"));
+    }
+}
+
+#[test]
+fn codex_config_verification_requires_the_review_model_to_match() {
+    let paths = test_paths();
+    let config_path = paths.home_dir.join(".codex").join("config.toml");
+
+    let mut direct = test_profile("codex", ProviderApplyMode::Config);
+    direct.provider = "compatible".to_string();
+    direct.protocol = PROTOCOL_OPENAI_RESPONSES.to_string();
+    direct.review_model = Some("gpt-5.6-review".to_string());
+    let direct_content =
+        codex_direct_config_content("", &direct).expect("direct config should render");
+    write_native_config(&config_path, &direct_content).expect("direct config should write");
+    assert!(verify_codex_direct_config(&config_path, &direct).expect("direct config should verify"));
+    write_native_config(
+        &config_path,
+        &direct_content.replace("gpt-5.6-review", "gpt-5.6-review-other"),
+    )
+    .expect("mismatched direct config should write");
+    assert!(!verify_codex_direct_config(&config_path, &direct)
+        .expect("mismatched direct config should be readable"));
+
+    let mut gateway = test_profile("codex", ProviderApplyMode::Gateway);
+    gateway.review_model = Some("gpt-5.6-review".to_string());
+    let gateway_content =
+        codex_gateway_config_content("", &gateway).expect("gateway config should render");
+    write_native_config(&config_path, &gateway_content).expect("gateway config should write");
+    assert!(
+        verify_codex_native_config(&config_path, &gateway).expect("gateway config should verify")
+    );
+    write_native_config(
+        &config_path,
+        &gateway_content.replace("gpt-5.6-review", "gpt-5.6-review-other"),
+    )
+    .expect("mismatched gateway config should write");
+    assert!(!verify_codex_native_config(&config_path, &gateway)
+        .expect("mismatched gateway config should be readable"));
+}
+
+#[test]
 fn non_codex_native_preview_includes_redacted_content() {
     let paths = test_paths();
     let profile = test_profile("claude", ProviderApplyMode::Gateway);
@@ -2349,6 +3126,8 @@ fn codex_restart_targets_cover_client_cli_and_vscode_backend() {
     assert_eq!(targets.len(), 3);
     assert_eq!(targets[0].label, "Codex");
     assert!(matches!(targets[0].launch, RestartLaunch::ChatGptDesktop));
+    assert!(targets[0].process_names.contains(&"ChatGPT.exe"));
+    assert!(targets[0].process_names.contains(&"Codex.exe"));
     assert_eq!(targets[1].label, "Codex VS Code extension backend");
     assert!(matches!(targets[1].launch, RestartLaunch::CloseOnly));
     assert!(targets[1]
@@ -2363,6 +3142,47 @@ fn codex_restart_targets_cover_client_cli_and_vscode_backend() {
             hidden: true
         }
     ));
+}
+
+#[test]
+fn windows_restart_script_falls_back_only_for_safe_name_targets() {
+    let codex_targets = restart_targets_for_app("codex", RestartContext::default());
+    let desktop_script = windows_restart_process_script(codex_targets[0]);
+    let cli_script = windows_restart_process_script(codex_targets[2]);
+
+    assert!(desktop_script.contains("Get-CimInstance Win32_Process -ErrorAction Stop"));
+    assert!(desktop_script.contains("Get-Process -Name $clean -ErrorAction SilentlyContinue"));
+    assert!(desktop_script.contains("$ExcludeMarkers.Count -eq 0"));
+    assert!(!codex_targets[2].exclude_command_markers.is_empty());
+    assert!(cli_script.contains("$ExcludeMarkers = @("));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_restart_script_safely_returns_no_match_when_cim_is_unavailable() {
+    const NAMES: &[&str] = &["codestudio-restart-test-no-match.exe"];
+    const EMPTY: &[&str] = &[];
+    let target = RestartTarget {
+        label: "CodeStudio restart test",
+        process_names: NAMES,
+        command_markers: EMPTY,
+        exclude_command_markers: EMPTY,
+        require_window: false,
+        reject_window: false,
+        launch: RestartLaunch::CloseOnly,
+    };
+
+    let json = run_powershell(&windows_restart_process_script(target)).unwrap();
+    let result: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(
+        result.get("total").and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        result.get("remaining").and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
 }
 
 #[test]
@@ -2520,6 +3340,7 @@ fn test_profile(app: &str, mode: ProviderApplyMode) -> ProfileDraft {
         provider: "openai".to_string(),
         protocol: PROTOCOL_OPENAI_CHAT_COMPLETIONS.to_string(),
         model: String::new(),
+        review_model: None,
         model_mappings: Vec::new(),
         base_url: "https://example.test/v1".to_string(),
         auth_ref: Some(format!("keychain:test/{app}/api_key")),

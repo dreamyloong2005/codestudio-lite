@@ -4,6 +4,7 @@ use crate::core::gateway_request_log;
 use crate::core::privacy_filter::{self, PrivacyFilterAction, PrivacyFilterMode};
 use crate::core::profile;
 use crate::core::storage;
+use crate::core::tool_catalog::canonical_profile_tool_id;
 use crate::core::types::{
     GatewayControlResult, GatewayRequestLogEntry, GatewayStatus, ProfileDraft, ProfileSummary,
     Severity, UpdateGatewaySettingsRequest,
@@ -12,28 +13,55 @@ use crate::core::upstream_http;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream};
-use std::sync::mpsc::{self, Sender};
+use std::collections::HashMap;
+use std::io::Write;
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use url::Url;
 use uuid::Uuid;
+
+mod auth;
+mod privacy;
+mod protocol;
+mod route;
+mod runtime;
+mod server;
+mod upstream;
+
+use privacy::filter_metadata as gateway_privacy_filter_metadata;
+use protocol::canonical::{
+    ConvertedGatewayRequest, GatewayAssistantResponse, GatewayContentPart, GatewayMessage,
+    GatewayProtocol, GatewayRequestParts, GatewayToolCall, GatewayToolSpec, GatewayUsage,
+};
+use protocol::{
+    decode_anthropic_request as anthropic_request_parts,
+    decode_gemini_request as gemini_request_parts,
+    decode_openai_chat_request as chat_request_parts,
+    decode_openai_responses_request as responses_request_parts,
+    decode_response as assistant_response_from_protocol,
+    encode_request as request_body_for_protocol, encode_response as response_body_for_protocol,
+    from_route_path as gateway_protocol_from_route_path, gemini_route as gemini_route_from_path,
+    merge_stream_usage, stream_text_delta_from_event, stream_update_from_event,
+    write_protocol_stream_delta, write_protocol_stream_done, write_protocol_stream_start,
+    write_protocol_stream_tool_call, ClientStreamState, SseBuffer, SseFrame,
+};
+use route::GatewayRouteTarget;
+use server::{
+    read_request as read_http_request, spawn_accept_loop,
+    write_buffered_response as write_http_response, write_route_response, write_stream_headers,
+    HttpRequest, HttpResponse, RouteResponse, StreamingResponse,
+};
+use upstream::{endpoint as upstream_endpoint, headers as upstream_headers_with_passthrough};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 43112;
 const TOKEN_PREFIX: &str = "codestudio-local-";
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const CLIENT_PROVIDER_ID: &str = "custom";
 const CLIENT_MODEL: &str = "codestudio-default";
-const TOOL_SCOPED_PREFIX: &str = "/tools/";
 const UPSTREAM_TIMEOUT_SECONDS: u16 = 120;
-const PROTOCOL_OPENAI_CHAT_COMPLETIONS: &str = "openai-chat-completions";
-const PROTOCOL_OPENAI_RESPONSES: &str = "openai-responses";
+#[cfg(test)]
 const PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
-const PROTOCOL_GOOGLE_GEMINI: &str = "google-gemini";
 const GATEWAY_CONFIG_STATE_KEY: &str = "gateway.config";
 
 #[derive(Debug, Clone)]
@@ -67,15 +95,6 @@ struct PartialGatewayConfig {
     privacy_filter_mode: Option<PrivacyFilterMode>,
 }
 
-#[derive(Default)]
-struct GatewayRuntime {
-    shutdown: Option<Sender<()>>,
-    handle: Option<JoinHandle<()>>,
-    started_at: Option<String>,
-    last_error: Option<String>,
-}
-
-static RUNTIME: OnceLock<Mutex<GatewayRuntime>> = OnceLock::new();
 static GATEWAY_CONFIG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub fn status_gateway() -> Result<GatewayStatus, String> {
@@ -87,17 +106,11 @@ pub fn status_gateway() -> Result<GatewayStatus, String> {
 pub fn start_gateway() -> Result<GatewayControlResult, String> {
     profile::ensure_app_dirs()?;
     let config = load_or_create_gateway_config()?;
-    let runtime = runtime();
-
-    {
-        let guard = runtime.lock().map_err(|err| err.to_string())?;
-        if guard.shutdown.is_some() {
-            drop(guard);
-            apply_gateway_native_configs_after_start()?;
-            return Ok(GatewayControlResult {
-                status: build_status(&config)?,
-            });
-        }
+    if runtime::is_running()? {
+        apply_gateway_native_configs_after_start()?;
+        return Ok(GatewayControlResult {
+            status: build_status(&config)?,
+        });
     }
 
     let address = format!("{}:{}", config.host, config.port);
@@ -105,7 +118,7 @@ pub fn start_gateway() -> Result<GatewayControlResult, String> {
         Ok(listener) => listener,
         Err(err) => {
             let message = format!("Could not start gateway on {address}: {err}");
-            set_last_error(Some(message.clone()));
+            runtime::set_last_error(Some(message.clone()));
             activity_log::append(Severity::Error, message.clone())?;
             return Err(message);
         }
@@ -117,41 +130,23 @@ pub fn start_gateway() -> Result<GatewayControlResult, String> {
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let fallback_config = config.clone();
     let started_at = Utc::now().to_rfc3339();
-    let handle = thread::spawn(move || loop {
-        if shutdown_rx.try_recv().is_ok() {
-            break;
-        }
+    let handle = spawn_accept_loop(
+        listener,
+        shutdown_rx,
+        move |stream| {
+            let server_config =
+                load_or_create_gateway_config().unwrap_or_else(|_| fallback_config.clone());
+            let _ = handle_connection(stream, &server_config);
+        },
+        |message| runtime::set_last_error(Some(message)),
+    );
 
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let server_config =
-                    load_or_create_gateway_config().unwrap_or_else(|_| fallback_config.clone());
-                thread::spawn(move || {
-                    let _ = handle_connection(stream, &server_config);
-                });
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(35));
-            }
-            Err(err) => {
-                set_last_error(Some(format!("Gateway accept failed: {err}")));
-                thread::sleep(Duration::from_millis(100));
-            }
-        }
-    });
-
-    {
-        let mut guard = runtime.lock().map_err(|err| err.to_string())?;
-        guard.shutdown = Some(shutdown_tx);
-        guard.handle = Some(handle);
-        guard.started_at = Some(started_at);
-        guard.last_error = None;
-    }
+    runtime::mark_started(shutdown_tx, handle, started_at)?;
 
     if let Err(err) = apply_gateway_native_configs_after_start() {
         let _ = stop_gateway_runtime(false);
         let message = format!("Started Local Gateway but could not update client configs: {err}");
-        set_last_error(Some(message.clone()));
+        runtime::set_last_error(Some(message.clone()));
         activity_log::append(Severity::Error, message.clone())?;
         return Err(message);
     }
@@ -213,7 +208,7 @@ pub fn client_config() -> Result<GatewayClientConfig, String> {
 }
 
 pub fn client_config_for_tool(tool_id: &str) -> Result<GatewayClientConfig, String> {
-    let tool_id = normalize_gateway_tool_id(tool_id)
+    let tool_id = canonical_profile_tool_id(tool_id)
         .ok_or_else(|| format!("Invalid gateway tool id '{tool_id}'."))?;
     client_config_with_tool(Some(&tool_id))
 }
@@ -235,45 +230,21 @@ fn client_config_with_tool(tool_id: Option<&str>) -> Result<GatewayClientConfig,
     })
 }
 
-fn runtime() -> &'static Mutex<GatewayRuntime> {
-    RUNTIME.get_or_init(|| Mutex::new(GatewayRuntime::default()))
-}
-
-fn set_last_error(message: Option<String>) {
-    if let Ok(mut guard) = runtime().lock() {
-        guard.last_error = message;
-    }
-}
-
 fn is_gateway_running() -> Result<bool, String> {
-    runtime()
-        .lock()
-        .map(|guard| guard.shutdown.is_some())
-        .map_err(|err| err.to_string())
+    runtime::is_running()
 }
 
 fn stop_gateway_runtime(log_stop: bool) -> Result<bool, String> {
-    let handle = {
-        let mut guard = runtime().lock().map_err(|err| err.to_string())?;
-        if let Some(shutdown) = guard.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        guard.started_at = None;
-        guard.handle.take()
-    };
-
-    if let Some(handle) = handle {
-        let _ = handle.join();
+    let stopped = runtime::stop()?;
+    if stopped {
         if log_stop {
             activity_log::append(
                 Severity::Info,
                 "Stopped Local Gateway. Connected AI clients will fail until it starts again.",
             )?;
         }
-        return Ok(true);
     }
-
-    Ok(false)
+    Ok(stopped)
 }
 
 fn apply_gateway_native_configs_after_start() -> Result<(), String> {
@@ -288,18 +259,11 @@ fn apply_gateway_native_configs_after_start() -> Result<(), String> {
 }
 
 fn build_status(config: &GatewayConfig) -> Result<GatewayStatus, String> {
-    let (running, started_at, last_error) = {
-        let guard = runtime().lock().map_err(|err| err.to_string())?;
-        (
-            guard.shutdown.is_some(),
-            guard.started_at.clone(),
-            guard.last_error.clone(),
-        )
-    };
+    let runtime = runtime::snapshot()?;
     let active = active_profile();
 
     Ok(GatewayStatus {
-        running,
+        running: runtime.running,
         host: config.host.clone(),
         port: config.port,
         base_url: format!("http://{}:{}/v1", config.host, config.port),
@@ -310,18 +274,19 @@ fn build_status(config: &GatewayConfig) -> Result<GatewayStatus, String> {
         active_profile_id: active.as_ref().map(|profile| profile.id.clone()),
         active_profile_name: active.as_ref().map(|profile| profile.name.clone()),
         active_model: active.as_ref().and_then(|profile| profile_model(&profile)),
-        started_at,
-        last_error,
+        started_at: runtime.started_at,
+        last_error: runtime.last_error,
     })
 }
 
 fn active_profile() -> Option<ProfileDraft> {
-    let summary = profile::load_profile_summary().ok()?;
+    // Request handling must not import native configs as a side effect.
+    let summary = profile::load_profile_summary_without_native_sync().ok()?;
     default_active_profile_from_summary(&summary)
 }
 
 fn active_profile_for_target(target: &GatewayRouteTarget) -> Option<ProfileDraft> {
-    let summary = profile::load_profile_summary().ok()?;
+    let summary = profile::load_profile_summary_without_native_sync().ok()?;
     if let Some(tool_id) = target.tool_id.as_deref() {
         if let Some(profile) = active_profile_for_tool(&summary, tool_id) {
             return Some(profile);
@@ -410,23 +375,6 @@ fn mask_token(token: &str) -> String {
     format!("{TOKEN_PREFIX}****{suffix}")
 }
 
-fn normalize_gateway_tool_id(value: &str) -> Option<String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "codex" | "codex-cli" | "chatgpt-desktop" | "codex-app" | "codex-client"
-        | "codex-desktop" => Some("codex".to_string()),
-        "claude-desktop" | "claude-app" | "claude-client" => Some("claude-desktop".to_string()),
-        "claude" | "claude-code" => Some("claude".to_string()),
-        "gemini" | "gemini-cli" => Some("gemini".to_string()),
-        "gemini-code-assist" | "gemini-vscode" | "gemini-code-vscode" | "gemini-vs-code" => {
-            Some("gemini-code-assist".to_string())
-        }
-        "opencode" | "open-code" => Some("opencode".to_string()),
-        "openclaw" | "open-claw" => Some("openclaw".to_string()),
-        "hermes" | "hermes-agent" => Some("hermes".to_string()),
-        _ => None,
-    }
-}
-
 fn handle_connection(mut stream: TcpStream, config: &GatewayConfig) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -447,98 +395,6 @@ fn handle_connection(mut stream: TcpStream, config: &GatewayConfig) -> Result<()
     write_result.map(|_| ())
 }
 
-struct HttpRequest {
-    method: String,
-    path: String,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
-}
-
-struct HttpResponse {
-    status: u16,
-    reason: &'static str,
-    content_type: &'static str,
-    headers: Vec<(&'static str, &'static str)>,
-    body: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct GatewayRouteTarget {
-    original_path: String,
-    route_path: String,
-    tool_id: Option<String>,
-    strict_tool: bool,
-}
-
-impl GatewayRouteTarget {
-    fn from_request(request: &HttpRequest) -> Self {
-        let original_path = request
-            .path
-            .split('?')
-            .next()
-            .unwrap_or(request.path.as_str())
-            .to_string();
-
-        if let Some(rest) = original_path.strip_prefix(TOOL_SCOPED_PREFIX) {
-            if let Some((raw_tool_id, route_path)) = rest.split_once('/') {
-                if let Some(tool_id) = normalize_gateway_tool_id(raw_tool_id) {
-                    let route_path = format!("/{route_path}");
-                    return Self {
-                        original_path,
-                        route_path,
-                        tool_id: Some(tool_id),
-                        strict_tool: true,
-                    };
-                }
-            }
-        }
-
-        if let Some(tool_id) = explicit_tool_from_headers(request) {
-            return Self {
-                route_path: original_path.clone(),
-                original_path,
-                tool_id: Some(tool_id),
-                strict_tool: true,
-            };
-        }
-
-        if let Some(tool_id) = inferred_tool_from_headers(request) {
-            return Self {
-                route_path: original_path.clone(),
-                original_path,
-                tool_id: Some(tool_id),
-                strict_tool: false,
-            };
-        }
-
-        Self {
-            route_path: original_path.clone(),
-            original_path,
-            tool_id: None,
-            strict_tool: false,
-        }
-    }
-}
-
-enum RouteResponse {
-    Buffered(HttpResponse),
-    Stream(StreamingResponse),
-}
-
-impl RouteResponse {
-    fn status(&self) -> u16 {
-        match self {
-            Self::Buffered(response) => response.status,
-            Self::Stream(response) => response.expected_status,
-        }
-    }
-}
-
-struct StreamingResponse {
-    expected_status: u16,
-    run: Box<dyn FnOnce(&mut TcpStream) -> Result<u16, String> + Send>,
-}
-
 struct RequestLogContext {
     client: String,
     method: String,
@@ -552,7 +408,7 @@ struct RequestLogContext {
 
 impl RequestLogContext {
     fn from_request(request: &HttpRequest, config: &GatewayConfig) -> Self {
-        let target = GatewayRouteTarget::from_request(request);
+        let target = GatewayRouteTarget::resolve(&request.path, &request.headers);
         let active = active_profile_for_target(&target);
         let request_body = if request.method == "POST"
             && matches!(
@@ -582,7 +438,7 @@ impl RequestLogContext {
             .unwrap_or((0, PrivacyFilterAction::None));
 
         Self {
-            client: detect_client(request, target.tool_id.as_deref()),
+            client: route::detect_client(&request.headers, target.tool_id.as_deref()),
             method: request.method.clone(),
             path: target.original_path,
             provider: active.map(|profile| profile.provider),
@@ -591,161 +447,6 @@ impl RequestLogContext {
             privacy_filter_hit_count,
             privacy_filter_action,
         }
-    }
-}
-
-fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0_u8; 4096];
-    let mut header_end = None;
-    let mut content_length = 0_usize;
-
-    loop {
-        let read = stream.read(&mut chunk).map_err(|err| err.to_string())?;
-        if read == 0 {
-            break;
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-
-        if buffer.len() > MAX_REQUEST_BYTES {
-            return Err("Request is too large".to_string());
-        }
-
-        if header_end.is_none() {
-            if let Some(index) = find_header_end(&buffer) {
-                header_end = Some(index + 4);
-                let headers = String::from_utf8_lossy(&buffer[..index]);
-                content_length = parse_content_length(&headers);
-            }
-        }
-
-        if let Some(end) = header_end {
-            if buffer.len() >= end + content_length {
-                break;
-            }
-        }
-    }
-
-    let header_end = header_end.ok_or_else(|| "Invalid HTTP request".to_string())?;
-    let header_text = String::from_utf8_lossy(&buffer[..header_end]);
-    let mut lines = header_text.lines();
-    let request_line = lines
-        .next()
-        .ok_or_else(|| "Missing HTTP request line".to_string())?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let path = parts.next().unwrap_or_default().to_string();
-    let mut headers = HashMap::new();
-
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
-    }
-
-    let end = header_end + content_length;
-    let body = buffer
-        .get(header_end..end.min(buffer.len()))
-        .unwrap_or_default()
-        .to_vec();
-
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-        body,
-    })
-}
-
-fn detect_client(request: &HttpRequest, tool_id: Option<&str>) -> String {
-    if let Some(tool_id) = tool_id {
-        return tool_label(tool_id).to_string();
-    }
-
-    let header_value = request
-        .headers
-        .get("x-codestudio-client")
-        .or_else(|| request.headers.get("user-agent"))
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    if header_value.contains("codex") {
-        "Codex".to_string()
-    } else if header_value.contains("opencode") {
-        "OpenCode".to_string()
-    } else if header_value.contains("openclaw") {
-        "OpenClaw".to_string()
-    } else if header_value.contains("curl") {
-        "curl".to_string()
-    } else if header_value.is_empty() {
-        "Unknown client".to_string()
-    } else {
-        header_value.chars().take(48).collect()
-    }
-}
-
-fn explicit_tool_from_headers(request: &HttpRequest) -> Option<String> {
-    request
-        .headers
-        .get("x-codestudio-tool")
-        .or_else(|| request.headers.get("x-codestudio-client-tool"))
-        .and_then(|value| normalize_gateway_tool_id(value))
-        .or_else(|| {
-            request
-                .headers
-                .get("x-codestudio-client")
-                .and_then(|value| normalize_gateway_tool_id(value))
-        })
-}
-
-fn inferred_tool_from_headers(request: &HttpRequest) -> Option<String> {
-    let header_value = request
-        .headers
-        .get("x-codestudio-client")
-        .or_else(|| request.headers.get("user-agent"))
-        .map(|value| value.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    if header_value.contains("chatgpt-desktop")
-        || header_value.contains("chatgpt desktop")
-        || header_value.contains("codex desktop")
-        || header_value.contains("codex client")
-    {
-        Some("codex".to_string())
-    } else if header_value.contains("codex") {
-        Some("codex".to_string())
-    } else if header_value.contains("claude desktop") {
-        Some("claude-desktop".to_string())
-    } else if header_value.contains("claude") {
-        Some("claude".to_string())
-    } else if header_value.contains("gemini-code-assist")
-        || header_value.contains("geminicodeassist")
-    {
-        Some("gemini-code-assist".to_string())
-    } else if header_value.contains("gemini") {
-        Some("gemini".to_string())
-    } else if header_value.contains("opencode") {
-        Some("opencode".to_string())
-    } else if header_value.contains("openclaw") {
-        Some("openclaw".to_string())
-    } else if header_value.contains("hermes") {
-        Some("hermes".to_string())
-    } else {
-        None
-    }
-}
-
-fn tool_label(tool_id: &str) -> &'static str {
-    match tool_id {
-        "codex" => "Codex",
-        "claude-desktop" => "Claude Desktop",
-        "claude" => "Claude Code",
-        "gemini" => "Gemini CLI",
-        "gemini-code-assist" => "Gemini Code Assist",
-        "opencode" => "OpenCode",
-        "openclaw" => "OpenClaw",
-        "hermes" => "Hermes",
-        _ => "Unknown client",
     }
 }
 
@@ -802,21 +503,8 @@ fn gateway_request_log_entry(
     }
 }
 
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn parse_content_length(headers: &str) -> usize {
-    headers
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-        .unwrap_or(0)
-}
-
 fn route_request(request: HttpRequest, config: &GatewayConfig) -> RouteResponse {
-    let target = GatewayRouteTarget::from_request(&request);
+    let target = GatewayRouteTarget::resolve(&request.path, &request.headers);
 
     if request.method == "OPTIONS" {
         return RouteResponse::Buffered(empty_response(204, "No Content"));
@@ -837,8 +525,12 @@ fn route_request(request: HttpRequest, config: &GatewayConfig) -> RouteResponse 
 
     if (target.route_path.starts_with("/v1/") || target.route_path.starts_with("/v1beta/"))
         && config.auth_enabled
-        && !authorized(&request, &config.token)
-        && !codex_scoped_request_can_skip_local_auth(&target, config)
+        && !auth::bearer_authorized(&request.headers, &config.token)
+        && !auth::scoped_request_can_skip_local_auth(
+            target.strict_tool,
+            target.tool_id.as_deref(),
+            &config.host,
+        )
     {
         return RouteResponse::Buffered(json_response(
             401,
@@ -890,32 +582,6 @@ fn route_request(request: HttpRequest, config: &GatewayConfig) -> RouteResponse 
             }),
         )),
     }
-}
-
-fn authorized(request: &HttpRequest, token: &str) -> bool {
-    request
-        .headers
-        .get("authorization")
-        .map(|value| value == &format!("Bearer {token}"))
-        .unwrap_or(false)
-}
-
-fn codex_scoped_request_can_skip_local_auth(
-    target: &GatewayRouteTarget,
-    config: &GatewayConfig,
-) -> bool {
-    target.strict_tool
-        && target.tool_id.as_deref() == Some("codex")
-        && gateway_host_is_loopback(&config.host)
-}
-
-fn gateway_host_is_loopback(host: &str) -> bool {
-    let host = host.trim().trim_matches(['[', ']']);
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .map(|address| address.is_loopback())
-            .unwrap_or(false)
 }
 
 fn models_response(target: &GatewayRouteTarget) -> HttpResponse {
@@ -1453,91 +1119,6 @@ fn forward_messages(
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GatewayProtocol {
-    OpenAiChatCompletions,
-    OpenAiResponses,
-    AnthropicMessages,
-    GoogleGemini,
-}
-
-impl GatewayProtocol {
-    fn from_profile_protocol(value: &str) -> Result<Self, String> {
-        match value {
-            PROTOCOL_OPENAI_CHAT_COMPLETIONS => Ok(Self::OpenAiChatCompletions),
-            PROTOCOL_OPENAI_RESPONSES => Ok(Self::OpenAiResponses),
-            PROTOCOL_ANTHROPIC_MESSAGES => Ok(Self::AnthropicMessages),
-            PROTOCOL_GOOGLE_GEMINI => Ok(Self::GoogleGemini),
-            _ => Err("Unsupported Provider API protocol.".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum GatewayContentPart {
-    Text(String),
-    ImageUrl(String),
-    ImageBase64 {
-        mime_type: String,
-        data: String,
-    },
-    ToolResult {
-        tool_call_id: Option<String>,
-        content: String,
-    },
-    Unknown(Value),
-}
-
-#[derive(Debug, Clone)]
-struct GatewayToolCall {
-    id: String,
-    name: String,
-    arguments: Value,
-}
-
-#[derive(Debug, Clone)]
-struct GatewayToolSpec {
-    name: String,
-    description: Option<String>,
-    schema: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
-struct GatewayMessage {
-    role: String,
-    content: Vec<GatewayContentPart>,
-    tool_call_id: Option<String>,
-    tool_calls: Vec<GatewayToolCall>,
-}
-
-#[derive(Debug, Clone)]
-struct GatewayRequestParts {
-    model: String,
-    system: Option<String>,
-    messages: Vec<GatewayMessage>,
-    tools: Vec<GatewayToolSpec>,
-    tool_choice: Option<Value>,
-    max_tokens: Option<u64>,
-    temperature: Option<Value>,
-    top_p: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
-struct GatewayAssistantResponse {
-    content: Vec<GatewayContentPart>,
-    tool_calls: Vec<GatewayToolCall>,
-    finish_reason: Option<String>,
-    usage: GatewayUsage,
-}
-
-#[derive(Debug)]
-struct ConvertedGatewayRequest {
-    endpoint: String,
-    headers: String,
-    body: Value,
-    model: String,
-}
-
 fn forward_gateway_request(
     client_protocol: GatewayProtocol,
     mut request_body: Value,
@@ -1700,143 +1281,19 @@ fn apply_gateway_privacy_filter(
     request_body: &mut Value,
     config: &GatewayConfig,
 ) -> Result<privacy_filter::PrivacyFilterReport, RouteResponse> {
-    if matches!(config.privacy_filter_mode, PrivacyFilterMode::Block) {
-        let latest_report = latest_gateway_privacy_filter_report(client_protocol, request_body);
-        if latest_report.hit_count > 0 {
-            return Err(RouteResponse::Buffered(json_response(
-                400,
-                "Bad Request",
-                json!({
-                    "error": {
-                        "message": "Request blocked by Local Gateway privacy filter.",
-                        "type": "privacy_filter_blocked",
-                        "hit_count": latest_report.hit_count
-                    }
-                }),
-            )));
-        }
-
-        return Ok(privacy_filter::filter_json_value(
-            request_body,
-            PrivacyFilterMode::Redact,
-        ));
-    }
-
-    let report = privacy_filter::filter_json_value(request_body, config.privacy_filter_mode);
-    Ok(report)
-}
-
-fn gateway_protocol_from_route_path(route_path: &str) -> Option<GatewayProtocol> {
-    match route_path {
-        "/v1/responses" => Some(GatewayProtocol::OpenAiResponses),
-        "/v1/chat/completions" => Some(GatewayProtocol::OpenAiChatCompletions),
-        "/v1/messages" => Some(GatewayProtocol::AnthropicMessages),
-        path if gemini_route_from_path(path).is_some() => Some(GatewayProtocol::GoogleGemini),
-        _ => None,
-    }
-}
-
-fn gateway_privacy_filter_metadata(
-    client_protocol: GatewayProtocol,
-    request_body: &Value,
-    mode: PrivacyFilterMode,
-) -> (usize, PrivacyFilterAction) {
-    if matches!(mode, PrivacyFilterMode::Off) {
-        return (0, PrivacyFilterAction::None);
-    }
-
-    if matches!(mode, PrivacyFilterMode::Block) {
-        let latest_report = latest_gateway_privacy_filter_report(client_protocol, request_body);
-        if latest_report.hit_count > 0 {
-            return (latest_report.hit_count, PrivacyFilterAction::Blocked);
-        }
-
-        let mut redacted_scope = request_body.clone();
-        let redacted_report =
-            privacy_filter::filter_json_value(&mut redacted_scope, PrivacyFilterMode::Redact);
-        if redacted_report.hit_count > 0 {
-            return (redacted_report.hit_count, PrivacyFilterAction::Redacted);
-        }
-        return (0, PrivacyFilterAction::None);
-    }
-
-    let mut value = request_body.clone();
-    let report = privacy_filter::filter_json_value(&mut value, mode);
-    (report.hit_count, report.action_for_mode(mode))
-}
-
-fn latest_gateway_privacy_filter_report(
-    client_protocol: GatewayProtocol,
-    request_body: &Value,
-) -> privacy_filter::PrivacyFilterReport {
-    let Some(mut scope) = latest_gateway_privacy_scope(client_protocol, request_body) else {
-        let mut value = request_body.clone();
-        return privacy_filter::filter_json_value(&mut value, PrivacyFilterMode::Detect);
-    };
-    privacy_filter::filter_json_value(&mut scope, PrivacyFilterMode::Detect)
-}
-
-fn latest_gateway_privacy_scope(
-    client_protocol: GatewayProtocol,
-    request_body: &Value,
-) -> Option<Value> {
-    match client_protocol {
-        GatewayProtocol::OpenAiResponses => latest_openai_responses_privacy_scope(request_body),
-        GatewayProtocol::OpenAiChatCompletions | GatewayProtocol::AnthropicMessages => request_body
-            .get("messages")
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items
-                    .iter()
-                    .rev()
-                    .find(|item| gateway_item_has_filterable_text(item))
-            })
-            .cloned()
-            .map(|item| json!({ "messages": [item] })),
-        GatewayProtocol::GoogleGemini => request_body
-            .get("contents")
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items
-                    .iter()
-                    .rev()
-                    .find(|item| gateway_item_has_filterable_text(item))
-            })
-            .cloned()
-            .map(|item| json!({ "contents": [item] })),
-    }
-}
-
-fn latest_openai_responses_privacy_scope(request_body: &Value) -> Option<Value> {
-    match request_body.get("input") {
-        Some(Value::String(input)) => Some(json!({ "input": input })),
-        Some(Value::Array(items)) => items
-            .iter()
-            .rev()
-            .find(|item| gateway_item_has_filterable_text(item))
-            .cloned()
-            .map(|item| json!({ "input": [item] })),
-        Some(value) => Some(json!({ "input": value })),
-        None => None,
-    }
-}
-
-fn gateway_item_has_filterable_text(value: &Value) -> bool {
-    match value {
-        Value::String(text) => !text.trim().is_empty(),
-        Value::Array(items) => items.iter().any(gateway_item_has_filterable_text),
-        Value::Object(map) => map.iter().any(|(key, child)| {
-            if key.eq_ignore_ascii_case("role")
-                || key.eq_ignore_ascii_case("type")
-                || key.eq_ignore_ascii_case("id")
-                || key.eq_ignore_ascii_case("name")
-            {
-                return false;
-            }
-            gateway_item_has_filterable_text(child)
-        }),
-        _ => false,
-    }
+    privacy::apply(client_protocol, request_body, config.privacy_filter_mode).map_err(|hit_count| {
+        RouteResponse::Buffered(json_response(
+            400,
+            "Bad Request",
+            json!({
+                "error": {
+                    "message": "Request blocked by Local Gateway privacy filter.",
+                    "type": "privacy_filter_blocked",
+                    "hit_count": hit_count
+                }
+            }),
+        ))
+    })
 }
 
 fn unsupported_protocol_response(message: String) -> RouteResponse {
@@ -1972,404 +1429,6 @@ fn request_parts_from_client(
     }
 }
 
-fn chat_request_parts(request_body: &Value, model: &str) -> GatewayRequestParts {
-    let mut system = None;
-    let mut messages = Vec::new();
-
-    for item in request_body
-        .get("messages")
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-    {
-        let role = item
-            .get("role")
-            .and_then(|value| value.as_str())
-            .unwrap_or("user");
-        if role == "system" {
-            let content = text_from_value(item.get("content").unwrap_or(&Value::Null));
-            if !content.is_empty() {
-                append_system(&mut system, content);
-            }
-        } else {
-            let mut message = GatewayMessage {
-                role: normalize_message_role(role),
-                content: content_parts_from_value(item.get("content").unwrap_or(&Value::Null)),
-                tool_call_id: item
-                    .get("tool_call_id")
-                    .or_else(|| item.get("call_id"))
-                    .or_else(|| item.get("name"))
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string),
-                tool_calls: openai_tool_calls_from_value(
-                    item.get("tool_calls").unwrap_or(&Value::Null),
-                ),
-            };
-            if message.role == "tool" {
-                let content = content_text(&message.content);
-                message.content = vec![GatewayContentPart::ToolResult {
-                    tool_call_id: message.tool_call_id.clone(),
-                    content,
-                }];
-            }
-            push_message_if_useful(&mut messages, message);
-        }
-    }
-
-    GatewayRequestParts {
-        model: model.to_string(),
-        system,
-        messages,
-        tools: openai_tool_specs_from_value(request_body.get("tools").unwrap_or(&Value::Null))
-            .into_iter()
-            .chain(openai_legacy_function_specs(
-                request_body.get("functions").unwrap_or(&Value::Null),
-            ))
-            .collect(),
-        tool_choice: request_body
-            .get("tool_choice")
-            .or_else(|| request_body.get("function_call"))
-            .cloned(),
-        max_tokens: numeric_field(request_body, &["max_completion_tokens", "max_tokens"]),
-        temperature: request_body.get("temperature").cloned(),
-        top_p: request_body.get("top_p").cloned(),
-    }
-}
-
-fn responses_request_parts(request_body: &Value, model: &str) -> GatewayRequestParts {
-    let mut system = request_body
-        .get("instructions")
-        .map(text_from_value)
-        .filter(|value| !value.is_empty());
-    let mut messages = Vec::new();
-
-    match request_body.get("input") {
-        Some(Value::String(input)) if !input.trim().is_empty() => messages.push(GatewayMessage {
-            role: "user".to_string(),
-            content: vec![GatewayContentPart::Text(input.trim().to_string())],
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        }),
-        Some(Value::Array(items)) => {
-            for item in items {
-                let item_type = item
-                    .get("type")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                if item_type == "function_call" {
-                    let tool_call = responses_function_call_from_value(item);
-                    push_message_if_useful(
-                        &mut messages,
-                        GatewayMessage {
-                            role: "assistant".to_string(),
-                            content: Vec::new(),
-                            tool_call_id: None,
-                            tool_calls: tool_call.into_iter().collect(),
-                        },
-                    );
-                    continue;
-                }
-                if item_type == "function_call_output" {
-                    let call_id = item
-                        .get("call_id")
-                        .or_else(|| item.get("id"))
-                        .and_then(|value| value.as_str())
-                        .map(ToString::to_string);
-                    let content = text_from_value(
-                        item.get("output")
-                            .or_else(|| item.get("content"))
-                            .unwrap_or(&Value::Null),
-                    );
-                    push_message_if_useful(
-                        &mut messages,
-                        GatewayMessage {
-                            role: "tool".to_string(),
-                            content: vec![GatewayContentPart::ToolResult {
-                                tool_call_id: call_id.clone(),
-                                content,
-                            }],
-                            tool_call_id: call_id,
-                            tool_calls: Vec::new(),
-                        },
-                    );
-                    continue;
-                }
-
-                let role = item
-                    .get("role")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("user");
-                if role == "system" {
-                    let content = text_from_value(
-                        item.get("content")
-                            .or_else(|| item.get("text"))
-                            .unwrap_or(&Value::Null),
-                    );
-                    append_system(&mut system, content);
-                } else {
-                    push_message_if_useful(
-                        &mut messages,
-                        GatewayMessage {
-                            role: normalize_message_role(role),
-                            content: content_parts_from_value(
-                                item.get("content")
-                                    .or_else(|| item.get("text"))
-                                    .unwrap_or(&Value::Null),
-                            ),
-                            tool_call_id: None,
-                            tool_calls: Vec::new(),
-                        },
-                    );
-                }
-            }
-        }
-        Some(value) => {
-            let content = text_from_value(value);
-            if !content.is_empty() {
-                messages.push(GatewayMessage {
-                    role: "user".to_string(),
-                    content: vec![GatewayContentPart::Text(content)],
-                    tool_call_id: None,
-                    tool_calls: Vec::new(),
-                });
-            }
-        }
-        None => {}
-    }
-
-    GatewayRequestParts {
-        model: model.to_string(),
-        system,
-        messages,
-        tools: responses_tool_specs_from_value(request_body.get("tools").unwrap_or(&Value::Null)),
-        tool_choice: request_body.get("tool_choice").cloned(),
-        max_tokens: numeric_field(request_body, &["max_output_tokens", "max_tokens"]),
-        temperature: request_body.get("temperature").cloned(),
-        top_p: request_body.get("top_p").cloned(),
-    }
-}
-
-fn anthropic_request_parts(request_body: &Value, model: &str) -> GatewayRequestParts {
-    let mut messages = Vec::new();
-    for item in request_body
-        .get("messages")
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-    {
-        let role = item
-            .get("role")
-            .and_then(|value| value.as_str())
-            .unwrap_or("user");
-        let (content, tool_calls) =
-            anthropic_content_and_tool_calls(item.get("content").unwrap_or(&Value::Null));
-        push_message_if_useful(
-            &mut messages,
-            GatewayMessage {
-                role: normalize_message_role(role),
-                content,
-                tool_call_id: None,
-                tool_calls,
-            },
-        );
-    }
-
-    GatewayRequestParts {
-        model: model.to_string(),
-        system: request_body
-            .get("system")
-            .map(text_from_value)
-            .filter(|value| !value.is_empty()),
-        messages,
-        tools: anthropic_tool_specs_from_value(request_body.get("tools").unwrap_or(&Value::Null)),
-        tool_choice: request_body.get("tool_choice").cloned(),
-        max_tokens: numeric_field(request_body, &["max_tokens"]),
-        temperature: request_body.get("temperature").cloned(),
-        top_p: request_body.get("top_p").cloned(),
-    }
-}
-
-fn gemini_request_parts(request_body: &Value, model: &str) -> GatewayRequestParts {
-    let mut messages = Vec::new();
-    for item in request_body
-        .get("contents")
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-    {
-        let role = item
-            .get("role")
-            .and_then(|value| value.as_str())
-            .unwrap_or("user");
-        let (content, tool_calls) =
-            gemini_parts_and_tool_calls(item.get("parts").unwrap_or(&Value::Null));
-        push_message_if_useful(
-            &mut messages,
-            GatewayMessage {
-                role: if role == "model" {
-                    "assistant".to_string()
-                } else {
-                    "user".to_string()
-                },
-                content,
-                tool_call_id: None,
-                tool_calls,
-            },
-        );
-    }
-
-    let generation_config = request_body.get("generationConfig").unwrap_or(&Value::Null);
-    GatewayRequestParts {
-        model: model.to_string(),
-        system: request_body
-            .get("systemInstruction")
-            .map(text_from_value)
-            .filter(|value| !value.is_empty()),
-        messages,
-        tools: gemini_tool_specs_from_value(request_body.get("tools").unwrap_or(&Value::Null)),
-        tool_choice: request_body.get("toolConfig").cloned(),
-        max_tokens: numeric_field(generation_config, &["maxOutputTokens"]),
-        temperature: generation_config.get("temperature").cloned(),
-        top_p: generation_config.get("topP").cloned(),
-    }
-}
-
-fn request_body_for_protocol(
-    protocol: GatewayProtocol,
-    parts: &GatewayRequestParts,
-    stream: bool,
-) -> Value {
-    match protocol {
-        GatewayProtocol::OpenAiChatCompletions => {
-            let mut messages = Vec::new();
-            if let Some(system) = parts.system.as_deref() {
-                messages.push(json!({ "role": "system", "content": system }));
-            }
-            for message in &parts.messages {
-                messages.push(openai_chat_message_value(message));
-            }
-            if messages.is_empty() {
-                messages.push(json!({ "role": "user", "content": "" }));
-            }
-            let mut body = json!({
-                "model": parts.model,
-                "messages": messages,
-            });
-            if stream {
-                body["stream"] = Value::Bool(true);
-            }
-            set_optional_u64(&mut body, "max_tokens", parts.max_tokens);
-            set_optional_value(&mut body, "temperature", parts.temperature.clone());
-            set_optional_value(&mut body, "top_p", parts.top_p.clone());
-            set_tools_for_protocol(&mut body, GatewayProtocol::OpenAiChatCompletions, parts);
-            body
-        }
-        GatewayProtocol::OpenAiResponses => {
-            let input: Vec<Value> = if parts.messages.is_empty() {
-                vec![json!({
-                    "role": "user",
-                    "content": [{ "type": "input_text", "text": "" }]
-                })]
-            } else {
-                parts
-                    .messages
-                    .iter()
-                    .flat_map(responses_input_items_for_message)
-                    .collect()
-            };
-            let mut body = json!({
-                "model": parts.model,
-                "input": input,
-            });
-            if stream {
-                body["stream"] = Value::Bool(true);
-            }
-            if let Some(system) = parts.system.as_deref() {
-                body["instructions"] = Value::String(system.to_string());
-            }
-            set_optional_u64(&mut body, "max_output_tokens", parts.max_tokens);
-            set_optional_value(&mut body, "temperature", parts.temperature.clone());
-            set_optional_value(&mut body, "top_p", parts.top_p.clone());
-            set_tools_for_protocol(&mut body, GatewayProtocol::OpenAiResponses, parts);
-            body
-        }
-        GatewayProtocol::AnthropicMessages => {
-            let messages: Vec<Value> = if parts.messages.is_empty() {
-                vec![json!({ "role": "user", "content": "" })]
-            } else {
-                parts
-                    .messages
-                    .iter()
-                    .map(|message| {
-                        json!({
-                            "role": if message.role == "assistant" { "assistant" } else { "user" },
-                            "content": anthropic_content_value(message),
-                        })
-                    })
-                    .collect()
-            };
-            let mut body = json!({
-                "model": parts.model,
-                "messages": messages,
-                "max_tokens": parts.max_tokens.unwrap_or(4096),
-            });
-            if stream {
-                body["stream"] = Value::Bool(true);
-            }
-            if let Some(system) = parts.system.as_deref() {
-                body["system"] = Value::String(system.to_string());
-            }
-            set_optional_value(&mut body, "temperature", parts.temperature.clone());
-            set_optional_value(&mut body, "top_p", parts.top_p.clone());
-            set_tools_for_protocol(&mut body, GatewayProtocol::AnthropicMessages, parts);
-            body
-        }
-        GatewayProtocol::GoogleGemini => {
-            let contents: Vec<Value> = if parts.messages.is_empty() {
-                vec![json!({
-                    "role": "user",
-                    "parts": [{ "text": "" }]
-                })]
-            } else {
-                parts
-                    .messages
-                    .iter()
-                    .map(|message| {
-                        json!({
-                            "role": if message.role == "assistant" { "model" } else { "user" },
-                            "parts": gemini_parts_value(message),
-                        })
-                    })
-                    .collect()
-            };
-            let mut generation_config = json!({});
-            set_optional_u64(&mut generation_config, "maxOutputTokens", parts.max_tokens);
-            set_optional_value(
-                &mut generation_config,
-                "temperature",
-                parts.temperature.clone(),
-            );
-            set_optional_value(&mut generation_config, "topP", parts.top_p.clone());
-
-            let mut body = json!({ "contents": contents });
-            if generation_config
-                .as_object()
-                .map(|object| !object.is_empty())
-                .unwrap_or(false)
-            {
-                body["generationConfig"] = generation_config;
-            }
-            if let Some(system) = parts.system.as_deref() {
-                body["systemInstruction"] = json!({
-                    "parts": [{ "text": system }]
-                });
-            }
-            set_tools_for_protocol(&mut body, GatewayProtocol::GoogleGemini, parts);
-            body
-        }
-    }
-}
-
 fn convert_gateway_response(
     upstream_protocol: GatewayProtocol,
     client_protocol: GatewayProtocol,
@@ -2385,238 +1444,6 @@ fn convert_gateway_response(
         model,
         &response,
     ))
-}
-
-#[derive(Debug, Clone, Default)]
-struct GatewayUsage {
-    input_tokens: u64,
-    output_tokens: u64,
-    total_tokens: u64,
-    cached_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    reasoning_tokens: Option<u64>,
-    audio_input_tokens: Option<u64>,
-    audio_output_tokens: Option<u64>,
-    image_input_tokens: Option<u64>,
-    image_output_tokens: Option<u64>,
-    raw_prompt_details: Option<Value>,
-    raw_completion_details: Option<Value>,
-}
-
-fn response_body_for_protocol(
-    protocol: GatewayProtocol,
-    model: &str,
-    response: &GatewayAssistantResponse,
-) -> Value {
-    let text = content_text(&response.content);
-    let finish_reason = response
-        .finish_reason
-        .as_deref()
-        .filter(|reason| !reason.is_empty())
-        .unwrap_or(if response.tool_calls.is_empty() {
-            "stop"
-        } else {
-            "tool_calls"
-        });
-    match protocol {
-        GatewayProtocol::OpenAiChatCompletions => {
-            let mut message = Map::new();
-            message.insert("role".to_string(), Value::String("assistant".to_string()));
-            message.insert(
-                "content".to_string(),
-                openai_chat_content_value(&response.content),
-            );
-            if !response.tool_calls.is_empty() {
-                message.insert(
-                    "tool_calls".to_string(),
-                    Value::Array(
-                        response
-                            .tool_calls
-                            .iter()
-                            .map(openai_tool_call_value)
-                            .collect(),
-                    ),
-                );
-            }
-            json!({
-                "id": format!("chatcmpl-codestudio-{}", Uuid::new_v4().simple()),
-                "object": "chat.completion",
-                "created": unix_timestamp(),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "message": Value::Object(message),
-                    "finish_reason": if response.tool_calls.is_empty() { finish_reason } else { "tool_calls" }
-                }],
-                "usage": usage_value_for_protocol(GatewayProtocol::OpenAiChatCompletions, &response.usage)
-            })
-        }
-        GatewayProtocol::OpenAiResponses => {
-            let mut output = Vec::new();
-            if !response.content.is_empty() || response.tool_calls.is_empty() {
-                output.push(json!({
-                    "id": format!("msg-codestudio-{}", Uuid::new_v4().simple()),
-                    "type": "message",
-                    "status": "completed",
-                    "role": "assistant",
-                    "content": responses_output_content_parts(&response.content)
-                }));
-            }
-            for tool_call in &response.tool_calls {
-                output.push(json!({
-                    "id": tool_call.id,
-                    "type": "function_call",
-                    "status": "completed",
-                    "call_id": tool_call.id,
-                    "name": tool_call.name,
-                    "arguments": arguments_as_string(&tool_call.arguments)
-                }));
-            }
-            json!({
-                "id": format!("resp-codestudio-{}", Uuid::new_v4().simple()),
-                "object": "response",
-                "created_at": unix_timestamp(),
-                "status": "completed",
-                "model": model,
-                "output": output,
-                "output_text": text,
-                "usage": usage_value_for_protocol(GatewayProtocol::OpenAiResponses, &response.usage)
-            })
-        }
-        GatewayProtocol::AnthropicMessages => {
-            let content = anthropic_assistant_content_blocks(response);
-            json!({
-                "id": format!("msg_codestudio_{}", Uuid::new_v4().simple()),
-                "type": "message",
-                "role": "assistant",
-                "model": model,
-                "content": content,
-                "stop_reason": if response.tool_calls.is_empty() { "end_turn" } else { "tool_use" },
-                "usage": usage_value_for_protocol(GatewayProtocol::AnthropicMessages, &response.usage)
-            })
-        }
-        GatewayProtocol::GoogleGemini => json!({
-            "candidates": [{
-                "content": {
-                    "role": "model",
-                    "parts": gemini_assistant_parts(response)
-                },
-                "finishReason": if response.tool_calls.is_empty() { "STOP" } else { "TOOL_CALL" },
-                "index": 0
-            }],
-            "usageMetadata": usage_value_for_protocol(GatewayProtocol::GoogleGemini, &response.usage),
-            "modelVersion": model
-        }),
-    }
-}
-
-fn assistant_response_from_protocol(
-    protocol: GatewayProtocol,
-    value: &Value,
-) -> GatewayAssistantResponse {
-    let usage = usage_from_response(protocol, value);
-    match protocol {
-        GatewayProtocol::OpenAiChatCompletions => {
-            let choice = value
-                .get("choices")
-                .and_then(|choices| choices.as_array())
-                .and_then(|choices| choices.first())
-                .unwrap_or(&Value::Null);
-            let message = choice
-                .get("message")
-                .or_else(|| choice.get("delta"))
-                .unwrap_or(&Value::Null);
-            GatewayAssistantResponse {
-                content: content_parts_from_value(message.get("content").unwrap_or(&Value::Null)),
-                tool_calls: openai_tool_calls_from_value(
-                    message.get("tool_calls").unwrap_or(&Value::Null),
-                ),
-                finish_reason: choice
-                    .get("finish_reason")
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string),
-                usage,
-            }
-        }
-        GatewayProtocol::OpenAiResponses => {
-            let mut content = Vec::new();
-            let mut tool_calls = Vec::new();
-            for item in value
-                .get("output")
-                .and_then(|output| output.as_array())
-                .into_iter()
-                .flatten()
-            {
-                match item
-                    .get("type")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                {
-                    "message" => {
-                        content.extend(content_parts_from_value(
-                            item.get("content").unwrap_or(&Value::Null),
-                        ));
-                    }
-                    "function_call" => {
-                        if let Some(tool_call) = responses_function_call_from_value(item) {
-                            tool_calls.push(tool_call);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if content.is_empty() {
-                content.extend(content_parts_from_value(
-                    value.get("output_text").unwrap_or(&Value::Null),
-                ));
-            }
-            GatewayAssistantResponse {
-                content,
-                tool_calls,
-                finish_reason: value
-                    .get("status")
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string),
-                usage,
-            }
-        }
-        GatewayProtocol::AnthropicMessages => {
-            let (content, tool_calls) =
-                anthropic_content_and_tool_calls(value.get("content").unwrap_or(&Value::Null));
-            GatewayAssistantResponse {
-                content,
-                tool_calls,
-                finish_reason: value
-                    .get("stop_reason")
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string),
-                usage,
-            }
-        }
-        GatewayProtocol::GoogleGemini => {
-            let candidate = value
-                .get("candidates")
-                .and_then(|candidates| candidates.as_array())
-                .and_then(|candidates| candidates.first())
-                .unwrap_or(&Value::Null);
-            let (content, tool_calls) = gemini_parts_and_tool_calls(
-                candidate
-                    .get("content")
-                    .and_then(|content| content.get("parts"))
-                    .unwrap_or(&Value::Null),
-            );
-            GatewayAssistantResponse {
-                content,
-                tool_calls,
-                finish_reason: candidate
-                    .get("finishReason")
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string),
-                usage,
-            }
-        }
-    }
 }
 
 fn assistant_text_from_response(protocol: GatewayProtocol, value: &Value) -> String {
@@ -3853,277 +2680,6 @@ fn modality_tokens(value: Option<&Value>, modality: &str) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
-fn upstream_endpoint(
-    protocol: GatewayProtocol,
-    profile: &ProfileDraft,
-    model: &str,
-    stream: bool,
-) -> String {
-    match protocol {
-        GatewayProtocol::OpenAiChatCompletions => {
-            upstream_api_endpoint(&profile.base_url, "/v1/chat/completions")
-        }
-        GatewayProtocol::OpenAiResponses => {
-            upstream_api_endpoint(&profile.base_url, "/v1/responses")
-        }
-        GatewayProtocol::AnthropicMessages => upstream_api_endpoint(&profile.base_url, "/messages"),
-        GatewayProtocol::GoogleGemini => {
-            let runtime_base_url = profile::profile_runtime_base_url_for_protocol(
-                PROTOCOL_GOOGLE_GEMINI,
-                &profile.base_url,
-            );
-            let base_url = runtime_base_url.trim_end_matches('/');
-            let model = normalize_gemini_model_name(model);
-            if stream {
-                format!("{base_url}/models/{model}:streamGenerateContent?alt=sse")
-            } else {
-                format!("{base_url}/models/{model}:generateContent")
-            }
-        }
-    }
-}
-
-fn upstream_api_endpoint(base_url: &str, path: &str) -> String {
-    let trimmed_base = base_url.trim_end_matches('/');
-    let clean_path = format!("/{}", path.trim().trim_start_matches('/'));
-    let fallback = || format!("{trimmed_base}{clean_path}");
-    let Ok(mut parsed) = Url::parse(trimmed_base) else {
-        return fallback();
-    };
-    if parsed.scheme().is_empty() || parsed.host_str().is_none() {
-        return fallback();
-    }
-
-    let base_path = parsed.path().trim_end_matches('/').to_string();
-    let endpoint_path = upstream_endpoint_path_without_v1(&clean_path);
-    let clean_suffix = clean_path.trim_end_matches('/');
-    if base_path.ends_with(clean_suffix) {
-        parsed.set_path(&base_path);
-    } else if endpoint_path
-        .as_deref()
-        .is_some_and(|endpoint| base_path.ends_with(endpoint.trim_end_matches('/')))
-    {
-        parsed.set_path(&base_path);
-    } else if let Some(endpoint) = endpoint_path
-        .as_deref()
-        .filter(|_| upstream_base_path_has_version_segment(&base_path))
-    {
-        parsed.set_path(&format!("{base_path}{endpoint}"));
-    } else {
-        parsed.set_path(&format!("{base_path}{clean_path}"));
-    }
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-    parsed.to_string()
-}
-
-fn upstream_endpoint_path_without_v1(path: &str) -> Option<String> {
-    let clean_path = format!("/{}", path.trim().trim_start_matches('/'));
-    clean_path
-        .strip_prefix("/v1/")
-        .map(|path| format!("/{path}"))
-}
-
-fn upstream_base_path_has_version_segment(base_path: &str) -> bool {
-    base_path
-        .trim_matches('/')
-        .split('/')
-        .any(upstream_path_segment_is_version)
-}
-
-fn upstream_path_segment_is_version(segment: &str) -> bool {
-    let segment = segment.trim();
-    let mut chars = segment.chars();
-    if !matches!(chars.next(), Some('v' | 'V')) {
-        return false;
-    }
-
-    let mut has_digit = false;
-    for ch in chars {
-        if ch.is_ascii_digit() {
-            has_digit = true;
-            continue;
-        }
-        if !has_digit || !(ch.is_ascii_alphabetic() || matches!(ch, '-' | '_' | '.')) {
-            return false;
-        }
-    }
-    has_digit
-}
-
-fn upstream_headers(protocol: GatewayProtocol, api_key: &str) -> String {
-    match protocol {
-        GatewayProtocol::AnthropicMessages => upstream_http::anthropic_json_headers(api_key),
-        GatewayProtocol::GoogleGemini => upstream_http::gemini_json_headers(api_key),
-        GatewayProtocol::OpenAiChatCompletions | GatewayProtocol::OpenAiResponses => {
-            upstream_http::bearer_json_headers(api_key)
-        }
-    }
-}
-
-fn upstream_headers_with_passthrough(
-    protocol: GatewayProtocol,
-    api_key: &str,
-    request_headers: &HashMap<String, String>,
-) -> String {
-    let mut headers = upstream_headers(protocol, api_key);
-    let mut generated = generated_header_names(&headers);
-    let mut passthrough_headers = safe_passthrough_headers(request_headers)
-        .into_iter()
-        .filter(|(name, _)| !generated.contains(*name))
-        .collect::<Vec<_>>();
-    passthrough_headers.sort_by(|left, right| left.0.cmp(right.0));
-
-    for (name, value) in passthrough_headers {
-        generated.insert(name.to_string());
-        headers.push_str(canonical_passthrough_header_name(name));
-        headers.push_str(": ");
-        headers.push_str(value);
-        headers.push_str("\r\n");
-    }
-
-    headers
-}
-
-fn generated_header_names(headers: &str) -> HashSet<String> {
-    headers
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, _)| name.trim())
-        .filter(|name| !name.is_empty())
-        .map(|name| name.to_ascii_lowercase())
-        .collect()
-}
-
-fn safe_passthrough_headers(headers: &HashMap<String, String>) -> Vec<(&str, &str)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            let name = name.trim();
-            let value = value.trim();
-            if value.is_empty() || !is_safe_passthrough_header(name, value) {
-                return None;
-            }
-            Some((name, value))
-        })
-        .collect()
-}
-
-fn is_safe_passthrough_header(name: &str, value: &str) -> bool {
-    if !is_valid_header_name(name) || !is_safe_header_value(value) {
-        return false;
-    }
-    if is_forbidden_passthrough_header(name) {
-        return false;
-    }
-    name.starts_with("x-")
-        || name.starts_with("anthropic-")
-        || name.starts_with("openai-")
-        || name.starts_with("cf-")
-        || name.starts_with("helicone-")
-        || name == "http-referer"
-        || name == "referer"
-        || name == "user-agent"
-}
-
-fn is_forbidden_passthrough_header(name: &str) -> bool {
-    matches!(
-        name,
-        "accept"
-            | "accept-encoding"
-            | "authorization"
-            | "connection"
-            | "content-length"
-            | "content-type"
-            | "cookie"
-            | "expect"
-            | "host"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "x-api-key"
-            | "x-codestudio-client"
-            | "x-codestudio-client-tool"
-            | "x-codestudio-tool"
-            | "x-goog-api-key"
-            | "anthropic-version"
-    )
-}
-
-fn is_valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'!' | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-                    | b'0'..=b'9'
-                    | b'a'..=b'z'
-            )
-        })
-}
-
-fn is_safe_header_value(value: &str) -> bool {
-    !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
-}
-
-fn canonical_passthrough_header_name(name: &str) -> &str {
-    match name {
-        "http-referer" => "HTTP-Referer",
-        "referer" => "Referer",
-        "user-agent" => "User-Agent",
-        "x-title" => "X-Title",
-        "x-stainless-lang" => "X-Stainless-Lang",
-        "x-stainless-package-version" => "X-Stainless-Package-Version",
-        "x-stainless-os" => "X-Stainless-OS",
-        "x-stainless-arch" => "X-Stainless-Arch",
-        "x-stainless-runtime" => "X-Stainless-Runtime",
-        "x-stainless-runtime-version" => "X-Stainless-Runtime-Version",
-        "x-codestudio-client" => "X-CodeStudio-Client",
-        "x-codestudio-tool" => "X-CodeStudio-Tool",
-        "x-codestudio-client-tool" => "X-CodeStudio-Client-Tool",
-        "anthropic-beta" => "anthropic-beta",
-        "openai-beta" => "OpenAI-Beta",
-        "cf-ray" => "CF-Ray",
-        _ => name,
-    }
-}
-
-fn normalize_gemini_model_name(model: &str) -> String {
-    model
-        .trim()
-        .trim_start_matches("models/")
-        .trim_start_matches('/')
-        .to_string()
-}
-
-fn gemini_route_from_path(route_path: &str) -> Option<(String, bool)> {
-    let rest = route_path
-        .strip_prefix("/v1beta/models/")
-        .or_else(|| route_path.strip_prefix("/v1/models/"))?;
-    if let Some(model) = rest.strip_suffix(":generateContent") {
-        return (!model.trim().is_empty()).then(|| (model.to_string(), false));
-    }
-    let model = rest.strip_suffix(":streamGenerateContent")?;
-    (!model.trim().is_empty()).then(|| (model.to_string(), true))
-}
-
 fn text_from_value(value: &Value) -> String {
     match value {
         Value::String(text) => text.trim().to_string(),
@@ -4314,15 +2870,25 @@ fn stream_converted_gateway_response(
                 if meta.status >= 400 {
                     raw_passthrough = true;
                     client_response_started = true;
-                    return write_stream_headers(client_stream, meta.status, meta.content_type);
+                    return write_stream_headers(
+                        client_stream,
+                        meta.status,
+                        reason_for_status(meta.status),
+                        meta.content_type,
+                    );
                 }
                 if meta.content_type != "text/event-stream" {
                     buffered_non_sse = true;
                     return Ok(());
                 }
                 client_response_started = true;
-                write_stream_headers(client_stream, meta.status, "text/event-stream")?;
-                write_client_stream_start(client_stream, &stream_state)
+                write_stream_headers(
+                    client_stream,
+                    meta.status,
+                    reason_for_status(meta.status),
+                    "text/event-stream",
+                )?;
+                write_protocol_stream_start(client_stream, &stream_state)
             }
             upstream_http::UpstreamStreamEvent::Chunk(chunk) => {
                 if raw_passthrough {
@@ -4374,15 +2940,20 @@ fn stream_converted_gateway_response(
         };
         let response = assistant_response_from_protocol(upstream_protocol, &value);
         let text = content_text(&response.content);
-        write_stream_headers(client_stream, status, "text/event-stream")?;
-        write_client_stream_start(client_stream, &stream_state)?;
+        write_stream_headers(
+            client_stream,
+            status,
+            reason_for_status(status),
+            "text/event-stream",
+        )?;
+        write_protocol_stream_start(client_stream, &stream_state)?;
         if !text.is_empty() {
-            write_client_stream_delta(client_stream, &stream_state, &text)?;
+            write_protocol_stream_delta(client_stream, &stream_state, &text)?;
         }
         for (index, tool_call) in response.tool_calls.iter().enumerate() {
-            write_client_stream_tool_call(client_stream, &stream_state, tool_call, index)?;
+            write_protocol_stream_tool_call(client_stream, &stream_state, tool_call, index)?;
         }
-        write_client_stream_done(
+        write_protocol_stream_done(
             client_stream,
             &stream_state,
             &text,
@@ -4403,7 +2974,7 @@ fn stream_converted_gateway_response(
             &mut stream_usage,
         )?;
     }
-    write_client_stream_done(
+    write_protocol_stream_done(
         client_stream,
         &stream_state,
         &full_text,
@@ -4434,880 +3005,19 @@ fn write_converted_stream_frame(
     }
     if !update.text_delta.is_empty() {
         full_text.push_str(&update.text_delta);
-        write_client_stream_delta(client_stream, stream_state, &update.text_delta)?;
+        write_protocol_stream_delta(client_stream, stream_state, &update.text_delta)?;
     }
     for tool_call in update.tool_calls {
         let index = full_tool_calls.len();
-        write_client_stream_tool_call(client_stream, stream_state, &tool_call, index)?;
+        write_protocol_stream_tool_call(client_stream, stream_state, &tool_call, index)?;
         full_tool_calls.push(tool_call);
     }
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct ClientStreamState {
-    protocol: GatewayProtocol,
-    id: String,
-    item_id: String,
-    model: String,
-    created: u64,
-}
-
-impl ClientStreamState {
-    fn new(protocol: GatewayProtocol, model: &str) -> Self {
-        Self {
-            protocol,
-            id: format!("stream_codestudio_{}", Uuid::new_v4().simple()),
-            item_id: format!("item_codestudio_{}", Uuid::new_v4().simple()),
-            model: model.to_string(),
-            created: unix_timestamp(),
-        }
-    }
-}
-
-fn write_client_stream_start(
-    stream: &mut TcpStream,
-    state: &ClientStreamState,
-) -> Result<(), String> {
-    match state.protocol {
-        GatewayProtocol::OpenAiChatCompletions | GatewayProtocol::GoogleGemini => Ok(()),
-        GatewayProtocol::OpenAiResponses => {
-            write_sse_json(
-                stream,
-                Some("response.created"),
-                &json!({
-                    "type": "response.created",
-                    "response": {
-                        "id": state.id,
-                        "object": "response",
-                        "created_at": state.created,
-                        "status": "in_progress",
-                        "model": state.model,
-                        "output": []
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("response.output_item.added"),
-                &json!({
-                    "type": "response.output_item.added",
-                    "output_index": 0,
-                    "item": {
-                        "id": state.item_id,
-                        "type": "message",
-                        "status": "in_progress",
-                        "role": "assistant",
-                        "content": []
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("response.content_part.added"),
-                &json!({
-                    "type": "response.content_part.added",
-                    "item_id": state.item_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "part": {
-                        "type": "output_text",
-                        "text": ""
-                    }
-                }),
-            )
-        }
-        GatewayProtocol::AnthropicMessages => {
-            write_sse_json(
-                stream,
-                Some("message_start"),
-                &json!({
-                    "type": "message_start",
-                    "message": {
-                        "id": state.id,
-                        "type": "message",
-                        "role": "assistant",
-                        "model": state.model,
-                        "content": [],
-                        "stop_reason": null,
-                        "stop_sequence": null,
-                        "usage": {
-                            "input_tokens": 0,
-                            "output_tokens": 0
-                        }
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("content_block_start"),
-                &json!({
-                    "type": "content_block_start",
-                    "index": 0,
-                    "content_block": {
-                        "type": "text",
-                        "text": ""
-                    }
-                }),
-            )
-        }
-    }
-}
-
-fn write_client_stream_delta(
-    stream: &mut TcpStream,
-    state: &ClientStreamState,
-    delta: &str,
-) -> Result<(), String> {
-    match state.protocol {
-        GatewayProtocol::OpenAiChatCompletions => write_sse_data(
-            stream,
-            &json!({
-                "id": state.id,
-                "object": "chat.completion.chunk",
-                "created": state.created,
-                "model": state.model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "content": delta
-                    },
-                    "finish_reason": null
-                }]
-            }),
-        ),
-        GatewayProtocol::OpenAiResponses => write_sse_json(
-            stream,
-            Some("response.output_text.delta"),
-            &json!({
-                "type": "response.output_text.delta",
-                "item_id": state.item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "delta": delta
-            }),
-        ),
-        GatewayProtocol::AnthropicMessages => write_sse_json(
-            stream,
-            Some("content_block_delta"),
-            &json!({
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {
-                    "type": "text_delta",
-                    "text": delta
-                }
-            }),
-        ),
-        GatewayProtocol::GoogleGemini => write_sse_data(
-            stream,
-            &json!({
-                "candidates": [{
-                    "content": {
-                        "role": "model",
-                        "parts": [{ "text": delta }]
-                    },
-                    "index": 0
-                }]
-            }),
-        ),
-    }
-}
-
-fn write_client_stream_tool_call(
-    stream: &mut TcpStream,
-    state: &ClientStreamState,
-    tool_call: &GatewayToolCall,
-    index: usize,
-) -> Result<(), String> {
-    match state.protocol {
-        GatewayProtocol::OpenAiChatCompletions => write_sse_data(
-            stream,
-            &json!({
-                "id": state.id,
-                "object": "chat.completion.chunk",
-                "created": state.created,
-                "model": state.model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "tool_calls": [{
-                            "index": index,
-                            "id": tool_call.id,
-                            "type": "function",
-                            "function": {
-                                "name": tool_call.name,
-                                "arguments": arguments_as_string(&tool_call.arguments)
-                            }
-                        }]
-                    },
-                    "finish_reason": null
-                }]
-            }),
-        ),
-        GatewayProtocol::OpenAiResponses => {
-            write_sse_json(
-                stream,
-                Some("response.output_item.added"),
-                &json!({
-                    "type": "response.output_item.added",
-                    "output_index": index + 1,
-                    "item": {
-                        "id": tool_call.id,
-                        "type": "function_call",
-                        "status": "in_progress",
-                        "call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "arguments": ""
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("response.function_call_arguments.delta"),
-                &json!({
-                    "type": "response.function_call_arguments.delta",
-                    "item_id": tool_call.id,
-                    "output_index": index + 1,
-                    "delta": arguments_as_string(&tool_call.arguments)
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("response.output_item.done"),
-                &json!({
-                    "type": "response.output_item.done",
-                    "output_index": index + 1,
-                    "item": {
-                        "id": tool_call.id,
-                        "type": "function_call",
-                        "status": "completed",
-                        "call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "arguments": arguments_as_string(&tool_call.arguments)
-                    }
-                }),
-            )
-        }
-        GatewayProtocol::AnthropicMessages => {
-            let block_index = index + 1;
-            write_sse_json(
-                stream,
-                Some("content_block_start"),
-                &json!({
-                    "type": "content_block_start",
-                    "index": block_index,
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": tool_call.id,
-                        "name": tool_call.name,
-                        "input": {}
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("content_block_delta"),
-                &json!({
-                    "type": "content_block_delta",
-                    "index": block_index,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": arguments_as_string(&tool_call.arguments)
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("content_block_stop"),
-                &json!({
-                    "type": "content_block_stop",
-                    "index": block_index
-                }),
-            )
-        }
-        GatewayProtocol::GoogleGemini => write_sse_data(
-            stream,
-            &json!({
-                "candidates": [{
-                    "content": {
-                        "role": "model",
-                        "parts": [{
-                            "functionCall": {
-                                "name": tool_call.name,
-                                "args": arguments_as_object(&tool_call.arguments)
-                            }
-                        }]
-                    },
-                    "index": 0
-                }]
-            }),
-        ),
-    }
-}
-
-fn write_client_stream_done(
-    stream: &mut TcpStream,
-    state: &ClientStreamState,
-    full_text: &str,
-    tool_calls: &[GatewayToolCall],
-    usage: &GatewayUsage,
-) -> Result<(), String> {
-    match state.protocol {
-        GatewayProtocol::OpenAiChatCompletions => {
-            let mut done = json!({
-                "id": state.id,
-                "object": "chat.completion.chunk",
-                "created": state.created,
-                "model": state.model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": if tool_calls.is_empty() { "stop" } else { "tool_calls" }
-                }]
-            });
-            if usage_has_values(usage) {
-                done["usage"] =
-                    usage_value_for_protocol(GatewayProtocol::OpenAiChatCompletions, usage);
-            }
-            write_sse_data(stream, &done)?;
-            write_sse_done(stream)
-        }
-        GatewayProtocol::OpenAiResponses => {
-            write_sse_json(
-                stream,
-                Some("response.output_text.done"),
-                &json!({
-                    "type": "response.output_text.done",
-                    "item_id": state.item_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "text": full_text
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("response.content_part.done"),
-                &json!({
-                    "type": "response.content_part.done",
-                    "item_id": state.item_id,
-                    "output_index": 0,
-                    "content_index": 0,
-                    "part": {
-                        "type": "output_text",
-                        "text": full_text
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("response.output_item.done"),
-                &json!({
-                    "type": "response.output_item.done",
-                    "output_index": 0,
-                    "item": {
-                        "id": state.item_id,
-                        "type": "message",
-                        "status": "completed",
-                        "role": "assistant",
-                        "content": [{
-                            "type": "output_text",
-                            "text": full_text
-                        }]
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("response.completed"),
-                &json!({
-                    "type": "response.completed",
-                    "response": response_body_for_protocol(
-                        GatewayProtocol::OpenAiResponses,
-                        &state.model,
-                        &GatewayAssistantResponse {
-                            content: vec![GatewayContentPart::Text(full_text.to_string())],
-                            tool_calls: tool_calls.to_vec(),
-                            finish_reason: Some(if tool_calls.is_empty() { "stop" } else { "tool_calls" }.to_string()),
-                            usage: usage.clone()
-                        }
-                    )
-                }),
-            )
-        }
-        GatewayProtocol::AnthropicMessages => {
-            write_sse_json(
-                stream,
-                Some("content_block_stop"),
-                &json!({
-                    "type": "content_block_stop",
-                    "index": 0
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("message_delta"),
-                &json!({
-                    "type": "message_delta",
-                    "delta": {
-                        "stop_reason": if tool_calls.is_empty() { "end_turn" } else { "tool_use" },
-                        "stop_sequence": null
-                    },
-                    "usage": {
-                        "output_tokens": usage.output_tokens
-                    }
-                }),
-            )?;
-            write_sse_json(
-                stream,
-                Some("message_stop"),
-                &json!({
-                    "type": "message_stop"
-                }),
-            )
-        }
-        GatewayProtocol::GoogleGemini => {
-            let mut done = json!({
-                "candidates": [{
-                    "content": {
-                        "role": "model",
-                        "parts": gemini_assistant_parts(&GatewayAssistantResponse {
-                            content: if full_text.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![GatewayContentPart::Text(full_text.to_string())]
-                            },
-                            tool_calls: tool_calls.to_vec(),
-                            finish_reason: Some("STOP".to_string()),
-                            usage: usage.clone()
-                        })
-                    },
-                    "finishReason": if tool_calls.is_empty() { "STOP" } else { "TOOL_CALL" },
-                    "index": 0
-                }]
-            });
-            if usage_has_values(usage) {
-                done["usageMetadata"] =
-                    usage_value_for_protocol(GatewayProtocol::GoogleGemini, usage);
-            }
-            write_sse_data(stream, &done)
-        }
-    }
-}
-
-fn write_sse_json(
-    stream: &mut TcpStream,
-    event: Option<&str>,
-    value: &Value,
-) -> Result<(), String> {
-    if let Some(event) = event {
-        stream
-            .write_all(format!("event: {event}\n").as_bytes())
-            .map_err(|err| err.to_string())?;
-    }
-    write_sse_data(stream, value)
-}
-
-fn write_sse_data(stream: &mut TcpStream, value: &Value) -> Result<(), String> {
-    let data = serde_json::to_string(value).map_err(|err| err.to_string())?;
-    stream
-        .write_all(format!("data: {data}\n\n").as_bytes())
-        .and_then(|_| stream.flush())
-        .map_err(|err| err.to_string())
-}
-
-fn write_sse_done(stream: &mut TcpStream) -> Result<(), String> {
-    stream
-        .write_all(b"data: [DONE]\n\n")
-        .and_then(|_| stream.flush())
-        .map_err(|err| err.to_string())
-}
-
-#[derive(Debug, Clone, Default)]
-struct SseBuffer {
-    buffer: String,
-}
-
-impl SseBuffer {
-    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<SseFrame> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
-        self.drain_frames(false)
-    }
-
-    fn finish(&mut self) -> Vec<SseFrame> {
-        self.drain_frames(true)
-    }
-
-    fn drain_frames(&mut self, include_remainder: bool) -> Vec<SseFrame> {
-        let mut frames = Vec::new();
-        loop {
-            let Some((index, separator_len)) = next_sse_separator(&self.buffer) else {
-                break;
-            };
-            let raw = self.buffer[..index].to_string();
-            self.buffer.drain(..index + separator_len);
-            if let Some(frame) = parse_sse_frame(&raw) {
-                frames.push(frame);
-            }
-        }
-
-        if include_remainder && !self.buffer.trim().is_empty() {
-            let raw = std::mem::take(&mut self.buffer);
-            if let Some(frame) = parse_sse_frame(&raw) {
-                frames.push(frame);
-            }
-        }
-
-        frames
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SseFrame {
-    event: Option<String>,
-    data: String,
-}
-
-fn next_sse_separator(value: &str) -> Option<(usize, usize)> {
-    let lf = value.find("\n\n").map(|index| (index, 2));
-    let crlf = value.find("\r\n\r\n").map(|index| (index, 4));
-    match (lf, crlf) {
-        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
-}
-
-fn parse_sse_frame(raw: &str) -> Option<SseFrame> {
-    let mut event = None;
-    let mut data_lines = Vec::new();
-
-    for line in raw.lines() {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("event:") {
-            event = Some(value.trim().to_string());
-        } else if let Some(value) = line.strip_prefix("data:") {
-            data_lines.push(value.trim_start().to_string());
-        }
-    }
-
-    if data_lines.is_empty() {
-        None
-    } else {
-        Some(SseFrame {
-            event,
-            data: data_lines.join("\n"),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct GatewayStreamUpdate {
-    text_delta: String,
-    tool_calls: Vec<GatewayToolCall>,
-    usage: Option<GatewayUsage>,
-}
-
-fn stream_update_from_event(
-    protocol: GatewayProtocol,
-    frame: &SseFrame,
-    value: &Value,
-) -> GatewayStreamUpdate {
-    GatewayStreamUpdate {
-        text_delta: stream_text_delta_from_event(protocol, frame, value),
-        tool_calls: stream_tool_calls_from_event(protocol, frame, value),
-        usage: stream_usage_from_event(protocol, value),
-    }
-}
-
 #[allow(dead_code)]
 fn stream_delta_from_event(protocol: GatewayProtocol, frame: &SseFrame, value: &Value) -> String {
     stream_text_delta_from_event(protocol, frame, value)
-}
-
-fn stream_text_delta_from_event(
-    protocol: GatewayProtocol,
-    frame: &SseFrame,
-    value: &Value,
-) -> String {
-    match protocol {
-        GatewayProtocol::OpenAiChatCompletions => value
-            .get("choices")
-            .and_then(|choices| choices.as_array())
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("delta").or_else(|| choice.get("message")))
-            .and_then(|message| message.get("content"))
-            .map(text_from_value)
-            .unwrap_or_default(),
-        GatewayProtocol::OpenAiResponses => {
-            let event_type = value
-                .get("type")
-                .and_then(|item| item.as_str())
-                .or(frame.event.as_deref())
-                .unwrap_or_default();
-            if event_type.contains("delta") {
-                value
-                    .get("delta")
-                    .or_else(|| value.get("text"))
-                    .map(text_from_value)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
-        GatewayProtocol::AnthropicMessages => {
-            let event_type = value
-                .get("type")
-                .and_then(|item| item.as_str())
-                .or(frame.event.as_deref())
-                .unwrap_or_default();
-            if event_type == "content_block_delta" {
-                value
-                    .get("delta")
-                    .and_then(|delta| delta.get("text"))
-                    .map(text_from_value)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
-        GatewayProtocol::GoogleGemini => {
-            assistant_text_from_response(GatewayProtocol::GoogleGemini, value)
-        }
-    }
-}
-
-fn stream_tool_calls_from_event(
-    protocol: GatewayProtocol,
-    frame: &SseFrame,
-    value: &Value,
-) -> Vec<GatewayToolCall> {
-    match protocol {
-        GatewayProtocol::OpenAiChatCompletions => value
-            .get("choices")
-            .and_then(|choices| choices.as_array())
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice.get("delta").or_else(|| choice.get("message")))
-            .and_then(|message| message.get("tool_calls"))
-            .and_then(|tool_calls| tool_calls.as_array())
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .filter_map(|(index, item)| openai_stream_tool_call_from_value(index, item))
-            .collect(),
-        GatewayProtocol::OpenAiResponses => {
-            let event_type = value
-                .get("type")
-                .and_then(|item| item.as_str())
-                .or(frame.event.as_deref())
-                .unwrap_or_default();
-            if event_type == "response.output_item.added"
-                || event_type == "response.output_item.done"
-            {
-                value
-                    .get("item")
-                    .filter(|item| {
-                        item.get("type").and_then(|value| value.as_str()) == Some("function_call")
-                    })
-                    .and_then(responses_stream_tool_call_from_value)
-                    .into_iter()
-                    .collect()
-            } else if event_type == "response.function_call_arguments.delta" {
-                let delta = value
-                    .get("delta")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                if delta.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![GatewayToolCall {
-                        id: value
-                            .get("item_id")
-                            .or_else(|| value.get("call_id"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("call_codestudio_stream")
-                            .to_string(),
-                        name: value
-                            .get("name")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("tool")
-                            .to_string(),
-                        arguments: Value::String(delta.to_string()),
-                    }]
-                }
-            } else {
-                Vec::new()
-            }
-        }
-        GatewayProtocol::AnthropicMessages => {
-            let event_type = value
-                .get("type")
-                .and_then(|item| item.as_str())
-                .or(frame.event.as_deref())
-                .unwrap_or_default();
-            if event_type == "content_block_start" {
-                value
-                    .get("content_block")
-                    .filter(|block| {
-                        block.get("type").and_then(|value| value.as_str()) == Some("tool_use")
-                    })
-                    .and_then(anthropic_tool_call_from_value)
-                    .into_iter()
-                    .collect()
-            } else if event_type == "content_block_delta" {
-                let delta = value.get("delta").unwrap_or(&Value::Null);
-                if delta.get("type").and_then(|value| value.as_str()) == Some("input_json_delta") {
-                    delta
-                        .get("partial_json")
-                        .and_then(|value| value.as_str())
-                        .filter(|text| !text.is_empty())
-                        .map(|text| GatewayToolCall {
-                            id: "call_codestudio_stream".to_string(),
-                            name: "tool".to_string(),
-                            arguments: Value::String(text.to_string()),
-                        })
-                        .into_iter()
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        }
-        GatewayProtocol::GoogleGemini => {
-            assistant_response_from_protocol(GatewayProtocol::GoogleGemini, value).tool_calls
-        }
-    }
-}
-
-fn openai_stream_tool_call_from_value(index: usize, value: &Value) -> Option<GatewayToolCall> {
-    let function = value.get("function").unwrap_or(value);
-    let name = function
-        .get("name")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("tool")
-        .to_string();
-    let arguments = function.get("arguments");
-    if name == "tool" && arguments.is_none() {
-        return None;
-    }
-    Some(GatewayToolCall {
-        id: value
-            .get("id")
-            .or_else(|| value.get("call_id"))
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.trim().is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| format!("call_codestudio_stream_{index}")),
-        name,
-        arguments: argument_value(arguments),
-    })
-}
-
-fn responses_stream_tool_call_from_value(value: &Value) -> Option<GatewayToolCall> {
-    let name = value
-        .get("name")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("tool")
-        .to_string();
-    Some(GatewayToolCall {
-        id: value
-            .get("call_id")
-            .or_else(|| value.get("id"))
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.trim().is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| format!("call_codestudio_{}", Uuid::new_v4().simple())),
-        name,
-        arguments: argument_value(value.get("arguments")),
-    })
-}
-
-fn stream_usage_from_event(protocol: GatewayProtocol, value: &Value) -> Option<GatewayUsage> {
-    match protocol {
-        GatewayProtocol::OpenAiChatCompletions => value
-            .get("usage")
-            .map(|_| usage_from_response(protocol, value)),
-        GatewayProtocol::OpenAiResponses => {
-            if value.get("usage").is_some() {
-                Some(usage_from_response(protocol, value))
-            } else if let Some(response) = value.get("response") {
-                response
-                    .get("usage")
-                    .map(|_| usage_from_response(protocol, response))
-            } else {
-                None
-            }
-        }
-        GatewayProtocol::AnthropicMessages => {
-            if value.get("usage").is_some() {
-                Some(usage_from_response(protocol, value))
-            } else if let Some(message) = value.get("message") {
-                message
-                    .get("usage")
-                    .map(|_| usage_from_response(protocol, message))
-            } else {
-                None
-            }
-        }
-        GatewayProtocol::GoogleGemini => value
-            .get("usageMetadata")
-            .map(|_| usage_from_response(protocol, value)),
-    }
-}
-
-fn merge_stream_usage(target: &mut GatewayUsage, update: GatewayUsage) {
-    if update.input_tokens > 0 {
-        target.input_tokens = update.input_tokens;
-    }
-    if update.output_tokens > 0 {
-        target.output_tokens = update.output_tokens;
-    }
-    if update.total_tokens > 0 {
-        target.total_tokens = update.total_tokens;
-    } else if target.total_tokens == 0 {
-        target.total_tokens = target.input_tokens + target.output_tokens;
-    }
-    target.cached_input_tokens = update.cached_input_tokens.or(target.cached_input_tokens);
-    target.cache_creation_input_tokens = update
-        .cache_creation_input_tokens
-        .or(target.cache_creation_input_tokens);
-    target.cache_read_input_tokens = update
-        .cache_read_input_tokens
-        .or(target.cache_read_input_tokens);
-    target.reasoning_tokens = update.reasoning_tokens.or(target.reasoning_tokens);
-    target.audio_input_tokens = update.audio_input_tokens.or(target.audio_input_tokens);
-    target.audio_output_tokens = update.audio_output_tokens.or(target.audio_output_tokens);
-    target.image_input_tokens = update.image_input_tokens.or(target.image_input_tokens);
-    target.image_output_tokens = update.image_output_tokens.or(target.image_output_tokens);
-    target.raw_prompt_details = update
-        .raw_prompt_details
-        .or_else(|| target.raw_prompt_details.clone());
-    target.raw_completion_details = update
-        .raw_completion_details
-        .or_else(|| target.raw_completion_details.clone());
-}
-
-fn usage_has_values(usage: &GatewayUsage) -> bool {
-    usage.input_tokens > 0
-        || usage.output_tokens > 0
-        || usage.total_tokens > 0
-        || usage.cached_input_tokens.is_some()
-        || usage.cache_creation_input_tokens.is_some()
-        || usage.cache_read_input_tokens.is_some()
-        || usage.reasoning_tokens.is_some()
-        || usage.audio_input_tokens.is_some()
-        || usage.audio_output_tokens.is_some()
-        || usage.image_input_tokens.is_some()
-        || usage.image_output_tokens.is_some()
-        || usage.raw_prompt_details.is_some()
-        || usage.raw_completion_details.is_some()
 }
 
 fn stream_upstream_json_with_headers(
@@ -5328,7 +3038,12 @@ fn stream_upstream_json_with_headers(
             upstream_http::UpstreamStreamEvent::Headers(meta) => {
                 status = meta.status;
                 client_response_started = true;
-                write_stream_headers(client_stream, meta.status, meta.content_type)
+                write_stream_headers(
+                    client_stream,
+                    meta.status,
+                    reason_for_status(meta.status),
+                    meta.content_type,
+                )
             }
             upstream_http::UpstreamStreamEvent::Chunk(chunk) => client_stream
                 .write_all(chunk)
@@ -5363,67 +3078,43 @@ fn write_upstream_stream_error_response(stream: &mut TcpStream, err: &str) -> Re
     )
 }
 
-fn write_route_response(stream: &mut TcpStream, response: RouteResponse) -> Result<u16, String> {
-    match response {
-        RouteResponse::Buffered(response) => write_http_response(stream, response),
-        RouteResponse::Stream(response) => (response.run)(stream),
-    }
-}
-
-fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<u16, String> {
-    let status = response.status;
-    let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        response.status,
-        response.reason,
-        response.content_type,
-        response.body.len()
-    );
-    append_cors_headers(&mut head);
-    for (name, value) in response.headers {
-        head.push_str(name);
-        head.push_str(": ");
-        head.push_str(value);
-        head.push_str("\r\n");
-    }
-    head.push_str("\r\n");
-    stream
-        .write_all(head.as_bytes())
-        .and_then(|_| stream.write_all(&response.body))
-        .and_then(|_| stream.flush())
-        .map_err(|err| err.to_string())?;
-
-    Ok(status)
-}
-
-fn write_stream_headers(
-    stream: &mut TcpStream,
-    status: u16,
-    content_type: &'static str,
-) -> Result<(), String> {
-    let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n",
-        status,
-        reason_for_status(status),
-        content_type
-    );
-    append_cors_headers(&mut head);
-    head.push_str("\r\n");
-    stream
-        .write_all(head.as_bytes())
-        .and_then(|_| stream.flush())
-        .map_err(|err| err.to_string())
-}
-
-fn append_cors_headers(head: &mut String) {
-    head.push_str("Access-Control-Allow-Origin: *\r\n");
-    head.push_str("Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n");
-    head.push_str("Access-Control-Allow-Headers: *\r\n");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn gateway_facade_does_not_reclaim_extracted_module_ownership() {
+        let facade = include_str!("gateway.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("gateway production source");
+        for (prefix, suffix) in [
+            ("fn read_http_", "request("),
+            ("fn find_header_", "end("),
+            ("fn parse_content_", "length("),
+            ("fn write_client_stream_", "delta("),
+            ("fn write_client_stream_", "tool_call("),
+            ("fn write_client_stream_", "done("),
+            ("struct Gateway", "Runtime"),
+            ("static RUN", "TIME:"),
+            ("listener.", "accept()"),
+        ] {
+            let forbidden = format!("{prefix}{suffix}");
+            assert!(
+                !facade.contains(&forbidden),
+                "gateway facade reclaimed extracted ownership: {forbidden}"
+            );
+        }
+
+        for module in [
+            include_str!("gateway/server.rs"),
+            include_str!("gateway/runtime.rs"),
+            include_str!("gateway/protocol/stream.rs"),
+        ] {
+            assert!(!module.trim().is_empty());
+        }
+    }
 
     fn test_config(auth_enabled: bool) -> GatewayConfig {
         GatewayConfig {
@@ -5529,6 +3220,7 @@ mod tests {
             provider: "test-provider".to_string(),
             protocol: protocol.to_string(),
             model: "test-model".to_string(),
+            review_model: None,
             model_mappings: Vec::new(),
             base_url: "https://api.example.test/v1".to_string(),
             auth_ref: Some("test-key".to_string()),
@@ -6520,15 +4212,15 @@ mod tests {
     #[test]
     fn chatgpt_desktop_alias_uses_codex_gateway_scope() {
         assert_eq!(
-            normalize_gateway_tool_id("chatgpt-desktop").as_deref(),
+            canonical_profile_tool_id("chatgpt-desktop").as_deref(),
             Some("codex")
         );
         assert_eq!(
-            normalize_gateway_tool_id("codex-app").as_deref(),
+            canonical_profile_tool_id("codex-app").as_deref(),
             Some("codex")
         );
         assert_eq!(
-            normalize_gateway_tool_id("codex-client").as_deref(),
+            canonical_profile_tool_id("codex-client").as_deref(),
             Some("codex")
         );
     }

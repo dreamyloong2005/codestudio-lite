@@ -743,6 +743,15 @@ export default defineConfig({
               height: "36px",
               borderRadius: "7px"
             },
+            "&[data-tool-icon-tone='grok'] img": {
+              width: "36px",
+              height: "36px",
+              borderRadius: "7px"
+            },
+            "&[data-tool-icon-tone='pi'] img": {
+              width: "36px",
+              height: "36px"
+            },
             "& [data-tool-icon-fallback-text]": {
               fontSize: "11px",
               fontWeight: "800",
@@ -782,6 +791,15 @@ export default defineConfig({
                   width: "26px",
                   height: "26px",
                   borderRadius: "5px"
+                },
+                "&[data-tool-icon-tone='grok'] img": {
+                  width: "26px",
+                  height: "26px",
+                  borderRadius: "5px"
+                },
+                "&[data-tool-icon-tone='pi'] img": {
+                  width: "28px",
+                  height: "28px"
                 }
               },
               heading: {
@@ -808,6 +826,14 @@ export default defineConfig({
                   height: "26px"
                 },
                 "&[data-tool-icon-tone='hermes'] img": {
+                  width: "28px",
+                  height: "28px"
+                },
+                "&[data-tool-icon-tone='grok'] img": {
+                  width: "28px",
+                  height: "28px"
+                },
+                "&[data-tool-icon-tone='pi'] img": {
                   width: "28px",
                   height: "28px"
                 }
@@ -847,6 +873,14 @@ export default defineConfig({
               hermes: {
                 borderColor: "rgba(15, 23, 42, 0.1)",
                 background: "#fff"
+              },
+              grok: {
+                borderColor: "#0A0A0A",
+                background: "#0A0A0A"
+              },
+              pi: {
+                borderColor: "color-mix(in srgb, var(--text) 14%, transparent)",
+                background: "var(--surface-soft)"
               }
             }
           },

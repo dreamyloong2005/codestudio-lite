@@ -650,18 +650,20 @@ test("Profiles modal surfaces use Panda recipes", () => {
 
 test("Profiles tool switcher surfaces use Panda recipes", () => {
   const route = read("src/routes/Profiles.svelte");
+  const toolTabs = read("src/components/profiles/ProfileToolTabs.svelte");
   const styles = read("src/styles.css");
   const mainMarkup = route.split("{#if pendingUsageProfile}")[0];
 
   assert.match(route, /profileModeLayoutRecipe/);
-  assert.match(route, /profileToolSwitcherRecipe/);
-  assert.match(route, /profileToolTabsRecipe/);
+  assert.match(route, /<ProfileToolTabs/);
+  assert.match(toolTabs, /profileToolSwitcherRecipe/);
+  assert.match(toolTabs, /profileToolTabsRecipe/);
 
   assert.doesNotMatch(mainMarkup, /class="profile-mode-layout"/);
   assert.doesNotMatch(mainMarkup, /class="panel-band profile-tool-switcher"/);
   assert.doesNotMatch(mainMarkup, /class="profile-tool-tabs"/);
-  assert.doesNotMatch(mainMarkup, /class:selected=\{selectedToolId === group\.id\}/);
-  assert.match(mainMarkup, /data-selected=\{selectedToolId === group\.id\}/);
+  assert.doesNotMatch(toolTabs, /class:selected=\{selectedToolId === group\.id\}/);
+  assert.match(toolTabs, /data-selected=\{selectedToolId === group\.id\}/);
 
   assert.doesNotMatch(styles, /\.profile-mode-layout/);
   assert.doesNotMatch(styles, /\.profile-tool-switcher/);
@@ -670,28 +672,32 @@ test("Profiles tool switcher surfaces use Panda recipes", () => {
 
 test("Profiles main card list uses Panda recipes", () => {
   const route = read("src/routes/Profiles.svelte");
+  const list = read("src/components/profiles/ProfileList.svelte");
+  const card = read("src/components/profiles/ProfileCard.svelte");
   const styles = read("src/styles.css");
   const mainMarkup = route.split("{#if pendingUsageProfile}")[0];
 
-  assert.match(route, /profileToolSectionRecipe/);
-  assert.match(route, /profileGridRecipe/);
-  assert.match(route, /profileSortableRowRecipe/);
-  assert.match(route, /profileCardRecipe/);
-  assert.match(route, /profileCardMainRecipe/);
-  assert.match(route, /profileDragHandleRecipe/);
-  assert.match(route, /profileAvatarRecipe/);
-  assert.match(route, /profileIdentityRecipe/);
-  assert.match(route, /profileCardStatusRecipe/);
-  assert.match(route, /profileCardActionsRecipe/);
-  assert.match(route, /data-profile-card/);
-  assert.match(route, /data-sortable-active=\{sortableActiveId === profile\.id\}/);
-  assert.match(route, /data-active=\{isActive\}/);
-  assert.match(route, /data-builtin=\{profile\.isBuiltin\}/);
-  assert.match(route, /data-drag-active=\{sortableActiveId === profile\.id\}/);
-  assert.match(route, /querySelector\("\[data-profile-card\]"\)/);
+  assert.match(route, /<ProfileList/);
+  assert.match(list, /profileToolSectionRecipe/);
+  assert.match(list, /profileGridRecipe/);
+  assert.match(list, /profileSortableRowRecipe/);
+  assert.match(list, /<ProfileCard/);
+  assert.match(card, /profileCardRecipe/);
+  assert.match(card, /profileCardMainRecipe/);
+  assert.match(card, /profileDragHandleRecipe/);
+  assert.match(card, /profileAvatarRecipe/);
+  assert.match(card, /profileIdentityRecipe/);
+  assert.match(card, /profileCardStatusRecipe/);
+  assert.match(card, /profileCardActionsRecipe/);
+  assert.match(card, /data-profile-card/);
+  assert.match(list, /data-sortable-active=\{activeDragId === profile\.id\}/);
+  assert.match(card, /data-active=\{active\}/);
+  assert.match(card, /data-builtin=\{profile\.isBuiltin\}/);
+  assert.match(card, /data-drag-active=\{dragActive\}/);
+  assert.match(list, /querySelector\("\[data-profile-card\]"\)/);
   assert.match(
-    route,
-    /<div class=\{profileAvatarRecipe\(\)\} data-profile-avatar aria-hidden="true">[\s\S]*?<ToolIcon toolId=\{profile\.app\} label=\{profileDisplayName\(profile\)\} variant="heading" \/>/
+    card,
+    /<div class=\{profileAvatarRecipe\(\)\} data-profile-avatar aria-hidden="true">[\s\S]*?<ToolIcon toolId=\{profile\.app\} label=\{displayName\} variant="heading" \/>/
   );
 
   const pandaConfig = read("panda.config.ts");

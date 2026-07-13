@@ -1,6 +1,6 @@
 # CodeStudio Lite
 
-CodeStudio Lite 是面向本机 AI 编程工具的桌面控制台。它把本地 Provider Profile、localhost 网关、工具检测、安装更新、配置写入、用量查询和桌面端补丁流程放在同一个 Tauri 应用里，目标是让 Codex、Claude、Gemini、OpenCode、OpenClaw、Hermes 等工具可以在不同供应商和模型之间切换，而不需要反复手动编辑配置文件。
+CodeStudio Lite 是面向本机 AI 编程工具的桌面控制台。它把本地 Provider Profile、localhost 网关、工具检测、安装更新、配置写入、用量查询和桌面端补丁流程放在同一个 Tauri 应用里，目标是让 Codex、Claude、Gemini、OpenCode、OpenClaw、Hermes、Grok、Pi Agent 等工具可以在不同供应商和模型之间切换，而不需要反复手动编辑配置文件。
 
 > English documentation starts at [English](#english).
 
@@ -73,6 +73,8 @@ AI 工具检测与配置：
 - OpenCode
 - OpenClaw
 - Hermes
+- Grok
+- Pi Agent
 
 系统依赖检测：
 
@@ -197,7 +199,7 @@ CodeStudio Lite 是 GUI-only 桌面应用。当前仓库不计划加入：
 
 ## English
 
-CodeStudio Lite is a desktop control center for local AI coding tools. It brings Provider Profiles, a localhost gateway, tool detection, install/update flows, config writes, usage queries, and desktop-client patch workflows into one Tauri app, so tools such as Codex, Claude, Gemini, OpenCode, OpenClaw, and Hermes can switch providers and models without repeated manual config edits.
+CodeStudio Lite is a desktop control center for local AI coding tools. It brings Provider Profiles, a localhost gateway, tool detection, install/update flows, config writes, usage queries, and desktop-client patch workflows into one Tauri app, so tools such as Codex, Claude, Gemini, OpenCode, OpenClaw, Hermes, Grok, and Pi Agent can switch providers and models without repeated manual config edits.
 
 ## Core Features
 
@@ -268,6 +270,8 @@ AI tool detection and configuration:
 - OpenCode
 - OpenClaw
 - Hermes
+- Grok
+- Pi Agent
 
 System dependency detection:
 

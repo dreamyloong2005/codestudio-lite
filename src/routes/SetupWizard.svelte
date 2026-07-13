@@ -3,6 +3,19 @@
   import { fade, fly } from "svelte/transition";
   import { detectEnvironment, listProfileModels, openExternalUrl, previewProfileWrite, saveProfileDraft, startCodexOAuthLogin } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
+  import {
+    canonicalProfileToolId,
+    configProtocolIdsForTool,
+    PROFILE_PROTOCOL_OPTIONS,
+    PROFILE_TOOL_CATALOG,
+    profileSupportsModelMappings as catalogSupportsModelMappings
+  } from "../lib/profiles/catalog";
+  import {
+    emptyProfileModelMappingForm,
+    modelMappingsForRequest,
+    profileModelMappingsAreValid,
+    type ProfileModelMappingForm
+  } from "../lib/profiles/form";
   import AppIcon from "../components/AppIcon.svelte";
   import ModelSelectInput from "../components/ModelSelectInput.svelte";
   import SecretInput from "../components/SecretInput.svelte";
@@ -152,31 +165,9 @@
     model: string;
   };
 
-  type ProfileModelMappingForm = {
-    alias: string;
-    model: string;
-    supports1m: boolean;
-    description: string;
-  };
 
-  const protocolOptions = [
-    { id: "openai-chat-completions", labelKey: "wizard.protocol.openaiChatCompletions" },
-    { id: "openai-responses", labelKey: "wizard.protocol.openaiResponses" },
-    { id: "anthropic-messages", labelKey: "wizard.protocol.anthropicMessages" },
-    { id: "google-gemini", labelKey: "wizard.protocol.googleGemini" }
-  ] as const;
+  const protocolOptions = PROFILE_PROTOCOL_OPTIONS;
   type ProtocolOption = (typeof protocolOptions)[number];
-
-  const configModeProtocolIdsByTool: Record<string, readonly string[]> = {
-    codex: ["openai-chat-completions", "openai-responses"],
-    "claude-desktop": ["anthropic-messages"],
-    claude: ["anthropic-messages"],
-    gemini: ["google-gemini"],
-    "gemini-code-assist": ["google-gemini"],
-    opencode: ["openai-chat-completions", "openai-responses"],
-    openclaw: ["openai-chat-completions"],
-    hermes: ["openai-chat-completions"]
-  };
 
   const steps: TranslationKey[] = [
     "wizard.step.bootstrapTarget",
@@ -184,72 +175,14 @@
     "wizard.step.preview"
   ];
 
-  const toolDefaults: ToolDefaults[] = [
-    {
-      id: "codex",
-      label: "Codex",
-      profileNameKey: "wizard.defaultProfile.codex",
-      protocol: "openai-responses",
-      baseUrl: "",
-      model: ""
-    },
-    {
-      id: "claude-desktop",
-      label: "Claude Desktop",
-      profileNameKey: "wizard.defaultProfile.claudeDesktop",
-      protocol: "anthropic-messages",
-      baseUrl: "",
-      model: ""
-    },
-    {
-      id: "claude",
-      label: "Claude Code",
-      profileNameKey: "wizard.defaultProfile.claude",
-      protocol: "anthropic-messages",
-      baseUrl: "",
-      model: ""
-    },
-    {
-      id: "gemini",
-      label: "Gemini CLI",
-      profileNameKey: "wizard.defaultProfile.gemini",
-      protocol: "google-gemini",
-      baseUrl: "",
-      model: ""
-    },
-    {
-      id: "gemini-code-assist",
-      label: "Gemini Code Assist",
-      profileNameKey: "wizard.defaultProfile.geminiCodeAssist",
-      protocol: "google-gemini",
-      baseUrl: "",
-      model: ""
-    },
-    {
-      id: "opencode",
-      label: "OpenCode",
-      profileNameKey: "wizard.defaultProfile.opencode",
-      protocol: "openai-chat-completions",
-      baseUrl: "",
-      model: ""
-    },
-    {
-      id: "openclaw",
-      label: "OpenClaw",
-      profileNameKey: "wizard.defaultProfile.openclaw",
-      protocol: "openai-chat-completions",
-      baseUrl: "",
-      model: ""
-    },
-    {
-      id: "hermes",
-      label: "Hermes",
-      profileNameKey: "wizard.defaultProfile.hermes",
-      protocol: "openai-chat-completions",
-      baseUrl: "",
-      model: ""
-    }
-  ];
+  const toolDefaults: ToolDefaults[] = PROFILE_TOOL_CATALOG.map((tool) => ({
+    id: tool.id,
+    label: tool.label,
+    profileNameKey: tool.defaultProfileNameKey as TranslationKey,
+    protocol: tool.defaultProtocol,
+    baseUrl: "",
+    model: ""
+  }));
 
   let currentStep = 0;
   let selectedTool = "codex";
@@ -261,6 +194,7 @@
   let apiKey = "";
   let baseUrl = "";
   let model = "";
+  let reviewModel = "";
   let modelMappings: ProfileModelMappingForm[] = [];
   let modelOptions: ProfileModelOption[] = [];
   let modelLoading = false;
@@ -302,6 +236,8 @@
   $: activeProvider = codexOAuthConfig ? "official" : provider;
   $: activeProtocol = codexOAuthConfig ? "openai-responses" : protocol;
   $: activeModel = codexOAuthConfig ? "" : model;
+  $: supportsReviewModel = canonicalProfileToolId(selectedTool) === "codex";
+  $: activeReviewModel = supportsReviewModel ? reviewModel.trim() || null : null;
   $: activeModelMappings = codexOAuthConfig ? [] : modelMappingsForRequest(selectedTool, modelMappings);
   $: activeBaseUrl = codexOAuthConfig ? "" : baseUrl;
   $: activeApiKey = codexOAuthConfig ? "" : apiKey;
@@ -314,7 +250,7 @@
   ) {
     protocol = availableProtocolOptions[0].id;
   }
-  $: supportsModelMappings = !codexOAuthConfig && profileSupportsModelMappings(selectedTool);
+  $: supportsModelMappings = !codexOAuthConfig && catalogSupportsModelMappings(selectedTool);
   $: if (!supportsModelMappings && modelMappings.length > 0) {
     modelMappings = [];
   }
@@ -341,6 +277,7 @@
     activeProvider.trim(),
     activeProtocol.trim(),
     activeModel.trim(),
+    activeReviewModel ?? "",
     JSON.stringify(activeModelMappings),
     activeBaseUrl.trim(),
     activeSecretProvided ? "secret" : "no-secret",
@@ -431,6 +368,7 @@
     apiKey = "";
     baseUrl = defaults?.baseUrl ?? "";
     model = defaults?.model ?? "";
+    reviewModel = "";
     modelMappings = [];
     codexOAuthConfig = false;
     codexAuthError = null;
@@ -466,31 +404,11 @@
     return Boolean(auth?.available) && (auth?.method === "chat_gpt" || auth?.method === "access_token");
   }
 
-  function canonicalProfileToolId(toolId: string) {
-    const normalized = toolId.trim().toLowerCase();
-    if (["chatgpt-desktop", "codex-app", "codex-client", "codex-desktop", "codex-cli", "codex-vscode", "codex-code-vscode", "codex-vs-code"].includes(normalized)) {
-      return "codex";
-    }
-    if (["claude-app", "claude-client"].includes(normalized)) {
-      return "claude-desktop";
-    }
-    if (["claude-vscode", "claude-code-vscode", "claude-vs-code"].includes(normalized)) {
-      return "claude";
-    }
-    if (["gemini-vscode", "gemini-code-vscode", "gemini-vs-code"].includes(normalized)) {
-      return "gemini-code-assist";
-    }
-    if (normalized === "hermes-agent") {
-      return "hermes";
-    }
-    return normalized;
-  }
-
   function protocolOptionsFor(toolId: string, mode: ProviderApplyMode): readonly ProtocolOption[] {
     if (mode === "gateway") {
       return protocolOptions;
     }
-    const supportedIds = configModeProtocolIdsByTool[canonicalProfileToolId(toolId)] ?? [];
+    const supportedIds = configProtocolIdsForTool(toolId);
     return protocolOptions.filter((option) => supportedIds.includes(option.id));
   }
 
@@ -515,62 +433,11 @@
     return providerId.trim() === "official";
   }
 
-  function profileSupportsModelMappings(toolId: string) {
-    return canonicalProfileToolId(toolId) === "claude";
-  }
-
   function resetModelOptions() {
     modelOptions = [];
     modelLoading = false;
     modelError = null;
     modelLoadedKey = "";
-  }
-
-  function emptyProfileModelMappingForm(): ProfileModelMappingForm {
-    return {
-      alias: "",
-      model: "",
-      supports1m: false,
-      description: ""
-    };
-  }
-
-  function modelMappingsForRequest(
-    toolId: string,
-    mappings: ProfileModelMappingForm[]
-  ): ProfileModelMapping[] {
-    if (!profileSupportsModelMappings(toolId)) {
-      return [];
-    }
-    return mappings
-      .map((mapping) => ({
-        alias: mapping.alias.trim(),
-        model: mapping.model.trim(),
-        supports1m: Boolean(mapping.supports1m),
-        description: mapping.description.trim() || null
-      }))
-      .filter((mapping) => mapping.alias || mapping.model || mapping.description);
-  }
-
-  function profileModelMappingsAreValid(mappings: ProfileModelMappingForm[]) {
-    const aliases = new Set<string>();
-    for (const mapping of mappings) {
-      const alias = mapping.alias.trim();
-      const model = mapping.model.trim();
-      const description = mapping.description.trim();
-      if (!alias && !model && !description) {
-        continue;
-      }
-      if (!alias || !model) {
-        return false;
-      }
-      const aliasKey = alias.toLowerCase();
-      if (aliases.has(aliasKey)) {
-        return false;
-      }
-      aliases.add(aliasKey);
-    }
-    return true;
   }
 
   function addModelMapping() {
@@ -634,6 +501,7 @@
       provider: activeProvider,
       protocol: activeProtocol,
       model: activeModel,
+      reviewModel: activeReviewModel,
       modelMappings: activeModelMappings,
       baseUrl: normalizeBaseUrl(activeBaseUrl),
       secretProvided: activeSecretProvided,
@@ -772,6 +640,9 @@
     if (action === "create") {
       return $t("common.create");
     }
+    if (action === "update") {
+      return $t("common.update");
+    }
     if (action === "create_or_update") {
       return $t("common.save");
     }
@@ -849,7 +720,11 @@
       });
     }
     if (item.label === "Active tool profile pointer") {
-      return $t("wizard.preview.activeProfilePointerDetail");
+      return $t(
+        item.action === "update"
+          ? "wizard.preview.activeProfilePointerAutoApplyDetail"
+          : "wizard.preview.activeProfilePointerDetail"
+      );
     }
     if (item.label === "Credential") {
       return credentialDetailLabel(activeProvider, activeSecretProvided);
@@ -1245,6 +1120,19 @@
               {/if}
             </section>
           {/if}
+        {/if}
+        {#if supportsReviewModel}
+          <div class={modelPickerClass}>
+            <label for={`${modelListId}-review-input`}>{$t("profiles.reviewModelLabel")}</label>
+            <ModelSelectInput
+              id={`${modelListId}-review-input`}
+              bind:value={reviewModel}
+              options={modelOptions}
+              optionLabel={modelOptionLabel}
+              toggleTitle={$t("profiles.reviewModelLabel")}
+              placeholder={$t("profiles.reviewModelPlaceholder")}
+            />
+          </div>
         {/if}
       </div>
       {#if codexOAuthConfig}

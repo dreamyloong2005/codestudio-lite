@@ -6,7 +6,7 @@ use crate::core::platform::{
     resolve_command_on_path, run_powershell,
 };
 use crate::core::storage;
-use crate::core::tool_registry::{ai_tools, system_tools, ToolDefinition};
+use crate::core::tool_catalog::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
     ClearEnvironmentVariablesRequest, ClearEnvironmentVariablesResult, EnvironmentVariableConflict,
     PathRepairHint, RepairToolPathRequest, RepairToolPathResult, Severity,
@@ -839,12 +839,7 @@ fn tool_definition(tool_id: &str) -> Option<ToolDefinition> {
         .find(|definition| definition.id == tool_id)
 }
 
-fn canonical_tool_id(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "claude-vscode" | "claude-code-vscode" | "claude-vs-code" => "claude".to_string(),
-        other => other.to_string(),
-    }
-}
+use crate::core::tool_catalog::canonical_tool_id;
 
 fn preview_env_value(name: &str, value: &str) -> String {
     if name.contains("TOKEN") || name.contains("KEY") {

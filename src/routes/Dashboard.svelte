@@ -1091,7 +1091,41 @@
     launchingToolId = null;
     launchTerminalExitCode = null;
   }
+  function handleDialogEscape(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    if (pendingInstallTool && !installingToolId) {
+      event.preventDefault();
+      void closeInstallPlan();
+    } else if (pendingLaunchTool && !launchTerminalRunning) {
+      event.preventDefault();
+      void closeToolLaunch();
+    }
+  }
+
+  function handleDialogEnter(event: KeyboardEvent) {
+    if (event.key !== "Enter" || keyboardTargetOwnsEnter(event.target)) return;
+    if (pendingInstallTool && installPlan?.canInstall && !installResult && !installingToolId) {
+      event.preventDefault();
+      void confirmInstallAction();
+    } else if (
+      pendingLaunchTool &&
+      launchPlan?.canLaunch &&
+      selectedLaunchShellId &&
+      !launchTerminalRunning &&
+      !launchingToolId
+    ) {
+      event.preventDefault();
+      void startToolLaunch();
+    }
+  }
+
+  function keyboardTargetOwnsEnter(target: EventTarget | null) {
+    if (!(target instanceof HTMLElement)) return false;
+    return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName);
+  }
 </script>
+
+<svelte:window on:keydown={handleDialogEscape} on:keydown={handleDialogEnter} />
 
 <div class={routeStackRecipe({ width: "full" })}>
   <section class={topStripRecipe()}>
