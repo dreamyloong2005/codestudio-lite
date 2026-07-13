@@ -216,8 +216,7 @@ pub(crate) fn guard_config_text_with_marketplace(
     let without_bom = config_text.trim_start_matches('\u{feff}');
     let mut doc = parse_toml_document(without_bom)?;
 
-    let features = table_mut_or_insert(&mut doc, "features")?;
-    features["js_repl"] = toml_edit::value(true);
+    remove_retired_js_repl_feature(&mut doc);
 
     for plugin_id in COMPUTER_USE_PLUGINS {
         ensure_plugin_enabled(&mut doc, plugin_id)?;
@@ -235,6 +234,20 @@ pub(crate) fn guard_config_text_with_marketplace(
     }
 
     Ok(ensure_trailing_newline(doc.to_string()))
+}
+
+fn remove_retired_js_repl_feature(doc: &mut DocumentMut) {
+    let should_remove_features = doc
+        .get_mut("features")
+        .and_then(Item::as_table_mut)
+        .map(|features| {
+            features.remove("js_repl");
+            features.is_empty()
+        })
+        .unwrap_or(false);
+    if should_remove_features {
+        doc.remove("features");
+    }
 }
 
 pub fn find_computer_use_notify_exe(home: &Path) -> Option<PathBuf> {
@@ -801,7 +814,7 @@ mod tests {
         .unwrap();
 
         assert!(!updated.as_bytes().starts_with(&[0xef, 0xbb, 0xbf]));
-        assert!(updated.contains("js_repl = true"));
+        assert!(!updated.contains("js_repl"));
         assert!(updated.contains("[plugins.\"browser@openai-bundled\"]"));
         assert!(updated.contains("[plugins.\"chrome@openai-bundled\"]"));
         assert!(updated.contains("[plugins.\"computer-use@openai-bundled\"]"));
@@ -823,8 +836,8 @@ mod tests {
     fn guard_config_text_creates_missing_sections() {
         let updated = guard_config_text("model = \"gpt-5\"\n", None).unwrap();
 
-        assert!(updated.contains("[features]"));
-        assert!(updated.contains("js_repl = true"));
+        assert!(!updated.contains("[features]"));
+        assert!(!updated.contains("js_repl"));
         for plugin_id in COMPUTER_USE_PLUGINS {
             assert!(updated.contains(&format!("[plugins.\"{plugin_id}\"]")));
         }

@@ -9,6 +9,7 @@ test("Codex Computer Use Guard is exposed as a launch option", () => {
   const store = read("src/lib/chatgptDesktopStore.ts");
   const api = read("src/lib/api.ts");
   const route = read("src/routes/ChatGPTDesktop.svelte");
+  const guard = read("src-tauri/src/core/computer_use_guard.rs");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
@@ -24,10 +25,13 @@ test("Codex Computer Use Guard is exposed as a launch option", () => {
   assert.match(route, /updateChatGPTDesktopDraft\(\{ computerUseGuardOnLaunch: event\.currentTarget\.checked \}\)/);
   assert.match(route, /chatgptDesktop\.computerUseGuardOnLaunch/);
   assert.match(route, /chatgptDesktop\.computerUseGuardOnLaunchHint/);
+  assert.doesNotMatch(guard, /features\["js_repl"\]/);
+  assert.match(guard, /features\.remove\("js_repl"\)/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
     assert.match(dictionary, /"chatgptDesktop\.computerUseGuardOnLaunch"/);
     assert.match(dictionary, /"chatgptDesktop\.computerUseGuardOnLaunchHint"/);
+    assert.match(dictionary, /mcp__node_repl__js/);
   }
 });
 
