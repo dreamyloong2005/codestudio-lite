@@ -93,6 +93,9 @@ pub fn run() {
             commands::usage_query::test_usage_script,
         ])
         .setup(|app| {
+            // A successful Windows update relaunches before Burn has fully
+            // exited, so remove captured updater artifacts with lock retries.
+            crate::core::app_updater::schedule_stale_update_cleanup();
             // GUI launches on macOS do not source shell profiles, so restore
             // PATH entries that CodeStudio Lite repaired in earlier sessions.
             let _ = crate::core::env_health::restore_persisted_path_repairs();

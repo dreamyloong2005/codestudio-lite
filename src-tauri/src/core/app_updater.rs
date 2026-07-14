@@ -4,14 +4,18 @@ use minisign_verify::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Duration;
 use tauri::AppHandle;
 use url::Url;
 
 pub const APP_UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 const UPDATE_HOST: &str = "download.codestudio.build";
+const UPDATE_DIRECTORY: &str = "application-update";
+const UPDATE_CLEANUP_ATTEMPTS: usize = 15;
+const UPDATE_CLEANUP_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +46,7 @@ where
     let update_dir = app_paths::app_paths()
         .map_err(|err| format!("Failed to resolve application paths: {err}"))?
         .downloads_dir
-        .join("application-update");
+        .join(UPDATE_DIRECTORY);
     fs::create_dir_all(&update_dir)
         .map_err(|err| format!("Failed to create application update directory: {err}"))?;
     let destination = update_dir.join(&request.filename);
@@ -72,6 +76,64 @@ where
     gateway::shutdown_for_app_exit();
     app.exit(0);
     Ok(())
+}
+
+pub fn schedule_stale_update_cleanup() {
+    let Ok(paths) = app_paths::app_paths() else {
+        return;
+    };
+    let update_dir = paths.downloads_dir.join(UPDATE_DIRECTORY);
+    let mut artifacts = stale_update_artifacts(&update_dir);
+    if artifacts.is_empty() {
+        let _ = fs::remove_dir(&update_dir);
+        return;
+    }
+
+    thread::spawn(move || {
+        for attempt in 0..UPDATE_CLEANUP_ATTEMPTS {
+            remove_stale_update_artifacts_once(&mut artifacts);
+            if artifacts.is_empty() {
+                let _ = fs::remove_dir(&update_dir);
+                return;
+            }
+            if attempt + 1 < UPDATE_CLEANUP_ATTEMPTS {
+                thread::sleep(UPDATE_CLEANUP_RETRY_DELAY);
+            }
+        }
+    });
+}
+
+fn stale_update_artifacts(update_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(update_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .filter(|entry| is_stale_update_artifact(&entry.file_name().to_string_lossy()))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+fn is_stale_update_artifact(filename: &str) -> bool {
+    let filename = filename.to_ascii_lowercase();
+    filename.ends_with(".exe")
+        || filename.ends_with(".dmg")
+        || filename.ends_with(".part")
+        || (filename.starts_with("install-") && filename.ends_with(".sh"))
+}
+
+fn remove_stale_update_artifacts_once(artifacts: &mut Vec<PathBuf>) {
+    artifacts.retain(|path| match fs::remove_file(path) {
+        Ok(()) => false,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    });
 }
 
 fn progress(phase: &str, downloaded_bytes: u64, total_bytes: Option<u64>) -> AppUpdateProgress {
@@ -276,6 +338,7 @@ rm -f "$dmg" "$0"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn rejects_non_r2_update_urls() {
@@ -291,5 +354,36 @@ mod tests {
     #[test]
     fn reads_the_tauri_signer_wrapped_public_key() {
         assert!(updater_public_key().is_ok());
+    }
+
+    #[test]
+    fn startup_cleanup_removes_only_known_update_artifacts() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "codestudio-update-cleanup-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("keep-directory")).unwrap();
+        for filename in [
+            "CodeStudio-Lite-1.5.0-Windows-x64-setup.exe",
+            "CodeStudio-Lite-1.5.0-macOS-universal.dmg",
+            "CodeStudio-Lite-1.5.0-Windows-x64-setup.exe.part",
+            "install-1.5.0.sh",
+            "keep.txt",
+        ] {
+            fs::write(root.join(filename), filename).unwrap();
+        }
+
+        let mut artifacts = stale_update_artifacts(&root);
+        assert_eq!(artifacts.len(), 4);
+        remove_stale_update_artifacts_once(&mut artifacts);
+
+        assert!(artifacts.is_empty());
+        assert!(root.join("keep.txt").is_file());
+        assert!(root.join("keep-directory").is_dir());
+        fs::remove_dir_all(root).unwrap();
     }
 }

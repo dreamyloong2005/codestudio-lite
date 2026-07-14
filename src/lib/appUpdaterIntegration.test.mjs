@@ -150,6 +150,10 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   assert.match(core, /ditto/);
   assert.match(core, /gateway::shutdown_for_app_exit/);
   assert.match(core, /app\.exit\(0\)/);
+  assert.match(core, /pub fn schedule_stale_update_cleanup/);
+  assert.match(core, /UPDATE_CLEANUP_ATTEMPTS/);
+  assert.match(core, /filename\.ends_with\("\.part"\)/);
+  assert.match(tauriLib, /app_updater::schedule_stale_update_cleanup\(\)/);
   assert.match(tauriLib, /commands::app_updater::install_application_update/);
   assert.match(cargo, /minisign-verify\s*=\s*"0\.2\.5"/);
   assert.match(store, /installAppUpdate/);
