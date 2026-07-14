@@ -2,6 +2,11 @@ use crate::core::app_updater::{self, InstallApplicationUpdateRequest};
 use tauri::Emitter;
 
 #[tauri::command]
+pub fn application_update_target() -> Result<String, String> {
+    app_updater::application_update_target().map(str::to_string)
+}
+
+#[tauri::command]
 pub async fn install_application_update(
     app: tauri::AppHandle,
     request: InstallApplicationUpdateRequest,

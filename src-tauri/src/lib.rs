@@ -25,6 +25,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::activity_log::load_activity_log,
+            commands::app_updater::application_update_target,
             commands::app_updater::install_application_update,
             commands::backup::list_backups,
             commands::backup::restore_backup,

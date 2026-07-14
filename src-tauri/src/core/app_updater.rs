@@ -34,6 +34,20 @@ pub struct AppUpdateProgress {
     pub total_bytes: Option<u64>,
 }
 
+pub fn application_update_target() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Ok("windows-x86_64"),
+        ("macos", "aarch64") => Ok("darwin-aarch64"),
+        ("macos", "x86_64") => Ok("darwin-x86_64"),
+        ("linux", "x86_64") => Ok("linux-x86_64"),
+        ("linux", "aarch64") => Ok("linux-aarch64"),
+        ("linux", "arm") => Ok("linux-armv7"),
+        (os, arch) => Err(format!(
+            "Automatic application updates are unsupported on {os}-{arch}."
+        )),
+    }
+}
+
 pub fn install_application_update<F>(
     app: &AppHandle,
     request: InstallApplicationUpdateRequest,
@@ -184,8 +198,23 @@ fn validate_request(request: &InstallApplicationUpdateRequest) -> Result<(), Str
         return Err("Windows application updates must use a Burn EXE.".to_string());
     }
     #[cfg(target_os = "macos")]
-    if !request.filename.ends_with(".dmg") {
-        return Err("macOS application updates must use a DMG.".to_string());
+    {
+        if !request.filename.ends_with(".dmg") {
+            return Err("macOS application updates must use a DMG.".to_string());
+        }
+        let architecture = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x64"
+        };
+        if !request
+            .filename
+            .ends_with(&format!("-macOS-{architecture}.dmg"))
+        {
+            return Err(format!(
+                "macOS application updates must match the running {architecture} architecture."
+            ));
+        }
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     return Err("Installer handoff is only supported on Windows and macOS.".to_string());
@@ -354,6 +383,41 @@ mod tests {
     #[test]
     fn reads_the_tauri_signer_wrapped_public_key() {
         assert!(updater_public_key().is_ok());
+    }
+
+    #[test]
+    fn resolves_the_native_tauri_update_target() {
+        let target = application_update_target().unwrap();
+        assert!(matches!(
+            target,
+            "windows-x86_64"
+                | "darwin-aarch64"
+                | "darwin-x86_64"
+                | "linux-x86_64"
+                | "linux-aarch64"
+                | "linux-armv7"
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejects_a_macos_installer_for_the_other_architecture() {
+        let other_architecture = if cfg!(target_arch = "aarch64") {
+            "x64"
+        } else {
+            "arm64"
+        };
+        let filename = format!("CodeStudio-Lite-1.5.0-macOS-{other_architecture}.dmg");
+        let request = InstallApplicationUpdateRequest {
+            version: "1.5.0".to_string(),
+            url: format!("https://{UPDATE_HOST}/releases/1.5.0/{filename}"),
+            signature: "signature".to_string(),
+            filename,
+        };
+
+        assert!(validate_request(&request)
+            .unwrap_err()
+            .contains("must match the running"));
     }
 
     #[test]

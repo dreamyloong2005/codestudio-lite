@@ -3,10 +3,20 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAURI_DIR="$ROOT_DIR/src-tauri"
-TARGET_TRIPLE="${1:-universal-apple-darwin}"
+TARGET_TRIPLE="${1:?Usage: scripts/normalize-macos-artifacts.sh <target-triple>}"
 VERSION="$(/usr/bin/plutil -extract version raw -o - "$TAURI_DIR/tauri.conf.json")"
 BUNDLE_ROOT="$TAURI_DIR/target/$TARGET_TRIPLE/release/bundle"
-CANONICAL_BASE="CodeStudio-Lite-${VERSION}-macOS-universal"
+
+case "$TARGET_TRIPLE" in
+  aarch64-apple-darwin) ARCH_LABEL="arm64" ;;
+  x86_64-apple-darwin) ARCH_LABEL="x64" ;;
+  *)
+    echo "Unsupported macOS updater target: $TARGET_TRIPLE" >&2
+    exit 1
+    ;;
+esac
+
+CANONICAL_BASE="CodeStudio-Lite-${VERSION}-macOS-${ARCH_LABEL}"
 
 normalize_file() {
   local source="$1"

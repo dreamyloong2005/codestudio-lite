@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { get, writable } from "svelte/store";
-import { installApplicationUpdate } from "./api";
+import { applicationUpdateTarget, installApplicationUpdate } from "./api";
 import { APP_UPDATER_ENABLED, APP_VERSION } from "./appInfo";
 
 type UpdateStatus =
@@ -76,11 +76,13 @@ export const appUpdateState = writable<AppUpdateState>(initialState);
 let inFlight: Promise<AppUpdateState> | null = null;
 let installInFlight: Promise<AppUpdateState> | null = null;
 let pendingUpdate: Update | null = null;
+let pendingUpdateTarget: string | null = null;
 
 export async function checkForAppUpdate(force = false): Promise<AppUpdateState> {
   const current = get(appUpdateState);
   if (!isTauri() || !APP_UPDATER_ENABLED) {
     pendingUpdate = null;
+    pendingUpdateTarget = null;
     const unconfiguredState: AppUpdateState = {
       ...initialState,
       status: "unconfigured",
@@ -135,6 +137,7 @@ export async function checkForAppUpdate(force = false): Promise<AppUpdateState> 
     })
     .catch((err) => {
       pendingUpdate = null;
+      pendingUpdateTarget = null;
       const nextState: AppUpdateState = {
         ...initialState,
         status: "error",
@@ -164,8 +167,9 @@ export function installAppUpdate(): Promise<AppUpdateState> {
 async function performAppUpdateInstall(): Promise<AppUpdateState> {
   const update = pendingUpdate;
   const updateRawJson = pendingUpdate && pendingUpdate.rawJson;
+  const updateTarget = pendingUpdateTarget;
   const current = get(appUpdateState);
-  if (!update || !updateRawJson || !current.installable) {
+  if (!update || !updateRawJson || !updateTarget || !current.installable) {
     const unavailableState: AppUpdateState = {
       ...current,
       status: "error",
@@ -185,7 +189,7 @@ async function performAppUpdateInstall(): Promise<AppUpdateState> {
   });
 
   try {
-    const installerArtifact = installerArtifactForCurrentPlatform(updateRawJson);
+    const installerArtifact = installerArtifactForTarget(updateRawJson, updateTarget);
     if (installerArtifact) {
       const unlisten = await listen<AppUpdateProgress>("app-update-progress", (event) => {
         const progress = event.payload;
@@ -244,23 +248,18 @@ async function performAppUpdateInstall(): Promise<AppUpdateState> {
   }
 }
 
-export function installerArtifactForCurrentPlatform(
-  rawJson: Record<string, unknown>
+export function installerArtifactForTarget(
+  rawJson: Record<string, unknown>,
+  target: string
 ): InstallerArtifact | null {
-  const userAgent = navigator.userAgent.toLowerCase();
-  const platformPrefix = userAgent.includes("windows")
-    ? "windows-"
-    : userAgent.includes("mac os") || userAgent.includes("macintosh")
-      ? "darwin-"
-      : null;
-  if (!platformPrefix) {
+  if (!target.startsWith("windows-") && !target.startsWith("darwin-")) {
     return null;
   }
   const platforms = rawJson.platforms;
   if (!platforms || typeof platforms !== "object" || Array.isArray(platforms)) {
     throw new Error("The updater manifest does not contain platform installers.");
   }
-  const entry = Object.entries(platforms).find(([key]) => key.startsWith(platformPrefix))?.[1];
+  const entry = Reflect.get(platforms, target);
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
     throw new Error("No signed installer is available for this platform.");
   }
@@ -278,7 +277,9 @@ export function installerArtifactForCurrentPlatform(
 }
 
 async function fetchTauriRelease(): Promise<ReleaseLookup> {
-  pendingUpdate = await check({ timeout: 8000 });
+  const target = await applicationUpdateTarget();
+  pendingUpdate = await check({ timeout: 8000, target });
+  pendingUpdateTarget = pendingUpdate ? target : null;
   if (!pendingUpdate) {
     return { release: null, emptyStatus: "upToDate" };
   }

@@ -8,8 +8,15 @@ on:
 
 jobs:
   build-macos:
-    name: macOS universal bundle
+    name: macOS ${{ matrix.arch }} bundle
     runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x64
 
     steps:
       - name: Checkout
@@ -24,7 +31,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - name: Install frontend dependencies
         run: npm ci
@@ -34,14 +41,14 @@ jobs:
 
       - name: Build macOS app
         run: |
-          npm run tauri:build -- --target universal-apple-darwin
-          bash scripts/normalize-macos-artifacts.sh universal-apple-darwin
+          npm run tauri:build -- --target ${{ matrix.target }}
+          bash scripts/normalize-macos-artifacts.sh ${{ matrix.target }}
 
       - name: Upload macOS bundles
         uses: actions/upload-artifact@v4
         with:
-          name: CodeStudio-Lite-macOS
+          name: CodeStudio-Lite-macOS-${{ matrix.arch }}
           path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error

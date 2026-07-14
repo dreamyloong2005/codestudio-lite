@@ -48,8 +48,9 @@ test("release builds generate updater configuration from R2 inputs", () => {
   assert.match(generator, /createUpdaterArtifacts/);
   assert.match(gitignore, /src-tauri\/tauri\.updater\.generated\.conf\.json/);
   assert.match(burnBuild, /tauri:build:updater -- --bundles msi/);
-  assert.match(macosBuild, /tauri:build:updater -- --target universal-apple-darwin/);
-  assert.match(macosNormalizer, /CodeStudio-Lite-\$\{VERSION\}-macOS-universal/);
+  assert.match(macosBuild, /aarch64-apple-darwin:arm64/);
+  assert.match(macosBuild, /x86_64-apple-darwin:x64/);
+  assert.match(macosNormalizer, /CodeStudio-Lite-\$\{VERSION\}-macOS-\$\{ARCH_LABEL\}/);
   assert.match(linuxBuild, /normalize-linux-artifacts\.sh/);
   assert.match(linuxNormalizer, /CodeStudio-Lite-\$\{VERSION\}-Linux-\$\{ARCH_LABEL\}/);
   assert.match(linuxNormalizer, /command -v node/);
@@ -132,13 +133,18 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   assert.doesNotMatch(store, /api\.github\.com|fetchGitHubRelease|GITHUB_RELEASES_API_URL/);
   assert.doesNotMatch(appInfo, /GITHUB_RELEASES_API_URL|api\.github\.com/);
   assert.match(store, /pendingUpdate\.rawJson/);
-  assert.match(store, /installerArtifactForCurrentPlatform/);
+  assert.match(store, /installerArtifactForTarget/);
+  assert.match(store, /check\(\{ timeout: 8000, target \}\)/);
+  assert.match(store, /Reflect\.get\(platforms, target\)/);
+  assert.doesNotMatch(store, /navigator\.userAgent/);
   assert.match(store, /installApplicationUpdate/);
   assert.match(store, /listen<AppUpdateProgress>\("app-update-progress"/);
   assert.match(store, /update\.downloadAndInstall\(/);
   assert.doesNotMatch(store, /update\.download\(|update\.install\(|relaunch/);
   assert.match(api, /invoke\("install_application_update"/);
   assert.match(commands, /pub async fn install_application_update/);
+  assert.match(commands, /pub fn application_update_target/);
+  assert.match(api, /invoke\("application_update_target"\)/);
   assert.match(core, /download_http::download_to_file/);
   assert.match(core, /minisign_verify::\{PublicKey, Signature\}/);
   assert.match(core, /verify_stream/);
@@ -146,6 +152,7 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   assert.match(core, /-quiet/);
   assert.match(core, /-norestart/);
   assert.match(core, /launch_macos_dmg_helper/);
+  assert.match(core, /must match the running \{architecture\} architecture/);
   assert.match(core, /hdiutil/);
   assert.match(core, /ditto/);
   assert.match(core, /gateway::shutdown_for_app_exit/);
@@ -155,6 +162,7 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   assert.match(core, /filename\.ends_with\("\.part"\)/);
   assert.match(tauriLib, /app_updater::schedule_stale_update_cleanup\(\)/);
   assert.match(tauriLib, /commands::app_updater::install_application_update/);
+  assert.match(tauriLib, /commands::app_updater::application_update_target/);
   assert.match(cargo, /minisign-verify\s*=\s*"0\.2\.5"/);
   assert.match(store, /installAppUpdate/);
   assert.match(settings, /installAppUpdate/);

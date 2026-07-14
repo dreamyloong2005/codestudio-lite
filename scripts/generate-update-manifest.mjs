@@ -20,14 +20,24 @@ if (options["windows-installer"]) {
   );
 }
 
-if (options["macos-dmg"]) {
-  const macosEntry = artifactEntry(
-    options["macos-dmg"],
+const macosArm64 = options["macos-arm64-dmg"];
+const macosX64 = options["macos-x64-dmg"];
+if (Boolean(macosArm64) !== Boolean(macosX64)) {
+  throw new Error("Provide both --macos-arm64-dmg and --macos-x64-dmg.");
+}
+if (macosArm64 && macosX64) {
+  platforms["darwin-aarch64"] = artifactEntry(
+    macosArm64,
     `${baseUrl}/releases/${encodeURIComponent(version)}`,
-    "macOS"
+    "macOS",
+    "arm64"
   );
-  platforms["darwin-aarch64"] = macosEntry;
-  platforms["darwin-x86_64"] = macosEntry;
+  platforms["darwin-x86_64"] = artifactEntry(
+    macosX64,
+    `${baseUrl}/releases/${encodeURIComponent(version)}`,
+    "macOS",
+    "x64"
+  );
 }
 
 if (options["linux-appimage"]) {
@@ -43,7 +53,7 @@ if (options["linux-appimage"]) {
 }
 
 if (Object.keys(platforms).length === 0) {
-  throw new Error("Provide --windows-installer, --macos-dmg, and/or --linux-appimage.");
+  throw new Error("Provide --windows-installer, both macOS DMGs, and/or --linux-appimage.");
 }
 
 const manifest = {
@@ -57,9 +67,9 @@ mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 console.log(`Updater manifest written to ${outputPath}`);
 
-function artifactEntry(inputPath, objectBaseUrl, operatingSystem) {
+function artifactEntry(inputPath, objectBaseUrl, operatingSystem, architecture) {
   const artifactPath = resolve(inputPath);
-  validateArtifactFilename(artifactPath, operatingSystem);
+  validateArtifactFilename(artifactPath, operatingSystem, architecture);
   const signaturePath = `${artifactPath}.sig`;
   if (!existsSync(artifactPath)) {
     throw new Error(`Updater artifact was not found: ${artifactPath}`);
@@ -79,7 +89,7 @@ function artifactEntry(inputPath, objectBaseUrl, operatingSystem) {
   };
 }
 
-function validateArtifactFilename(path, operatingSystem) {
+function validateArtifactFilename(path, operatingSystem, architecture) {
   const filename = basename(path);
   if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(filename)) {
     throw new Error(`Updater artifact filename must use kebab-case without spaces or underscores: ${filename}`);
@@ -87,6 +97,9 @@ function validateArtifactFilename(path, operatingSystem) {
   const requiredPrefix = `CodeStudio-Lite-${version}-${operatingSystem}-`;
   if (!filename.startsWith(requiredPrefix)) {
     throw new Error(`Updater artifact filename must include ${operatingSystem} between version and architecture: ${filename}`);
+  }
+  if (architecture && !filename.startsWith(`${requiredPrefix}${architecture}.`)) {
+    throw new Error(`Updater artifact filename must use ${operatingSystem}-${architecture}: ${filename}`);
   }
 }
 

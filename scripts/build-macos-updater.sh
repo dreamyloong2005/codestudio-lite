@@ -9,16 +9,25 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-npm run tauri:build:updater -- --target universal-apple-darwin "$@"
-bash "$ROOT_DIR/scripts/normalize-macos-artifacts.sh" universal-apple-darwin
+VERSION="$(/usr/bin/plutil -extract version raw -o - "$ROOT_DIR/src-tauri/tauri.conf.json")"
 
-DMG_PATH="$ROOT_DIR/src-tauri/target/universal-apple-darwin/release/bundle/dmg/CodeStudio-Lite-$(/usr/bin/plutil -extract version raw -o - "$ROOT_DIR/src-tauri/tauri.conf.json")-macOS-universal.dmg"
-if [[ ! -f "$DMG_PATH" ]]; then
-  echo "Normalized macOS updater DMG was not found: $DMG_PATH" >&2
-  exit 1
-fi
-npx tauri signer sign "$DMG_PATH"
-if [[ ! -f "$DMG_PATH.sig" ]]; then
-  echo "macOS updater signature was not generated: $DMG_PATH.sig" >&2
-  exit 1
-fi
+for target_and_arch in \
+  "aarch64-apple-darwin:arm64" \
+  "x86_64-apple-darwin:x64"; do
+  target="${target_and_arch%%:*}"
+  arch="${target_and_arch##*:}"
+
+  npm run tauri:build:updater -- --target "$target" "$@"
+  bash "$ROOT_DIR/scripts/normalize-macos-artifacts.sh" "$target"
+
+  dmg_path="$ROOT_DIR/src-tauri/target/$target/release/bundle/dmg/CodeStudio-Lite-${VERSION}-macOS-${arch}.dmg"
+  if [[ ! -f "$dmg_path" ]]; then
+    echo "Normalized macOS updater DMG was not found: $dmg_path" >&2
+    exit 1
+  fi
+  npx tauri signer sign "$dmg_path"
+  if [[ ! -f "$dmg_path.sig" ]]; then
+    echo "macOS updater signature was not generated: $dmg_path.sig" >&2
+    exit 1
+  fi
+done

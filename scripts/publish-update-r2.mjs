@@ -22,7 +22,13 @@ const awsEnvironment = {
 
 const immutableUploads = [];
 addArtifactUploads(immutableUploads, options["windows-installer"], `releases/${version}`, "Windows");
-addArtifactUploads(immutableUploads, options["macos-dmg"], `releases/${version}`, "macOS");
+const macosArm64 = options["macos-arm64-dmg"];
+const macosX64 = options["macos-x64-dmg"];
+if (Boolean(macosArm64) !== Boolean(macosX64)) {
+  throw new Error("Provide both --macos-arm64-dmg and --macos-x64-dmg.");
+}
+addArtifactUploads(immutableUploads, macosArm64, `releases/${version}`, "macOS", "arm64");
+addArtifactUploads(immutableUploads, macosX64, `releases/${version}`, "macOS", "x64");
 if (options["linux-appimage"]) {
   const linuxPlatform = requiredOption(options, "linux-platform");
   if (!/^linux-(?:x86_64|aarch64|armv7)$/.test(linuxPlatform)) {
@@ -44,12 +50,12 @@ uploadMutable({
 
 console.log(dryRun ? "R2 updater publish dry run completed." : "R2 updater release published.");
 
-function addArtifactUploads(uploads, inputPath, keyPrefix, operatingSystem) {
+function addArtifactUploads(uploads, inputPath, keyPrefix, operatingSystem, architecture) {
   if (!inputPath) {
     return;
   }
   const artifactPath = resolve(inputPath);
-  validateArtifactFilename(artifactPath, operatingSystem);
+  validateArtifactFilename(artifactPath, operatingSystem, architecture);
   const signaturePath = `${artifactPath}.sig`;
   requireFile(artifactPath);
   requireFile(signaturePath);
@@ -67,7 +73,7 @@ function addArtifactUploads(uploads, inputPath, keyPrefix, operatingSystem) {
   });
 }
 
-function validateArtifactFilename(path, operatingSystem) {
+function validateArtifactFilename(path, operatingSystem, architecture) {
   const filename = basename(path);
   if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(filename)) {
     throw new Error(`Updater artifact filename must use kebab-case without spaces or underscores: ${filename}`);
@@ -75,6 +81,9 @@ function validateArtifactFilename(path, operatingSystem) {
   const requiredPrefix = `CodeStudio-Lite-${version}-${operatingSystem}-`;
   if (!filename.startsWith(requiredPrefix)) {
     throw new Error(`Updater artifact filename must include ${operatingSystem} between version and architecture: ${filename}`);
+  }
+  if (architecture && !filename.startsWith(`${requiredPrefix}${architecture}.`)) {
+    throw new Error(`Updater artifact filename must use ${operatingSystem}-${architecture}: ${filename}`);
   }
 }
 

@@ -836,6 +836,13 @@ export interface InstallApplicationUpdateRequest {
   filename: string;
 }
 
+export async function applicationUpdateTarget(): Promise<string> {
+  if (isTauri()) {
+    return invoke("application_update_target");
+  }
+  return "browser-unknown";
+}
+
 export async function installApplicationUpdate(
   request: InstallApplicationUpdateRequest
 ): Promise<void> {

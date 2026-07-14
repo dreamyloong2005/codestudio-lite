@@ -10,8 +10,10 @@ The production custom domain is `https://download.codestudio.build`. Do not use 
 stable/latest.json
 releases/1.5.0/CodeStudio-Lite-1.5.0-Windows-x64-setup.exe
 releases/1.5.0/CodeStudio-Lite-1.5.0-Windows-x64-setup.exe.sig
-releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-universal.dmg
-releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-universal.dmg.sig
+releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-arm64.dmg
+releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-arm64.dmg.sig
+releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-x64.dmg
+releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-x64.dmg.sig
 releases/1.5.0/CodeStudio-Lite-1.5.0-Linux-x64.AppImage
 releases/1.5.0/CodeStudio-Lite-1.5.0-Linux-x64.AppImage.sig
 ```
@@ -31,10 +33,11 @@ The Settings update check still uses Tauri updater version selection, but Window
 
 ## macOS Contract
 
-- Use the universal DMG for both manual installation and updates.
-- Sign the final normalized DMG with `tauri signer sign` and publish the DMG plus `.sig`.
+- Build separate arm64 and x64 DMGs for both manual installation and updates.
+- Sign each normalized DMG with `tauri signer sign` and publish each DMG plus its `.sig`.
 - After verification, a detached helper waits for CodeStudio Lite to exit, mounts the DMG, replaces the application bundle with rollback protection, and opens the updated app.
-- Map the same universal DMG entry to both macOS Tauri target keys in `latest.json`.
+- Map the arm64 DMG to `darwin-aarch64` and the x64 DMG to `darwin-x86_64` in `latest.json`.
+- The Tauri updater sends the running target and current application version when checking `stable/latest.json`; only a newer version is offered, and the backend downloads the exact architecture entry selected for that build.
 - Production distribution still requires the normal Apple signing and notarization path; the Tauri updater signature does not replace Gatekeeper requirements.
 
 ## Linux Contract
@@ -83,7 +86,7 @@ The first implementation uses a stable-only channel. Prerelease channels can be 
 The first implementation uses complete signed update packages. It will not implement binary delta, file-level incremental, or patch-chain updates.
 
 - Windows downloads the complete signed Burn updater artifact.
-- macOS downloads the complete signed DMG.
+- macOS downloads the complete signed DMG for the running machine architecture.
 - A failed download or installation can be retried without reconstructing an application from partial patches.
 - Differential updates should only be reconsidered if release artifacts become large enough for the additional patch generation, fallback, rollback, and signing complexity to be justified.
 
@@ -186,7 +189,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<key-password>"
 npm run updater:build:macos
 ```
 
-This produces the universal `.app`, normalized DMG, and adjacent DMG `.sig` on a macOS build machine. Apple Developer signing and notarization should be configured separately for production distribution.
+This produces separate arm64 and x64 `.app` bundles, normalized DMGs, and adjacent DMG `.sig` files on a macOS build machine. Apple Developer signing and notarization should be configured separately for production distribution.
 
 Linux shell:
 
@@ -215,12 +218,12 @@ The build machine and the machine that uploads to R2 may be different. Transfer 
       "url": "https://download.codestudio.build/releases/1.5.0/CodeStudio-Lite-1.5.0-Windows-x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "<contents of the .dmg.sig file>",
-      "url": "https://download.codestudio.build/releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-universal.dmg"
+      "signature": "<contents of the arm64 .dmg.sig file>",
+      "url": "https://download.codestudio.build/releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-arm64.dmg"
     },
     "darwin-x86_64": {
-      "signature": "<same universal app signature>",
-      "url": "https://download.codestudio.build/releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-universal.dmg"
+      "signature": "<contents of the x64 .dmg.sig file>",
+      "url": "https://download.codestudio.build/releases/1.5.0/CodeStudio-Lite-1.5.0-macOS-x64.dmg"
     },
     "linux-x86_64": {
       "signature": "<contents of the .AppImage.sig file>",
@@ -239,7 +242,8 @@ npm run updater:manifest -- `
   --version 1.5.0 `
   --base-url https://download.codestudio.build `
   --windows-installer "src-tauri/target/release/bundle/burn/CodeStudio-Lite-1.5.0-Windows-x64-setup.exe" `
-  --macos-dmg "<downloaded signed macOS DMG>" `
+  --macos-arm64-dmg "<downloaded signed arm64 macOS DMG>" `
+  --macos-x64-dmg "<downloaded signed x64 macOS DMG>" `
   --linux-appimage "<downloaded Linux updater artifact>" `
   --linux-platform linux-x86_64 `
   --output dist-updater/latest.json
@@ -256,7 +260,8 @@ $env:R2_SECRET_ACCESS_KEY = "<r2-secret-access-key>"
 npm run updater:publish -- `
   --version 1.5.0 `
   --windows-installer "src-tauri/target/release/bundle/burn/CodeStudio-Lite-1.5.0-Windows-x64-setup.exe" `
-  --macos-dmg "<downloaded signed macOS DMG>" `
+  --macos-arm64-dmg "<downloaded signed arm64 macOS DMG>" `
+  --macos-x64-dmg "<downloaded signed x64 macOS DMG>" `
   --linux-appimage "<downloaded Linux updater artifact>" `
   --linux-platform linux-x86_64 `
   --manifest dist-updater/latest.json `
