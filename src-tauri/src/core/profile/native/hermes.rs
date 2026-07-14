@@ -42,9 +42,8 @@ impl NativeProfileAdapter for HermesAdapter {
         hermes_gateway_cleanup_config_content(current, "hermes")
     }
     fn inspect(&self, current: &str) -> Result<Option<DetectedNativeProfile>, String> {
-        Ok(detect_hermes_native_profile(&parse_yaml_or_empty(
+        Ok(detect_hermes_native_profile(&parse_hermes_yaml_or_empty(
             current,
-            "Hermes config",
         )?))
     }
     fn matches(
@@ -54,7 +53,7 @@ impl NativeProfileAdapter for HermesAdapter {
         secret_match: SecretMatchMode,
     ) -> Result<bool, String> {
         Ok(hermes_config_matches_profile_with_secret_match(
-            &parse_yaml_or_empty(current, "Hermes config")?,
+            &parse_hermes_yaml_or_empty(current)?,
             profile,
             secret_match,
         ))
@@ -200,7 +199,7 @@ pub(in crate::core::profile) fn hermes_config_content_with_api_key(
     api_key: &str,
 ) -> Result<String, String> {
     require_profile_protocol(profile, &[PROTOCOL_OPENAI_CHAT_COMPLETIONS])?;
-    let mut value = parse_yaml_or_empty(current, "Hermes config")?;
+    let mut value = parse_hermes_yaml_or_empty(current)?;
     let runtime_base_url =
         profile_runtime_base_url_for_protocol(&profile.protocol, &profile.base_url);
 
@@ -220,7 +219,7 @@ pub(in crate::core::profile) fn hermes_config_content_with_api_key(
 pub(in crate::core::profile) fn hermes_official_config_content(
     current: &str,
 ) -> Result<String, String> {
-    let mut value = parse_yaml_or_empty(current, "Hermes config")?;
+    let mut value = parse_hermes_yaml_or_empty(current)?;
     remove_yaml_string_path_if(&mut value, &["model", "provider"], "custom");
     remove_yaml_path(&mut value, &["model", "base_url"]);
     remove_yaml_path(&mut value, &["model", "api_key"]);
@@ -234,7 +233,7 @@ pub(in crate::core::profile) fn hermes_gateway_config_content(
     profile: &ProfileDraft,
 ) -> Result<String, String> {
     let client = gateway::client_config_for_tool(&profile.app)?;
-    let mut value = parse_yaml_or_empty(current, "Hermes config")?;
+    let mut value = parse_hermes_yaml_or_empty(current)?;
     let model = gateway_config_model_for_profile(profile);
 
     set_yaml_string_path(&mut value, &["model", "provider"], "custom");
@@ -251,7 +250,7 @@ pub(in crate::core::profile) fn hermes_gateway_cleanup_config_content(
     tool_id: &str,
 ) -> Result<String, String> {
     let client = gateway::client_config_for_tool(tool_id)?;
-    let mut value = parse_yaml_or_empty(current, "Hermes config")?;
+    let mut value = parse_hermes_yaml_or_empty(current)?;
 
     remove_yaml_string_path_if(&mut value, &["model", "base_url"], &client.base_url);
     if yaml_string_lookup(&value, &["model", "api_key"])
@@ -304,6 +303,54 @@ pub(in crate::core::profile) fn detect_hermes_native_profile(
         base_url,
         api_key,
     })
+}
+
+pub(in crate::core::profile) fn parse_hermes_yaml_or_empty(
+    content: &str,
+) -> Result<serde_norway::Value, String> {
+    let mut normalized = content;
+    loop {
+        let Some(line_end) = normalized.find('\n') else {
+            break;
+        };
+        let (line, remainder) = normalized.split_at(line_end + 1);
+        if line.trim().is_empty() || line.trim() == "{}" {
+            normalized = remainder;
+            continue;
+        }
+        break;
+    }
+
+    if normalized.trim().is_empty() || normalized.trim() == "{}" {
+        return Ok(serde_norway::Value::Mapping(serde_norway::Mapping::new()));
+    }
+
+    let mut merged = serde_norway::Mapping::new();
+    for document in serde_norway::Deserializer::from_str(normalized) {
+        let value = serde_norway::Value::deserialize(document)
+            .map_err(|err| format!("Existing Hermes config could not be parsed: {err}"))?;
+        let mapping = match value {
+            serde_norway::Value::Null => continue,
+            serde_norway::Value::Mapping(mapping) => mapping,
+            _ => return Err(
+                "Existing Hermes config could not be parsed: each YAML document must be a mapping"
+                    .to_string(),
+            ),
+        };
+        for (key, value) in mapping {
+            if let Some(existing) = merged.get(&key) {
+                if existing != &value {
+                    return Err(format!(
+                        "Existing Hermes config could not be parsed: conflicting key {} across YAML documents",
+                        redacted_yaml_value(&key)
+                    ));
+                }
+                continue;
+            }
+            merged.insert(key, value);
+        }
+    }
+    Ok(serde_norway::Value::Mapping(merged))
 }
 pub(in crate::core::profile) fn hermes_config_matches_profile(
     value: &serde_norway::Value,
@@ -362,7 +409,7 @@ pub(in crate::core::profile) fn verify_hermes_config(
     profile: &ProfileDraft,
 ) -> Result<bool, String> {
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let value = parse_yaml_or_empty(&content, "Hermes config")?;
+    let value = parse_hermes_yaml_or_empty(&content)?;
     if provider_is_official(&profile.provider) {
         return Ok(hermes_config_matches_profile(&value, profile));
     }
@@ -394,7 +441,7 @@ pub(in crate::core::profile) fn verify_hermes_gateway_config(
 ) -> Result<bool, String> {
     let client = gateway::client_config_for_tool(&profile.app)?;
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let value = parse_yaml_or_empty(&content, "Hermes config")?;
+    let value = parse_hermes_yaml_or_empty(&content)?;
     let model = gateway_config_model_for_profile(profile);
 
     Ok(

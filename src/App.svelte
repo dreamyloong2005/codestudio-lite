@@ -10,6 +10,7 @@
     loadAppSettings,
     loadCachedDetection,
     loadGatewayStatus,
+    loadProfileSummary,
     restartGateway,
     startGateway,
     stopGateway,
@@ -244,11 +245,11 @@
       error = null;
     }
     try {
-      const [nextProfileSummary, nextSnapshot, nextGatewayStatus] = await Promise.all([
-        ensureAppDirs(),
+      const [nextSnapshot, nextGatewayStatus] = await Promise.all([
         detectEnvironment({ waitForUpdates }),
         loadGatewayStatus()
       ]);
+      const nextProfileSummary = await ensureAppDirs();
       if (runId !== dashboardRefreshRunId) {
         return;
       }
@@ -289,7 +290,7 @@
     error = null;
     try {
       const [nextProfileSummary, nextCachedSnapshot, nextGatewayStatus] = await Promise.all([
-        ensureAppDirs(),
+        loadProfileSummary(),
         loadCachedDetection(),
         loadGatewayStatus()
       ]);

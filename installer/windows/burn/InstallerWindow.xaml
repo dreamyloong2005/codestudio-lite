@@ -1,0 +1,349 @@
+<Window x:Class="CodeStudioLite.Installer.InstallerWindow"
+        x:ClassModifier="internal"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="CodeStudio Lite Setup"
+        Width="860"
+        Height="540"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        Background="#0A0B0D"
+        Foreground="#E9EAEC"
+        FontFamily="Segoe UI"
+        FontSize="14"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="WindowBrush" Color="#0A0B0D" />
+    <SolidColorBrush x:Key="PanelBrush" Color="#101216" />
+    <SolidColorBrush x:Key="StrongBrush" Color="#14171D" />
+    <SolidColorBrush x:Key="SoftBrush" Color="#181B21" />
+    <SolidColorBrush x:Key="HoverBrush" Color="#1D2026" />
+    <SolidColorBrush x:Key="BorderBrush" Color="#2A2E36" />
+    <SolidColorBrush x:Key="TextBrush" Color="#E9EAEC" />
+    <SolidColorBrush x:Key="MutedBrush" Color="#A4A8B3" />
+    <SolidColorBrush x:Key="AccentBrush" Color="#1F8FFF" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#409CFF" />
+    <SolidColorBrush x:Key="BrandBrush" Color="#F4D94E" />
+
+    <Style x:Key="BaseButtonStyle" TargetType="Button">
+      <Setter Property="Height" Value="38" />
+      <Setter Property="MinWidth" Value="92" />
+      <Setter Property="Padding" Value="18,0" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Background" Value="{StaticResource SoftBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ButtonBorder"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="5">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource HoverBrush}" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.82" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.42" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ButtonBorder"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="5">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Background" Value="{StaticResource AccentHoverBrush}" />
+                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.82" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.42" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="FieldStyle" TargetType="TextBox">
+      <Setter Property="Height" Value="40" />
+      <Setter Property="Padding" Value="12,9" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Background" Value="{StaticResource StrongBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CaretBrush" Value="{StaticResource TextBrush}" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Background" Value="{StaticResource StrongBrush}" />
+      <Setter Property="Padding" Value="12,9" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Style.Triggers>
+        <Trigger Property="IsHighlighted" Value="True">
+          <Setter Property="Background" Value="{StaticResource HoverBrush}" />
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="#183654" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style TargetType="ComboBox">
+      <Setter Property="Height" Value="40" />
+      <Setter Property="Padding" Value="12,0" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Background" Value="{StaticResource StrongBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <ToggleButton x:Name="DropDownToggle"
+                            Focusable="False"
+                            ClickMode="Press"
+                            IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+                <ToggleButton.Template>
+                  <ControlTemplate TargetType="ToggleButton">
+                    <Border x:Name="ComboBorder"
+                            Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                            BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                            BorderThickness="1"
+                            CornerRadius="5">
+                      <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="38" /></Grid.ColumnDefinitions>
+                        <Path Grid.Column="1" Width="9" Height="5" HorizontalAlignment="Center" VerticalAlignment="Center" Fill="#A4A8B3" Data="M 0 0 L 4.5 5 L 9 0 Z" />
+                      </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="ComboBorder" Property="BorderBrush" Value="#47505D" />
+                      </Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </ToggleButton.Template>
+              </ToggleButton>
+              <ContentPresenter Margin="12,0,42,0"
+                                VerticalAlignment="Center"
+                                HorizontalAlignment="Left"
+                                IsHitTestVisible="False"
+                                Content="{TemplateBinding SelectionBoxItem}"
+                                ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" />
+              <Popup x:Name="Popup"
+                     Placement="Bottom"
+                     IsOpen="{TemplateBinding IsDropDownOpen}"
+                     AllowsTransparency="True"
+                     Focusable="False"
+                     PopupAnimation="Fade">
+                <Border MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                        MaxHeight="220"
+                        Margin="0,4,0,0"
+                        Background="{StaticResource StrongBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="5">
+                  <ScrollViewer SnapsToDevicePixels="True">
+                    <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained" />
+                  </ScrollViewer>
+                </Border>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Border BorderBrush="#30343D" BorderThickness="1">
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="46" />
+        <RowDefinition Height="*" />
+        <RowDefinition Height="76" />
+      </Grid.RowDefinitions>
+
+      <Border Grid.Row="0" Grid.ColumnSpan="2" Background="#0D0F13" BorderBrush="#24272E" BorderThickness="0,0,0,1" MouseLeftButtonDown="DragWindow">
+        <Grid Margin="16,0,8,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="42" />
+          </Grid.ColumnDefinitions>
+          <Image x:Name="TitleIcon" Width="22" Height="22" Stretch="Uniform" />
+          <TextBlock x:Name="WindowTitle" Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center" FontSize="13" FontWeight="SemiBold" Foreground="#D8DBE2" Text="CodeStudio Lite Setup" />
+          <Button Grid.Column="2" Style="{StaticResource BaseButtonStyle}" MinWidth="34" Width="34" Height="30" Padding="0" Content="&#x2715;" FontSize="12" Click="CloseButtonClick" />
+        </Grid>
+      </Border>
+
+      <Grid Grid.Row="1">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="246" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" Background="{StaticResource PanelBrush}" BorderBrush="#24272E" BorderThickness="0,0,1,0">
+          <Grid Margin="28,30,24,24">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="28" />
+              <RowDefinition Height="*" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <Image x:Name="BrandIcon" Width="76" Height="76" HorizontalAlignment="Left" Stretch="Uniform" />
+            <StackPanel Grid.Row="1" Margin="0,16,0,0">
+              <TextBlock Text="CodeStudio Lite" FontSize="20" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" />
+              <TextBlock x:Name="BrandSubtitle" Margin="0,5,0,0" FontSize="12" Foreground="{StaticResource MutedBrush}" Text="Desktop AI workspace" />
+            </StackPanel>
+            <StackPanel Grid.Row="3" VerticalAlignment="Top">
+              <Grid Margin="0,0,0,18">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Border x:Name="StepWelcomeDot" Width="8" Height="8" CornerRadius="4" Background="{StaticResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                <TextBlock x:Name="StepWelcomeText" Grid.Column="1" Foreground="{StaticResource TextBrush}" Text="Welcome" />
+              </Grid>
+              <Grid Margin="0,0,0,18">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Border x:Name="StepOptionsDot" Width="8" Height="8" CornerRadius="4" Background="#424650" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                <TextBlock x:Name="StepOptionsText" Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="Options" />
+              </Grid>
+              <Grid Margin="0,0,0,18">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Border x:Name="StepConfirmDot" Width="8" Height="8" CornerRadius="4" Background="#424650" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                <TextBlock x:Name="StepConfirmText" Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="Confirm" />
+              </Grid>
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                <Border x:Name="StepProgressDot" Width="8" Height="8" CornerRadius="4" Background="#424650" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                <TextBlock x:Name="StepProgressText" Grid.Column="1" Foreground="{StaticResource MutedBrush}" Text="Install" />
+              </Grid>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <Grid Grid.Column="1" Margin="42,34,42,24">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="24" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
+          <TextBlock x:Name="HeadingLabel" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Text="CodeStudio Lite" />
+          <TextBlock x:Name="DescriptionLabel" Grid.Row="1" Margin="0,9,0,0" FontSize="14" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+
+          <Grid Grid.Row="3">
+            <Grid x:Name="WelcomePanel">
+              <StackPanel VerticalAlignment="Top">
+                <TextBlock x:Name="LanguageLabel" Margin="0,0,0,8" FontSize="12" FontWeight="SemiBold" Foreground="#C8CBD2" />
+                <ComboBox x:Name="LanguageSelector" Width="470" HorizontalAlignment="Left" SelectionChanged="LanguageSelectionChanged" />
+                <Border Margin="0,22,0,0" Padding="14" Background="{StaticResource StrongBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="5">
+                  <TextBlock x:Name="WelcomeHint" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                </Border>
+              </StackPanel>
+            </Grid>
+
+            <Grid x:Name="OptionsPanel" Visibility="Collapsed">
+              <StackPanel VerticalAlignment="Top">
+                <TextBlock x:Name="FolderLabel" Margin="0,0,0,8" FontSize="12" FontWeight="SemiBold" Foreground="#C8CBD2" />
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="10" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                  <TextBox x:Name="FolderTextBox" Style="{StaticResource FieldStyle}" />
+                  <Button x:Name="BrowseButton" Grid.Column="2" Style="{StaticResource BaseButtonStyle}" Click="BrowseButtonClick" />
+                </Grid>
+                <TextBlock x:Name="FolderHint" Margin="0,10,0,0" FontSize="12" Foreground="#7D818C" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+
+            <Grid x:Name="ConfirmPanel" Visibility="Collapsed">
+              <Border Padding="18" Background="{StaticResource StrongBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" VerticalAlignment="Top">
+                <StackPanel>
+                  <TextBlock x:Name="SummaryTitle" FontSize="13" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" />
+                  <Border Height="1" Margin="0,14" Background="#2A2E36" />
+                  <Grid Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="145" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <TextBlock x:Name="SummaryLanguageLabel" Foreground="{StaticResource MutedBrush}" />
+                    <TextBlock x:Name="SummaryLanguageValue" Grid.Column="1" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
+                  </Grid>
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="145" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <TextBlock x:Name="SummaryFolderLabel" Foreground="{StaticResource MutedBrush}" />
+                    <TextBlock x:Name="SummaryFolderValue" Grid.Column="1" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
+                  </Grid>
+                </StackPanel>
+              </Border>
+            </Grid>
+
+            <Grid x:Name="ProgressPanel" Visibility="Collapsed">
+              <StackPanel VerticalAlignment="Top">
+                <Border Width="54" Height="54" CornerRadius="27" Background="#182C42" HorizontalAlignment="Left">
+                  <TextBlock x:Name="ProgressGlyph" Text="&#x2193;" FontSize="25" Foreground="{StaticResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock x:Name="StatusLabel" Margin="0,18,0,0" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
+                <Border x:Name="ProgressTrack" Height="8" Margin="0,18,0,0" Background="#262A31" CornerRadius="4" SizeChanged="ProgressTrackSizeChanged">
+                  <Border x:Name="ProgressFill" Width="0" HorizontalAlignment="Left" Background="{StaticResource AccentBrush}" CornerRadius="4" />
+                </Border>
+                <TextBlock x:Name="ProgressPercent" Margin="0,8,0,0" FontSize="12" Foreground="{StaticResource MutedBrush}" Text="0%" />
+              </StackPanel>
+            </Grid>
+
+            <Grid x:Name="CompletePanel" Visibility="Collapsed">
+              <StackPanel VerticalAlignment="Top">
+                <Border Width="58" Height="58" CornerRadius="29" Background="#153528" HorizontalAlignment="Left">
+                  <TextBlock x:Name="CompleteGlyph" Text="&#x2713;" FontSize="27" FontWeight="SemiBold" Foreground="#65D69B" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock x:Name="CompleteMessage" Margin="0,18,0,0" FontSize="15" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+            </Grid>
+          </Grid>
+        </Grid>
+      </Grid>
+
+      <Border Grid.Row="2" Background="#0D0F13" BorderBrush="#24272E" BorderThickness="0,1,0,0">
+        <Grid Margin="28,0,28,0">
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+            <Button x:Name="BackButton" Style="{StaticResource BaseButtonStyle}" Margin="0,0,10,0" Click="BackButtonClick" />
+            <Button x:Name="PrimaryButton" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,0" IsDefault="True" Click="PrimaryButtonClick" />
+            <Button x:Name="CancelButton" Style="{StaticResource BaseButtonStyle}" IsCancel="True" Click="CancelButtonClick" />
+          </StackPanel>
+        </Grid>
+      </Border>
+    </Grid>
+  </Border>
+</Window>

@@ -26,7 +26,7 @@ test("dashboard desktop client cards use a real hit-area button for navigation",
 
   assert.match(
     svelte,
-    /function navigateToDesktopClient\(toolId: string\)\s*\{[\s\S]*desktopClientRouteForTool\(toolId\)[\s\S]*onNavigateToClient\(toolId\)/,
+    /function navigateToDesktopClient\(toolId: string\)\s*\{[\s\S]*desktopClientRouteForTool\(toolId\)[\s\S]*onNavigateToClient\(isChatGPTDesktopToolId\(toolId\) \? "chatgpt-desktop" : toolId\)/,
     "dashboard should centralize desktop client card navigation"
   );
   assert.match(

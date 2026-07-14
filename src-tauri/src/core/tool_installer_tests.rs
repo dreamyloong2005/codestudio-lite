@@ -164,6 +164,24 @@ fn hermes_update_uses_cli_update_command_not_installer_script() {
 }
 
 #[test]
+fn grok_install_uses_official_platform_script() {
+    let definition = install_definition("grok").expect("Grok install definition");
+
+    assert_eq!(manager_label(&definition.action), "terminal");
+    if cfg!(target_os = "windows") {
+        assert_eq!(
+            command_preview(&definition.action),
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://x.ai/cli/install.ps1 | iex\""
+        );
+    } else {
+        assert_eq!(
+            command_preview(&definition.action),
+            "curl -fsSL https://x.ai/cli/install.sh | bash"
+        );
+    }
+}
+
+#[test]
 fn claude_desktop_macos_uses_official_dmg_not_homebrew_cask() {
     let source = include_str!("tool_installer.rs");
     let registry = include_str!("tool_registry.rs");

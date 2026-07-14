@@ -37,6 +37,29 @@ test("legacy branding executes without crossing ChatGPT auth or Codex CLI bounda
   );
 });
 
+test("legacy desktop detection aliases migrate into one ChatGPT desktop slot", async () => {
+  const branding = await import("./chatgptDesktopBranding.ts");
+  const snapshot = {
+    chatgptDesktopProductGeneration: "current",
+    tools: [
+      { id: "codex", name: "Codex CLI", installState: "installed", running: false },
+      { id: "codex-app", name: "Codex", installState: "installed", running: true },
+      { id: "chatgpt-desktop", name: "ChatGPT Desktop", installState: "missing", running: false }
+    ]
+  };
+
+  const normalized = branding.normalizeChatGPTDesktopDetectionSnapshot(snapshot);
+  assert.equal(normalized.chatgptDesktopProductGeneration, "legacy");
+  assert.deepEqual(
+    normalized.tools.map((tool) => tool.id),
+    ["codex", "chatgpt-desktop"]
+  );
+  assert.equal(normalized.tools[0].name, "Codex CLI");
+  assert.equal(normalized.tools[1].name, "Codex Desktop");
+  assert.equal(normalized.tools[1].installState, "installed");
+  assert.equal(normalized.tools[1].running, true);
+});
+
 test("ChatGPT desktop generation is shared by detection and installed state", () => {
   const types = read("src/types.ts");
   const rustTypes = read("src-tauri/src/core/types.rs");
@@ -82,6 +105,7 @@ test("current desktop icon is the inverted CLI mark and legacy keeps the origina
 
   assert.match(component, /current:\s*\{ src: "\/tool-icons\/codex\.svg", tone: "chatgpt-desktop-current" \}/);
   assert.match(component, /legacy:\s*\{ src: "\/tool-icons\/chatgpt-desktop\.png", tone: "chatgpt-desktop-legacy" \}/);
+  assert.match(component, /case "codex-app":[\s\S]*?return "chatgpt-desktop"/);
   assert.match(component, /\$chatgptDesktopGeneration/);
   assert.doesNotMatch(component, /case "chatgpt-desktop":\s*case "chatgpt-desktop":/);
   assert.match(panda, /data-tool-icon-tone='chatgpt-desktop-current'[^\n]*data-tool-icon-tone='chatgpt-desktop-legacy'[\s\S]*?background: "#fff"/);

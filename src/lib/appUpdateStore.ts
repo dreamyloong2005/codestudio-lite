@@ -1,46 +1,94 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import "@tauri-apps/plugin-process";
+import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { get, writable } from "svelte/store";
-import { APP_VERSION, GITHUB_RELEASES_API_URL } from "./appInfo";
+import { installApplicationUpdate } from "./api";
+import { APP_UPDATER_ENABLED, APP_VERSION } from "./appInfo";
 
-type UpdateStatus = "idle" | "checking" | "available" | "upToDate" | "noRelease" | "error";
+type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "installing"
+  | "upToDate"
+  | "unconfigured"
+  | "error";
 
 export interface AppUpdateState {
   status: UpdateStatus;
   updateAvailable: boolean;
+  installable: boolean;
   currentVersion: string;
   latestVersion: string | null;
   releaseName: string | null;
   releaseUrl: string | null;
   publishedAt: string | null;
   checkedAt: string | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
   error: string | null;
 }
 
-interface GitHubRelease {
-  tag_name?: string;
-  name?: string | null;
-  html_url?: string;
-  published_at?: string | null;
-  draft?: boolean;
+interface ReleaseInfo {
+  version: string;
+  name: string | null;
+  url: string | null;
+  publishedAt: string | null;
+  installable: boolean;
+}
+
+interface ReleaseLookup {
+  release: ReleaseInfo | null;
+  emptyStatus: "upToDate";
+}
+
+interface InstallerArtifact {
+  url: string;
+  signature: string;
+  filename: string;
+}
+
+interface AppUpdateProgress {
+  phase: "downloading" | "verifying" | "installing";
+  downloadedBytes: number;
+  totalBytes: number | null;
 }
 
 const initialState: AppUpdateState = {
   status: "idle",
   updateAvailable: false,
+  installable: false,
   currentVersion: APP_VERSION,
   latestVersion: null,
   releaseName: null,
   releaseUrl: null,
   publishedAt: null,
   checkedAt: null,
+  downloadedBytes: 0,
+  totalBytes: null,
   error: null
 };
 
 export const appUpdateState = writable<AppUpdateState>(initialState);
 
 let inFlight: Promise<AppUpdateState> | null = null;
+let installInFlight: Promise<AppUpdateState> | null = null;
+let pendingUpdate: Update | null = null;
 
 export async function checkForAppUpdate(force = false): Promise<AppUpdateState> {
   const current = get(appUpdateState);
+  if (!isTauri() || !APP_UPDATER_ENABLED) {
+    pendingUpdate = null;
+    const unconfiguredState: AppUpdateState = {
+      ...initialState,
+      status: "unconfigured",
+      checkedAt: new Date().toISOString()
+    };
+    appUpdateState.set(unconfiguredState);
+    return unconfiguredState;
+  }
   if (!force && current.status === "checking" && inFlight) {
     return inFlight;
   }
@@ -48,39 +96,45 @@ export async function checkForAppUpdate(force = false): Promise<AppUpdateState> 
   appUpdateState.set({
     ...current,
     status: "checking",
+    downloadedBytes: 0,
+    totalBytes: null,
     error: null
   });
 
-  inFlight = fetchLatestRelease()
-    .then((release) => {
+  inFlight = fetchTauriRelease()
+    .then(({ release, emptyStatus }) => {
       const checkedAt = new Date().toISOString();
       if (!release) {
         const nextState: AppUpdateState = {
           ...initialState,
-          status: "noRelease",
+          status: emptyStatus,
           checkedAt
         };
         appUpdateState.set(nextState);
         return nextState;
       }
 
-      const latestVersion = normalizeVersionLabel(release.tag_name ?? release.name ?? "");
+      const latestVersion = normalizeVersionLabel(release.version);
       const updateAvailable = compareVersions(latestVersion, APP_VERSION) > 0;
       const nextState: AppUpdateState = {
         status: updateAvailable ? "available" : "upToDate",
         updateAvailable,
+        installable: updateAvailable && release.installable,
         currentVersion: APP_VERSION,
         latestVersion,
-        releaseName: release.name ?? release.tag_name ?? latestVersion,
-        releaseUrl: release.html_url ?? null,
-        publishedAt: release.published_at ?? null,
+        releaseName: release.name ?? latestVersion,
+        releaseUrl: release.url,
+        publishedAt: release.publishedAt,
         checkedAt,
+        downloadedBytes: 0,
+        totalBytes: null,
         error: null
       };
       appUpdateState.set(nextState);
       return nextState;
     })
     .catch((err) => {
+      pendingUpdate = null;
       const nextState: AppUpdateState = {
         ...initialState,
         status: "error",
@@ -97,25 +151,148 @@ export async function checkForAppUpdate(force = false): Promise<AppUpdateState> 
   return inFlight;
 }
 
-async function fetchLatestRelease(): Promise<GitHubRelease | null> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 8000);
+export function installAppUpdate(): Promise<AppUpdateState> {
+  if (installInFlight) {
+    return installInFlight;
+  }
+  installInFlight = performAppUpdateInstall().finally(() => {
+    installInFlight = null;
+  });
+  return installInFlight;
+}
+
+async function performAppUpdateInstall(): Promise<AppUpdateState> {
+  const update = pendingUpdate;
+  const updateRawJson = pendingUpdate && pendingUpdate.rawJson;
+  const current = get(appUpdateState);
+  if (!update || !updateRawJson || !current.installable) {
+    const unavailableState: AppUpdateState = {
+      ...current,
+      status: "error",
+      error: "No signed application update is ready to install."
+    };
+    appUpdateState.set(unavailableState);
+    return unavailableState;
+  }
+
+  let downloadedBytes = 0;
+  appUpdateState.set({
+    ...current,
+    status: "downloading",
+    downloadedBytes: 0,
+    totalBytes: null,
+    error: null
+  });
+
   try {
-    const response = await fetch(GITHUB_RELEASES_API_URL, {
-      headers: {
-        Accept: "application/vnd.github+json"
-      },
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      throw new Error(`GitHub Releases returned ${response.status}`);
+    const installerArtifact = installerArtifactForCurrentPlatform(updateRawJson);
+    if (installerArtifact) {
+      const unlisten = await listen<AppUpdateProgress>("app-update-progress", (event) => {
+        const progress = event.payload;
+        appUpdateState.update((state) => ({
+          ...state,
+          status: progress.phase === "installing" ? "installing" : "downloading",
+          downloadedBytes: progress.downloadedBytes,
+          totalBytes: progress.totalBytes
+        }));
+      });
+      try {
+        await installApplicationUpdate({
+          version: update.version,
+          ...installerArtifact
+        });
+      } finally {
+        unlisten();
+      }
+      return get(appUpdateState);
     }
 
-    const releases = (await response.json()) as GitHubRelease[];
-    return releases.find((release) => !release.draft && normalizeVersionLabel(release.tag_name ?? release.name ?? "")) ?? null;
-  } finally {
-    window.clearTimeout(timeout);
+    await update.downloadAndInstall((event: DownloadEvent) => {
+      const state = get(appUpdateState);
+      if (event.event === "Started") {
+        appUpdateState.set({
+          ...state,
+          downloadedBytes: 0,
+          totalBytes: event.data.contentLength ?? null
+        });
+        return;
+      }
+      if (event.event === "Progress") {
+        downloadedBytes += event.data.chunkLength;
+        appUpdateState.set({
+          ...state,
+          downloadedBytes
+        });
+        return;
+      }
+      appUpdateState.set({
+        ...state,
+        downloadedBytes: state.totalBytes ?? downloadedBytes
+      });
+    });
+
+    appUpdateState.update((state) => ({ ...state, status: "installing" }));
+    return get(appUpdateState);
+  } catch (err) {
+    const failedState: AppUpdateState = {
+      ...get(appUpdateState),
+      status: "error",
+      error: err instanceof Error ? err.message : String(err)
+    };
+    appUpdateState.set(failedState);
+    return failedState;
   }
+}
+
+export function installerArtifactForCurrentPlatform(
+  rawJson: Record<string, unknown>
+): InstallerArtifact | null {
+  const userAgent = navigator.userAgent.toLowerCase();
+  const platformPrefix = userAgent.includes("windows")
+    ? "windows-"
+    : userAgent.includes("mac os") || userAgent.includes("macintosh")
+      ? "darwin-"
+      : null;
+  if (!platformPrefix) {
+    return null;
+  }
+  const platforms = rawJson.platforms;
+  if (!platforms || typeof platforms !== "object" || Array.isArray(platforms)) {
+    throw new Error("The updater manifest does not contain platform installers.");
+  }
+  const entry = Object.entries(platforms).find(([key]) => key.startsWith(platformPrefix))?.[1];
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error("No signed installer is available for this platform.");
+  }
+  const url = Reflect.get(entry, "url");
+  const signature = Reflect.get(entry, "signature");
+  if (typeof url !== "string" || typeof signature !== "string") {
+    throw new Error("The updater manifest contains an invalid installer entry.");
+  }
+  const parsedUrl = new URL(url);
+  const filename = parsedUrl.pathname.split("/").at(-1);
+  if (!filename) {
+    throw new Error("The updater installer URL has no filename.");
+  }
+  return { url, signature, filename };
+}
+
+async function fetchTauriRelease(): Promise<ReleaseLookup> {
+  pendingUpdate = await check({ timeout: 8000 });
+  if (!pendingUpdate) {
+    return { release: null, emptyStatus: "upToDate" };
+  }
+
+  return {
+    emptyStatus: "upToDate",
+    release: {
+      version: pendingUpdate.version,
+      name: pendingUpdate.version,
+      url: null,
+      publishedAt: pendingUpdate.date ?? null,
+      installable: true
+    }
+  };
 }
 
 function normalizeVersionLabel(value: string): string {

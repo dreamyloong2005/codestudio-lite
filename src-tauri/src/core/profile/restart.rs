@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::process_control;
 
 pub(in crate::core::profile) struct RestartOutcome {
     pub performed: bool,
@@ -63,6 +64,7 @@ pub(in crate::core::profile) fn restart_tool_for_profile(
 
     let mut messages = Vec::new();
     let mut restarted_any = false;
+    let mut stopped_targets = Vec::new();
 
     for target in targets {
         let result = stop_restart_target_processes(target)?;
@@ -76,6 +78,10 @@ pub(in crate::core::profile) fn restart_tool_for_profile(
             ));
         }
 
+        stopped_targets.push((target, result));
+    }
+
+    for (target, result) in stopped_targets {
         launch_restart_target(target, &result.paths)
             .map_err(|err| format!("Failed to restart {}: {err}", target.label))?;
         restarted_any = true;
@@ -486,19 +492,7 @@ foreach ($id in $targetIds) {{
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
   if ($null -ne $p) {{ $remaining += $p }}
 }}
-$forced = 0
-foreach ($p in $remaining) {{
-  try {{
-    Stop-Process -Id $p.Id -Force -ErrorAction Stop
-    $forced += 1
-  }} catch {{}}
-}}
-Start-Sleep -Milliseconds 300
-$still = @()
-foreach ($id in $targetIds) {{
-  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-  if ($null -ne $p) {{ $still += $p }}
-}}
+{force_termination}
 [pscustomobject]@{{
   total = [int](@($targetIds).Count)
   forced = [int]$forced
@@ -519,6 +513,7 @@ foreach ($id in $targetIds) {{
         } else {
             "false"
         },
+        force_termination = process_control::windows_force_termination_script(),
     )
 }
 

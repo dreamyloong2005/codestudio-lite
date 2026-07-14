@@ -1,6 +1,6 @@
 [package]
 name = "codestudio-lite"
-version = "1.4.1"
+version = "1.5.0"
 description = "A desktop-only Local AI Gateway and Provider Switcher for AI coding tools."
 authors = ["CodeStudio Lite"]
 license = "MIT"
@@ -39,6 +39,9 @@ toml_edit = "0.25"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
+minisign-verify = "0.2.5"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }

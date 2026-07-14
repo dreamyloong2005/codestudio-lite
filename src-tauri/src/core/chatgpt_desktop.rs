@@ -905,8 +905,14 @@ pub fn uninstall(
 }
 
 pub fn launch() -> Result<(), String> {
-    let mut notes = Vec::new();
-    launch_with_restart_notes(&mut notes)
+    let settings = load_settings()?;
+    let installed = detect_installed(&settings)
+        .ok_or_else(|| "ChatGPT Desktop was not detected.".to_string())?;
+    let running = is_chatgpt_desktop_running(Some(&installed));
+    if !running {
+        sync_history_if_enabled(&settings)?;
+    }
+    launch_detected_chatgpt_desktop(&settings, &installed)
 }
 
 fn launch_with_restart_notes(notes: &mut Vec<String>) -> Result<(), String> {
@@ -915,6 +921,13 @@ fn launch_with_restart_notes(notes: &mut Vec<String>) -> Result<(), String> {
         .ok_or_else(|| "ChatGPT Desktop was not detected.".to_string())?;
     close_chatgpt_desktop_processes(&installed, notes)?;
     sync_history_if_enabled(&settings)?;
+    launch_detected_chatgpt_desktop(&settings, &installed)
+}
+
+fn launch_detected_chatgpt_desktop(
+    settings: &ChatGptDesktopSettings,
+    installed: &InstalledChatGptDesktop,
+) -> Result<(), String> {
     ensure_official_remote_plugin_cache_if_enabled(&settings);
     ensure_computer_use_guard_if_enabled(&settings)?;
     let debug_port = select_debug_port()?;

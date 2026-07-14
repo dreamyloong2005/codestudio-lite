@@ -2,8 +2,11 @@ node_modules/
 styled-system/
 dist/
 dist-portable/
+dist-updater/
 .tmp-tests/
 src-tauri/target/
+installer/**/bin/
+installer/**/obj/
 *.log
 *.tmp
 *.bak
@@ -11,6 +14,8 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+src-tauri/tauri.updater.generated.conf.json
+*.csl-updater-key
 # Temporary one-off patch/build scripts (not part of the codebase)
 /*.cjs
 !/postcss.config.cjs

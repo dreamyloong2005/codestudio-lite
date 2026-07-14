@@ -27,6 +27,7 @@ export function browserProfileAdapter(
 ): ProfileAdapter {
   return {
     ensureAppDirs: modules.summary,
+    loadSummary: modules.summary,
     testConnection: modules.testConnection,
     listModels: modules.listModels,
     save: modules.save,

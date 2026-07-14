@@ -1383,6 +1383,10 @@ export default defineConfig({
               lineHeight: "1.3"
             },
             "& span": {
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              flexWrap: "wrap",
               color: "var(--text-muted)",
               fontSize: "12px",
               lineHeight: "1.35",

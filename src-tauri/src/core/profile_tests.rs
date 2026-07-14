@@ -280,6 +280,25 @@ fn official_non_codex_configs_match_when_not_managed() {
 }
 
 #[test]
+fn hermes_unmanaged_config_marks_builtin_official_profile_active() {
+    let mut config = test_app_config();
+    let drafts = builtin_official_profiles();
+    let value =
+        parse_hermes_yaml_or_empty("{}\nmcp_servers: {}\n").expect("Hermes config should parse");
+
+    assert!(sync_native_config_profile(
+        &mut config,
+        &drafts,
+        "hermes",
+        |profile| hermes_config_matches_profile(&value, profile)
+    ));
+    assert_eq!(
+        config.active_profiles_by_mode.config.get("hermes"),
+        Some(&builtin_official_profile_id("hermes"))
+    );
+}
+
+#[test]
 fn official_non_codex_configs_do_not_match_managed_values() {
     let drafts = builtin_official_profiles();
 
@@ -3178,6 +3197,63 @@ fn windows_restart_script_safely_returns_no_match_when_cim_is_unavailable() {
     assert_eq!(
         result.get("total").and_then(serde_json::Value::as_u64),
         Some(0)
+    );
+    assert_eq!(
+        result.get("remaining").and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_restart_script_falls_back_to_process_tree_termination() {
+    use std::fs;
+    use std::process::{Command, Stdio};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let process_name = format!("csl-restart-{suffix}.exe");
+    let executable = std::env::temp_dir().join(&process_name);
+    fs::copy(r"C:\Windows\System32\ping.exe", &executable).unwrap();
+    let mut child = Command::new(&executable)
+        .args(["127.0.0.1", "-n", "60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let leaked_name: &'static str = Box::leak(process_name.into_boxed_str());
+    let leaked_names: &'static [&'static str] = Box::leak(vec![leaked_name].into_boxed_slice());
+    const EMPTY: &[&str] = &[];
+    let target = RestartTarget {
+        label: "CodeStudio restart fallback test",
+        process_names: leaked_names,
+        command_markers: EMPTY,
+        exclude_command_markers: EMPTY,
+        require_window: false,
+        reject_window: false,
+        launch: RestartLaunch::CloseOnly,
+    };
+    let script = format!(
+        "function Stop-Process {{ throw 'simulated primary termination failure' }}\n{}",
+        windows_restart_process_script(target)
+    );
+
+    let result = run_powershell(&script).and_then(|json| {
+        serde_json::from_str::<serde_json::Value>(&json).map_err(|err| err.to_string())
+    });
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_file(&executable);
+
+    let result = result.unwrap();
+    assert_eq!(
+        result.get("total").and_then(serde_json::Value::as_u64),
+        Some(1)
     );
     assert_eq!(
         result.get("remaining").and_then(serde_json::Value::as_u64),

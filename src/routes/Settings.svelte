@@ -8,7 +8,7 @@
     AUTHOR_GITHUB_URL,
     AUTHOR_NAME
   } from "../lib/appInfo";
-  import { appUpdateState, checkForAppUpdate } from "../lib/appUpdateStore";
+  import { appUpdateState, checkForAppUpdate, installAppUpdate } from "../lib/appUpdateStore";
   import { loadAppSettings, openExternalUrl, updateAppSettings } from "../lib/api";
   import { setLocale, supportedLocales, t } from "../lib/i18n";
   import { applyTheme } from "../lib/theme";
@@ -41,6 +41,8 @@
   let error: string | null = null;
   let settingsEditRevision = 0;
   let updateStatusTone: UpdateStatusTone = "info";
+  let updateProgressPercent = 0;
+  let updateBusy = false;
 
   onMount(() => {
     void loadSettings();
@@ -97,14 +99,20 @@
     if ($appUpdateState.status === "checking") {
       return $t("settings.checkingUpdates");
     }
+    if ($appUpdateState.status === "downloading") {
+      return $t("settings.downloadingUpdate", { percent: updateProgressPercent });
+    }
+    if ($appUpdateState.status === "installing") {
+      return $t("settings.installingUpdate");
+    }
     if ($appUpdateState.status === "available" && $appUpdateState.latestVersion) {
       return $t("settings.updateAvailable", { version: $appUpdateState.latestVersion });
     }
     if ($appUpdateState.status === "upToDate") {
       return $t("settings.upToDate");
     }
-    if ($appUpdateState.status === "noRelease") {
-      return $t("settings.noRelease");
+    if ($appUpdateState.status === "unconfigured") {
+      return $t("settings.updaterNotConfigured");
     }
     if ($appUpdateState.status === "error") {
       return $t("settings.updateFailed", { message: $appUpdateState.error ?? $t("common.unknown") });
@@ -119,6 +127,10 @@
     : $appUpdateState.status === "idle"
         ? "info"
         : "good";
+  $: updateProgressPercent = $appUpdateState.totalBytes
+    ? Math.min(100, Math.round(($appUpdateState.downloadedBytes / $appUpdateState.totalBytes) * 100))
+    : 0;
+  $: updateBusy = ["checking", "downloading", "installing"].includes($appUpdateState.status);
 
 </script>
 
@@ -172,8 +184,20 @@
         </div>
         <div class={settingsAboutUpdateRecipe()}>
           <span class={settingsUpdatePillRecipe({ tone: updateStatusTone })}>{updateStatusLabel}</span>
-          <button class={actionButtonRecipe()} type="button" disabled={$appUpdateState.status === "checking"} on:click={() => checkForAppUpdate(true)}>
-            <AppIcon name="restart" size={15} class={$appUpdateState.status === "checking" ? spinRecipe() : ""} />
+          {#if $appUpdateState.updateAvailable && $appUpdateState.installable}
+            <button
+              class={actionButtonRecipe({ tone: "primary" })}
+              type="button"
+              title={$t("settings.installUpdate")}
+              disabled={updateBusy}
+              on:click={() => installAppUpdate()}
+            >
+              <AppIcon name="download" size={15} />
+              {$t("settings.updateNow")}
+            </button>
+          {/if}
+          <button class={actionButtonRecipe()} type="button" disabled={updateBusy} on:click={() => checkForAppUpdate(true)}>
+            <AppIcon name="restart" size={15} class={updateBusy ? spinRecipe() : ""} />
             {$t("settings.checkUpdates")}
           </button>
         </div>

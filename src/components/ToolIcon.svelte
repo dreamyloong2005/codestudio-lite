@@ -46,6 +46,8 @@
       case "codex-cli":
         return "codex";
       case "chatgpt-desktop":
+      case "codex-app":
+      case "codex-client":
       case "codex-desktop":
         return "chatgpt-desktop";
       case "codex-vscode":

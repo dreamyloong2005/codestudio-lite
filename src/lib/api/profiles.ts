@@ -24,6 +24,7 @@ import type {
 
 export interface ProfileAdapter {
   ensureAppDirs(): Promise<ProfileSummary>;
+  loadSummary(): Promise<ProfileSummary>;
   testConnection(request: TestProfileConnectionRequest): Promise<TestProfileConnectionResult>;
   listModels(request: ListProfileModelsRequest): Promise<ListProfileModelsResult>;
   save(request: SaveProfileDraftRequest): Promise<ProfileDraft>;

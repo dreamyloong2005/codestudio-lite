@@ -33,12 +33,12 @@ test("dashboard desktop client install/update navigates to the client page to sh
 
   assert.match(dashboard, /installOrUpdateChatGPTDesktop/);
   assert.match(dashboard, /installOrUpdateClaudeDesktop/);
-  assert.match(dashboard, /tool\.id === "chatgpt-desktop"[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
+  assert.match(dashboard, /isChatGPTDesktopToolId\(tool\.id\)[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
   assert.match(dashboard, /tool\.id === "claude-desktop"[\s\S]*triggerDesktopClientAction\(tool, mode\)/);
   assert.doesNotMatch(dashboard, /if \(tool\.id === "chatgpt-desktop"\) \{\s*onOpenChatGPTDesktop\(\)/);
   // install/update must hand off to the dedicated client page so the user can
   // watch the download/progress stream that the page renders from the store.
-  assert.match(dashboard, /triggerDesktopClientAction\(tool: ToolStatus, mode: "install" \| "update"\) \{[\s\S]*onNavigateToClient\(tool\.id\)/);
+  assert.match(dashboard, /triggerDesktopClientAction\(tool: ToolStatus, mode: "install" \| "update"\) \{[\s\S]*onNavigateToClient\(isChatGPTDesktopToolId\(tool\.id\) \? "chatgpt-desktop" : tool\.id\)/);
 });
 
 test("route switches refresh the active CodeStudio Lite page", () => {
@@ -647,7 +647,7 @@ test("dashboard direct desktop launches show and lock the launch button", () => 
     /\{isLaunchingTool\(tool, launchingToolId, directLaunchToolIds\) \? \$t\("toolLaunch\.starting"\) : \$t\("toolLaunch\.action"\)\}/
   );
   assert.match(dashboardLaunch, /directLaunchToolIds = new Set\(directLaunchToolIds\)\.add\(tool\.id\)/);
-  assert.match(dashboardLaunch, /const launchPromise = tool\.id === "chatgpt-desktop"[\s\S]*launchManagedChatGPTDesktop\(\)[\s\S]*launchClaudeDesktopFromDashboard\(\)/);
+  assert.match(dashboardLaunch, /const launchPromise = isChatGPTDesktopToolId\(tool\.id\)[\s\S]*launchManagedChatGPTDesktop\(\)[\s\S]*launchClaudeDesktopFromDashboard\(\)/);
   assert.doesNotMatch(dashboardLaunch, /await launchManagedChatGPTDesktop\(\)|await launchClaudeDesktopFromDashboard\(\)/);
   assert.match(dashboardLaunch, /await launchPromise/);
   assert.match(dashboard, /const directLaunchFeedbackMs = \d+/);
@@ -659,8 +659,26 @@ test("dashboard direct desktop launches show and lock the launch button", () => 
   assert.match(dashboard, /if \(isManagedDesktopClient\(tool\)\) \{[\s\S]*await launchDesktopClient\(tool\);[\s\S]*return;[\s\S]*\}/);
   assert.match(
     dashboard,
-    /function isManagedDesktopClient\(tool: ToolStatus\) \{[\s\S]*tool\.id === "chatgpt-desktop" \|\| tool\.id === "claude-desktop"/
+    /function isManagedDesktopClient\(tool: ToolStatus\) \{[\s\S]*isChatGPTDesktopToolId\(tool\.id\) \|\| tool\.id === "claude-desktop"/
   );
+});
+
+test("legacy Codex desktop aliases use the managed desktop launch path", () => {
+  const dashboard = read("src/routes/Dashboard.svelte");
+  const managedPredicate = dashboard.slice(
+    dashboard.indexOf("function isManagedDesktopClient"),
+    dashboard.indexOf("function installPlanToolFor")
+  );
+  const openLaunch = dashboard.slice(
+    dashboard.indexOf("async function openToolLaunch"),
+    dashboard.indexOf("async function closeToolLaunch")
+  );
+
+  assert.match(dashboard, /import \{[\s\S]*isChatGPTDesktopToolId[\s\S]*\} from "\.\.\/lib\/chatgptDesktopBranding"/);
+  assert.match(managedPredicate, /isChatGPTDesktopToolId\(tool\.id\)/);
+  assert.match(openLaunch, /if \(isManagedDesktopClient\(tool\)\) \{[\s\S]*await launchDesktopClient\(tool\);[\s\S]*return;/);
+  assert.match(dashboard, /const launchPromise = isChatGPTDesktopToolId\(tool\.id\)[\s\S]*launchManagedChatGPTDesktop\(\)/);
+  assert.match(dashboard, /if \(isChatGPTDesktopToolId\(toolId\)\) return "chatgptDesktop"/);
 });
 test("Claude Desktop external terminal localization starts the injector", () => {
   const terminalCommand = read("src-tauri/src/commands/install_terminal.rs");

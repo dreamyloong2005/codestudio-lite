@@ -31,6 +31,7 @@ import {
   canonicalProfileToolId as canonicalProfileApp,
   profileSupportsConfigProtocol
 } from "./profiles/catalog";
+import { normalizeChatGPTDesktopDetectionSnapshot } from "./chatgptDesktopBranding";
 import type {
   ActivityEvent,
   ActiveProfilesByMode,
@@ -207,33 +208,39 @@ export async function ensureAppDirs(): Promise<ProfileSummary> {
   return profileApi.ensureAppDirs();
 }
 
+export async function loadProfileSummary(): Promise<ProfileSummary> {
+  return profileApi.loadSummary();
+}
+
 type DetectEnvironmentOptions = {
   waitForUpdates?: boolean;
 };
 
 export async function detectEnvironment(options: DetectEnvironmentOptions = {}): Promise<DetectionSnapshot> {
   if (isTauri()) {
-    return invoke("detect_environment", { request: options });
+    const snapshot = await invoke<DetectionSnapshot>("detect_environment", { request: options });
+    return normalizeChatGPTDesktopDetectionSnapshot(snapshot);
   }
   const snapshot = mockDetection();
   writeMockDetectionCache(snapshot);
-  return snapshot;
+  return normalizeChatGPTDesktopDetectionSnapshot(snapshot);
 }
 
 export async function loadCachedDetection(): Promise<DetectionSnapshot | null> {
-  if (isTauri()) {
-    return invoke("load_cached_detection");
-  }
-  return readMockDetectionCache();
+  const snapshot = isTauri()
+    ? await invoke<DetectionSnapshot | null>("load_cached_detection")
+    : readMockDetectionCache();
+  return snapshot ? normalizeChatGPTDesktopDetectionSnapshot(snapshot) : null;
 }
 
 export async function detectEnvironmentFresh(): Promise<DetectionSnapshot> {
   if (isTauri()) {
-    return invoke("detect_environment_fresh");
+    const snapshot = await invoke<DetectionSnapshot>("detect_environment_fresh");
+    return normalizeChatGPTDesktopDetectionSnapshot(snapshot);
   }
   const snapshot = mockDetection();
   writeMockDetectionCache(snapshot);
-  return snapshot;
+  return normalizeChatGPTDesktopDetectionSnapshot(snapshot);
 }
 /// Per-kind install detection for the Claude Desktop page tabs (MSIX vs
 /// native .exe). Resolves both kinds independently so a user with both
@@ -820,6 +827,21 @@ export async function updateAppSettings(request: UpdateAppSettingsRequest): Prom
     ...mockActivity
   ];
   return mockSettings;
+}
+
+export interface InstallApplicationUpdateRequest {
+  version: string;
+  url: string;
+  signature: string;
+  filename: string;
+}
+
+export async function installApplicationUpdate(
+  request: InstallApplicationUpdateRequest
+): Promise<void> {
+  if (isTauri()) {
+    return invoke("install_application_update", { request });
+  }
 }
 
 export async function loadGatewayStatus(): Promise<GatewayStatus> {

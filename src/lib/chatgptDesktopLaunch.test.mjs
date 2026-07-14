@@ -20,7 +20,7 @@ test("ChatGPT desktop exposes a single patch-backed launch entrypoint", () => {
   assert.match(commands, /pub async fn launch_chatgpt_desktop\(\)/);
   assert.doesNotMatch(commands, /launch_chatgpt_desktop_patched|launch_patched/);
   assert.doesNotMatch(lib, /launch_chatgpt_desktop_patched/);
-  assert.match(core, /fn launch_with_restart_notes\([\s\S]*codex_patch_launch_args/);
+  assert.match(core, /fn launch_detected_chatgpt_desktop\([\s\S]*codex_patch_launch_args/);
   assert.doesNotMatch(core, /pub fn launch_patched/);
 });
 
@@ -174,6 +174,30 @@ test("ChatGPT desktop restart closes the package parent instead of the app-serve
   assert.doesNotMatch(restartBody, /close_chatgpt_desktop_processes/);
 });
 
+test("ordinary ChatGPT desktop launch preserves a running session", () => {
+  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const launchBody = core
+    .split("pub fn launch()")
+    .at(1)
+    ?.split("fn launch_with_restart_notes")
+    .at(0);
+  const restartLaunchBody = core
+    .split("fn launch_with_restart_notes")
+    .at(1)
+    ?.split("pub fn restart()")
+    .at(0);
+
+  assert.ok(launchBody, "ordinary launch body should exist");
+  assert.doesNotMatch(launchBody, /close_chatgpt_desktop_processes/);
+  assert.doesNotMatch(launchBody, /launch_with_restart_notes/);
+  assert.match(launchBody, /is_chatgpt_desktop_running/);
+  assert.match(launchBody, /if\s+!.*running[\s\S]*sync_history_if_enabled/);
+
+  assert.ok(restartLaunchBody, "restart launch body should exist");
+  assert.match(restartLaunchBody, /close_chatgpt_desktop_processes/);
+  assert.match(restartLaunchBody, /sync_history_if_enabled/);
+});
+
 test("Codex plugin and model injection is gated by individual Codex++ launch options", () => {
   const core = read("src-tauri/src/core/chatgpt_desktop.rs");
 
@@ -258,7 +282,7 @@ test("Codex enhancement injection runs after launch without blocking the command
   const commands = read("src-tauri/src/commands/chatgpt_desktop.rs");
   const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const launchBody = core
-    .split("fn launch_with_restart_notes(notes: &mut Vec<String>) -> Result<(), String> {")
+    .split("fn launch_detected_chatgpt_desktop(")
     .at(1)
     ?.split("pub fn restart()")
     .at(0);

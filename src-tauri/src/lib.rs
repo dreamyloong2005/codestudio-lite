@@ -20,9 +20,12 @@ pub fn run() {
                 }
             }
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::activity_log::load_activity_log,
+            commands::app_updater::install_application_update,
             commands::backup::list_backups,
             commands::backup::restore_backup,
             commands::claude_desktop::inspect_claude_desktop_page,

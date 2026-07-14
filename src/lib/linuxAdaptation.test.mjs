@@ -23,7 +23,7 @@ test("Linux detection and UI do not expose desktop client panels", () => {
   assert.match(app, /!\["chatgptDesktop", "claudeDesktop"\]\.includes\(item\.id\) \|\| desktopClientPagesAvailable/);
   assert.match(app, /function desktopClientRouteAllowed\(currentRoute: Route\)/);
   assert.match(app, /\["chatgptDesktop", "claudeDesktop"\]\.includes\(route\) && !desktopClientRouteAllowed\(route\)/);
-  assert.match(dashboard, /tool\.id === "chatgpt-desktop"/);
+  assert.match(dashboard, /isChatGPTDesktopToolId\(tool\.id\)/);
 });
 
 test("Linux install routes use native shell-friendly installers", () => {

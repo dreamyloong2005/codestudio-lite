@@ -58,6 +58,50 @@ struct RawProcessTerminationReport {
     remaining: u64,
 }
 
+pub(crate) fn windows_force_termination_script() -> &'static str {
+    r#"
+$forcedIds = [System.Collections.Generic.HashSet[int]]::new()
+foreach ($p in $remaining) {
+  try {
+    Stop-Process -Id $p.Id -Force -ErrorAction Stop
+    [void]$forcedIds.Add([int]$p.Id)
+  } catch {
+    try {
+      & taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null
+      if ($LASTEXITCODE -eq 0) { [void]$forcedIds.Add([int]$p.Id) }
+    } catch {}
+  }
+}
+$forceDeadline = (Get-Date).AddSeconds(5)
+do {
+  Start-Sleep -Milliseconds 250
+  $still = @()
+  foreach ($id in $targetIds) {
+    $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+    if ($null -ne $p) { $still += $p }
+  }
+} while ($still.Count -gt 0 -and (Get-Date) -lt $forceDeadline)
+if ($still.Count -gt 0) {
+  foreach ($p in $still) {
+    try {
+      & taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null
+      if ($LASTEXITCODE -eq 0) { [void]$forcedIds.Add([int]$p.Id) }
+    } catch {}
+  }
+  $treeDeadline = (Get-Date).AddSeconds(5)
+  do {
+    Start-Sleep -Milliseconds 250
+    $still = @()
+    foreach ($id in $targetIds) {
+      $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+      if ($null -ne $p) { $still += $p }
+    }
+  } while ($still.Count -gt 0 -and (Get-Date) -lt $treeDeadline)
+}
+$forced = [int]$forcedIds.Count
+"#
+}
+
 pub fn close_processes_for_update(
     label: &str,
     process_names: &[&str],
@@ -188,25 +232,14 @@ foreach ($id in $targetIds) {{
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
   if ($null -ne $p) {{ $remaining += $p }}
 }}
-$forced = 0
-foreach ($p in $remaining) {{
-  try {{
-    Stop-Process -Id $p.Id -Force -ErrorAction Stop
-    $forced += 1
-  }} catch {{}}
-}}
-Start-Sleep -Milliseconds 1500
-$still = @()
-foreach ($id in $targetIds) {{
-  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-  if ($null -ne $p) {{ $still += $p }}
-}}
+{force_termination}
 [pscustomobject]@{{
   total = [int]$targetIds.Count
   forced = [int]$forced
   remaining = [int]$still.Count
 }} | ConvertTo-Json -Compress
-"#
+"#,
+        force_termination = windows_force_termination_script(),
     );
     let json = run_powershell(&script)?;
     let report: RawProcessTerminationReport = serde_json::from_str(&json)
@@ -320,25 +353,14 @@ foreach ($id in $targetIds) {{
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
   if ($null -ne $p) {{ $remaining += $p }}
 }}
-$forced = 0
-foreach ($p in $remaining) {{
-  try {{
-    Stop-Process -Id $p.Id -Force -ErrorAction Stop
-    $forced += 1
-  }} catch {{}}
-}}
-Start-Sleep -Milliseconds 300
-$still = @()
-foreach ($id in $targetIds) {{
-  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-  if ($null -ne $p) {{ $still += $p }}
-}}
+{force_termination}
 [pscustomobject]@{{
   total = [int]$targetIds.Count
   forced = [int]$forced
   remaining = [int]$still.Count
 }} | ConvertTo-Json -Compress
-"#
+"#,
+        force_termination = windows_force_termination_script(),
     );
     let json = run_powershell(&script)?;
     let report: RawProcessTerminationReport = serde_json::from_str(&json)
@@ -539,6 +561,28 @@ fn ps_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appx_close_script_has_process_tree_fallback_and_exit_wait() {
+        let script = windows_force_termination_script();
+
+        assert!(script.contains("taskkill.exe"));
+        assert!(script.contains("$forceDeadline"));
+        assert!(script.contains("Start-Sleep -Milliseconds 250"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn appx_close_script_handles_an_absent_package() {
+        let report = close_appx_packages_for_update(
+            "CodeStudio AppX close test",
+            &["CodeStudio.Package.That.Does.Not.Exist"],
+        )
+        .unwrap();
+
+        assert_eq!(report.total, 0);
+        assert_eq!(report.remaining, 0);
+    }
 
     #[test]
     fn macos_process_names_trim_windows_shell_suffixes() {

@@ -1,5 +1,6 @@
 pub mod activity_log;
 pub mod app_paths;
+pub mod app_updater;
 pub mod asar_archive;
 pub mod backup;
 pub mod chatgpt_desktop;

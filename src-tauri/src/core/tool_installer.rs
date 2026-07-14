@@ -863,6 +863,19 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
         "opencode" => InstallAction::NpmGlobal("opencode-ai"),
         "openclaw" => InstallAction::NpmGlobal("openclaw"),
         "pi" => InstallAction::NpmGlobalIgnoreScripts("@earendil-works/pi-coding-agent"),
+        "grok" => {
+            if cfg!(target_os = "windows") {
+                InstallAction::InteractiveShellScript(
+                    "Grok official install script",
+                    GROK_WINDOWS_INSTALL_COMMAND,
+                )
+            } else {
+                InstallAction::InteractiveShellScript(
+                    "Grok official install script",
+                    GROK_UNIX_INSTALL_COMMAND,
+                )
+            }
+        }
         "hermes" => {
             if cfg!(target_os = "macos") {
                 InstallAction::InteractiveShellScript(
@@ -1969,6 +1982,8 @@ const CLAUDE_DESKTOP_MACOS_BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
 const CLAUDE_DESKTOP_MACOS_DESTINATION: &str = "/Applications/Claude.app";
 const HERMES_UNIX_INSTALL_COMMAND: &str =
     "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash";
+const GROK_WINDOWS_INSTALL_COMMAND: &str = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://x.ai/cli/install.ps1 | iex\"";
+const GROK_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://x.ai/cli/install.sh | bash";
 const BUN_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://bun.sh/install | bash";
 const GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND: &str = "xcode-select --install";
 const NODE_MACOS_OFFICIAL_PKG_INSTALL_COMMAND: &str = r#"set -e; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"lts":"[^"]*"' | sed -E 's/.*"version":"([^"]+)".*/\1/')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /"#;

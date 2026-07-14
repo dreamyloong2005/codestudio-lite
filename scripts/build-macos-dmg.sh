@@ -84,7 +84,8 @@ if [[ -z "$ARCH_LABEL" ]]; then
 fi
 
 DMG_DIR="$TAURI_DIR/target/release/bundle/dmg"
-DMG_PATH="$DMG_DIR/${PRODUCT_NAME}_${VERSION}_${ARCH_LABEL}.dmg"
+PACKAGE_NAME="$(printf '%s' "$PRODUCT_NAME" | tr ' _' '--')"
+DMG_PATH="$DMG_DIR/${PACKAGE_NAME}-${VERSION}-macOS-${ARCH_LABEL}.dmg"
 mkdir -p "$DMG_DIR"
 
 DMG_PRODUCT_NAME="$PRODUCT_NAME" \

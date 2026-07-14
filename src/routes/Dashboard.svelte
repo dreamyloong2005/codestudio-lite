@@ -60,7 +60,8 @@
   import {
     applyChatGPTDesktopToolBranding,
     brandChatGPTDesktopText,
-    chatgptDesktopGeneration
+    chatgptDesktopGeneration,
+    isChatGPTDesktopToolId
   } from "../lib/chatgptDesktopBranding";
   import {
     clearClaudeEnvironmentVariables,
@@ -151,7 +152,7 @@
   const vscodePluginToolIds = new Set(["codex-vscode", "claude-vscode", "gemini-code-assist"]);
 
   function clientSortRank(tool: ToolStatus) {
-    return tool.id === "chatgpt-desktop" ? 0 : 1;
+    return isChatGPTDesktopToolId(tool.id) ? 0 : 1;
   }
 
   function isVscodePluginTool(tool: ToolStatus) {
@@ -256,7 +257,7 @@
   }
 
   function isManagedDesktopClient(tool: ToolStatus) {
-    return tool.id === "chatgpt-desktop" || tool.id === "claude-desktop";
+    return isChatGPTDesktopToolId(tool.id) || tool.id === "claude-desktop";
   }
 
   function installPlanToolFor(tool: ToolStatus) {
@@ -660,14 +661,14 @@
   });
 
   function desktopClientRouteForTool(toolId: string): string | null {
-    if (toolId === "chatgpt-desktop") return "chatgptDesktop";
+    if (isChatGPTDesktopToolId(toolId)) return "chatgptDesktop";
     if (toolId === "claude-desktop") return "claudeDesktop";
     return null;
   }
 
   function navigateToDesktopClient(toolId: string) {
     if (desktopClientRouteForTool(toolId)) {
-      onNavigateToClient(toolId);
+      onNavigateToClient(isChatGPTDesktopToolId(toolId) ? "chatgpt-desktop" : toolId);
     }
   }
 
@@ -710,9 +711,9 @@
     // Jump to the dedicated client page so the user can watch the download
     // progress. The stores are global, so the page subscribes to the same
     // install/update stream on mount and renders the progress panel.
-    onNavigateToClient(tool.id);
+    onNavigateToClient(isChatGPTDesktopToolId(tool.id) ? "chatgpt-desktop" : tool.id);
     try {
-      const result = tool.id === "chatgpt-desktop"
+      const result = isChatGPTDesktopToolId(tool.id)
         ? await installOrUpdateChatGPTDesktop()
         : await installOrUpdateClaudeDesktop(mode);
       if (result && "currentStatus" in result && result.currentStatus) {
@@ -947,7 +948,7 @@
     launchingToolId = tool.id;
     directLaunchToolIds = new Set(directLaunchToolIds).add(tool.id);
     toolActionError = null;
-    const launchPromise = tool.id === "chatgpt-desktop"
+    const launchPromise = isChatGPTDesktopToolId(tool.id)
       ? launchManagedChatGPTDesktop()
       : launchClaudeDesktopFromDashboard();
     try {

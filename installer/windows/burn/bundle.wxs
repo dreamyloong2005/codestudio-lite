@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+  <Bundle Name="CodeStudio Lite"
+          Manufacturer="CodeStudio"
+          Version="$(var.BundleVersion)"
+          UpgradeCode="{6B78C4D8-8C90-4C11-A1D8-893160DA17A7}"
+          IconSourceFile="$(var.BundleIcon)"
+          Compressed="yes">
+    <BootstrapperApplicationRef Id="ManagedBootstrapperApplicationHost">
+      <bal:WixManagedBootstrapperApplicationHost LicenseUrl="https://github.com/dreamyloong2005/codestudio-lite/blob/main/LICENSE" />
+      <Payload SourceFile="$(var.BaAssembly)" />
+      <Payload SourceFile="$(var.BaConfig)" Name="BootstrapperCore.config" />
+      <Payload SourceFile="$(var.BundleIcon)" Name="CodeStudioLite.ico" />
+      <Payload SourceFile="$(var.BrandImage)" Name="CodeStudioLite.png" />
+    </BootstrapperApplicationRef>
+
+    <Variable Name="SelectedLanguage" Type="string" Value="" bal:Overridable="yes" />
+    <Variable Name="InstallFolder" Type="string" Value="" Persisted="yes" bal:Overridable="yes" />
+    <Variable Name="VerifyPlanOnly" Type="numeric" Value="0" Hidden="yes" bal:Overridable="yes" />
+    <WixVariable Id="WixMbaPrereqPackageId" Value="" />
+
+    <Chain DisableRollback="no">
+      <MsiPackage Id="MsiBase"
+                  SourceFile="$(var.MsiBase)"
+                  Compressed="yes"
+                  DisplayInternalUI="no"
+                  Vital="yes">
+        <MsiProperty Name="INSTALLDIR" Value="[InstallFolder]" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

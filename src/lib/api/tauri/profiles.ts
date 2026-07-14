@@ -27,6 +27,7 @@ import type { ProfileAdapter } from "../profiles";
 export function tauriProfileAdapter(runtime: RuntimeAdapter): ProfileAdapter {
   return {
     ensureAppDirs: () => runtime.invoke<ProfileSummary>("ensure_app_dirs"),
+    loadSummary: () => runtime.invoke<ProfileSummary>("load_profile_summary"),
     testConnection: (request: TestProfileConnectionRequest) =>
       runtime.invoke<TestProfileConnectionResult>("test_profile_connection", { request }),
     listModels: (request: ListProfileModelsRequest) =>
