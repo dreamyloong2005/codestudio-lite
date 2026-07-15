@@ -71,6 +71,8 @@ test("R2 updater release commands do not depend on GitHub workflows", () => {
   assert.equal(packageJson.scripts["updater:publish"], "node scripts/publish-update-r2.mjs");
   assert.doesNotMatch(documentation, /GitHub Actions|GitHub Secrets|GitHub Variables/);
   assert.match(documentation, /GitHub is not required/);
+  assert.match(documentation, /codestudio-lite-download/);
+  assert.doesNotMatch(documentation, /codestudio-lite-updates/);
 });
 
 test("updater signing key storage is locally protected and portably exportable", () => {

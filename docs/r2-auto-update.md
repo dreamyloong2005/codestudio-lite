@@ -103,7 +103,7 @@ The repository can implement and test the client, manifest generator, and dry-ru
 
 ## Cloudflare R2 Setup
 
-1. In Cloudflare Dashboard, open **R2 Object Storage** and create a bucket such as `codestudio-lite-updates`.
+1. In Cloudflare Dashboard, open **R2 Object Storage** and use the `codestudio-lite-download` bucket.
 2. Open the bucket's **Settings** and connect the custom domain `download.codestudio.build`.
 3. Disable the public `r2.dev` development URL after the custom domain works.
 4. Create an R2 API token restricted to **Object Read & Write** for this bucket. Record its access key ID and secret access key only in the secure release environment.
@@ -161,7 +161,7 @@ Configure these environment variables on the trusted build or release machine. T
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `R2_ACCESS_KEY_ID` | Scoped R2 access key ID |
 | `R2_SECRET_ACCESS_KEY` | Scoped R2 secret access key |
-| `R2_BUCKET` | `codestudio-lite-updates` |
+| `R2_BUCKET` | `codestudio-lite-download` |
 
 The current Tauri CLI must receive the private-key contents in `TAURI_SIGNING_PRIVATE_KEY`; its advertised path variable was not accepted by the verified Windows signing build.
 
@@ -253,7 +253,7 @@ Install AWS CLI v2, then publish to R2:
 
 ```powershell
 $env:CLOUDFLARE_ACCOUNT_ID = "<account-id>"
-$env:R2_BUCKET = "codestudio-lite-updates"
+$env:R2_BUCKET = "codestudio-lite-download"
 $env:R2_ACCESS_KEY_ID = "<r2-access-key-id>"
 $env:R2_SECRET_ACCESS_KEY = "<r2-secret-access-key>"
 
