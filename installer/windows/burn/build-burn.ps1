@@ -176,10 +176,16 @@ $bundleOutput = Join-Path $bundleOutputDir "CodeStudio-Lite-${version}-Windows-x
 $icon = Join-Path $repoRoot "src-tauri\icons\icon.ico"
 $brandImage = Join-Path $repoRoot "src-tauri\icons\128x128.png"
 $balExtension = Join-Path $wixTools "WixBalExtension.dll"
+$netFxExtension = Join-Path $wixTools "WixNetFxExtension.dll"
+
+if (-not (Test-Path $netFxExtension)) {
+    throw "WiX .NET Framework extension was not found: $netFxExtension"
+}
 
 & (Join-Path $wixTools "candle.exe") `
     -nologo `
     -ext $balExtension `
+    -ext $netFxExtension `
     "-dBundleVersion=$version" `
     "-dBundleIcon=$icon" `
     "-dBrandImage=$brandImage" `
@@ -195,6 +201,7 @@ if ($LASTEXITCODE -ne 0) {
 & (Join-Path $wixTools "light.exe") `
     -nologo `
     -ext $balExtension `
+    -ext $netFxExtension `
     -out $bundleOutput `
     $bundleObject
 if ($LASTEXITCODE -ne 0) {

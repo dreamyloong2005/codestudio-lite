@@ -18,9 +18,9 @@
     <Variable Name="SelectedLanguage" Type="string" Value="" bal:Overridable="yes" />
     <Variable Name="InstallFolder" Type="string" Value="" Persisted="yes" bal:Overridable="yes" />
     <Variable Name="VerifyPlanOnly" Type="numeric" Value="0" Hidden="yes" bal:Overridable="yes" />
-    <WixVariable Id="WixMbaPrereqPackageId" Value="" />
 
     <Chain DisableRollback="no">
+      <PackageGroupRef Id="NetFx48Web" />
       <MsiPackage Id="MsiBase"
                   SourceFile="$(var.MsiBase)"
                   Compressed="yes"

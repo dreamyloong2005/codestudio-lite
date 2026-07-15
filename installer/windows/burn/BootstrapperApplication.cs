@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text;
 using System.Windows;
 using Microsoft.Win32;
@@ -49,6 +50,40 @@ namespace CodeStudioLite.Installer
 
         protected override void Run()
         {
+            int exitCode = unchecked((int)0x80004005);
+            try
+            {
+                exitCode = RunInstaller();
+            }
+            catch (Exception error)
+            {
+                exitCode = error.HResult != 0 ? error.HResult : unchecked((int)0x80004005);
+                Engine.Log(LogLevel.Error, "Installer initialization failed: " + error);
+                if (Command.Display == Display.Full)
+                {
+                    try
+                    {
+                        MessageBox.Show(
+                            Localized(selectedLanguage,
+                                "Installer could not start. Review the setup log and try again.",
+                                "安装程序无法启动。请检查安装日志后重试。",
+                                "安裝程式無法啟動。請檢查安裝記錄後重試。"),
+                            Localized(selectedLanguage, "CodeStudio Lite Setup", "CodeStudio Lite 安装程序", "CodeStudio Lite 安裝程式"),
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Error);
+                    }
+                    catch
+                    {
+                        // The Burn log still contains the original initialization failure.
+                    }
+                }
+            }
+
+            Engine.Quit(exitCode);
+        }
+
+        private int RunInstaller()
+        {
             string configuredLanguage = CommandLineValue("SelectedLanguage");
             string configuredFolder = CommandLineValue("InstallFolder") ?? Engine.StringVariables["InstallFolder"];
             hasFolderOverride = !string.IsNullOrWhiteSpace(configuredFolder);
@@ -56,10 +91,7 @@ namespace CodeStudioLite.Installer
             launchAfterInstall = CommandLineValue("LaunchAfterInstall") == "1";
 
             selectedLanguage = IsSupportedLanguage(configuredLanguage) ? configuredLanguage : DefaultLanguageCode();
-            string discoveredFolder = hasFolderOverride ? null : RegistryInstallLocation(null);
-            installFolder = NormalizeInstallFolder(hasFolderOverride
-                ? configuredFolder
-                : (!string.IsNullOrWhiteSpace(discoveredFolder) ? discoveredFolder : DefaultInstallFolder()));
+            installFolder = ResolveInitialInstallFolder(configuredFolder);
             Engine.StringVariables["SelectedLanguage"] = selectedLanguage;
             Engine.StringVariables["InstallFolder"] = installFolder;
 
@@ -76,7 +108,7 @@ namespace CodeStudioLite.Installer
 
             form.Loaded += (_, __) => Engine.Detect();
             application.Run(form);
-            Engine.Quit(form.ExitCode);
+            return form.ExitCode;
         }
 
         internal void BeginAction(string languageCode, string installFolder, LaunchAction action)
@@ -86,12 +118,7 @@ namespace CodeStudioLite.Installer
                 return;
             }
 
-            string normalizedFolder;
-            try
-            {
-                normalizedFolder = NormalizeInstallFolder(installFolder);
-            }
-            catch (ArgumentException)
+            if (!TryNormalizeInstallFolder(installFolder, out string normalizedFolder))
             {
                 form.ShowInvalidInstallFolder();
                 return;
@@ -135,9 +162,16 @@ namespace CodeStudioLite.Installer
                 string installedFolder = InstalledProductLocation(e.ProductCode);
                 if (!string.IsNullOrWhiteSpace(installedFolder))
                 {
-                    installFolder = NormalizeInstallFolder(installedFolder);
-                    Engine.StringVariables["InstallFolder"] = installFolder;
-                    form.SetInstallFolder(installFolder);
+                    if (TryNormalizeInstallFolder(installedFolder, out string normalizedFolder))
+                    {
+                        installFolder = normalizedFolder;
+                        Engine.StringVariables["InstallFolder"] = installFolder;
+                        form.SetInstallFolder(installFolder);
+                    }
+                    else
+                    {
+                        Engine.Log(LogLevel.Standard, "Warning: ignoring invalid legacy installation location reported by MSI: " + installedFolder);
+                    }
                 }
             }
         }
@@ -292,6 +326,22 @@ namespace CodeStudioLite.Installer
             return null;
         }
 
+        private string ResolveInitialInstallFolder(string configuredFolder)
+        {
+            string candidate = hasFolderOverride ? configuredFolder : RegistryInstallLocation(null);
+            if (TryNormalizeInstallFolder(candidate, out string normalizedFolder))
+            {
+                return normalizedFolder;
+            }
+
+            if (!string.IsNullOrWhiteSpace(candidate))
+            {
+                Engine.Log(LogLevel.Standard, "Warning: ignoring invalid legacy installation location: " + candidate);
+            }
+
+            return NormalizeInstallFolder(DefaultInstallFolder());
+        }
+
         private static string InstalledProductLocation(string productCode)
         {
             string location = InstalledProductValue(productCode, "InstallLocation");
@@ -353,6 +403,14 @@ namespace CodeStudioLite.Installer
                     {
                         // Continue with the remaining registry scopes.
                     }
+                    catch (SecurityException)
+                    {
+                        // Continue with the remaining registry scopes.
+                    }
+                    catch (IOException)
+                    {
+                        // Continue with the remaining registry scopes.
+                    }
                 }
             }
 
@@ -401,6 +459,30 @@ namespace CodeStudioLite.Installer
                 throw new ArgumentException("The installation folder must be an absolute path.");
             }
             return Path.GetFullPath(folder.Trim().Trim('"')).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        private static bool TryNormalizeInstallFolder(string folder, out string normalizedFolder)
+        {
+            try
+            {
+                normalizedFolder = NormalizeInstallFolder(folder);
+                return true;
+            }
+            catch (ArgumentException)
+            {
+            }
+            catch (NotSupportedException)
+            {
+            }
+            catch (PathTooLongException)
+            {
+            }
+            catch (SecurityException)
+            {
+            }
+
+            normalizedFolder = null;
+            return false;
         }
 
         private static string DefaultLanguageCode()

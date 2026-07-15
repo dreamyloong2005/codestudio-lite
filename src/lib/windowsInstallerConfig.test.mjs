@@ -84,6 +84,30 @@ test("managed Burn UI exposes the three-language selector", () => {
   assert.doesNotMatch(source, /InstalledProductLanguage/);
 });
 
+test("managed Burn reports initialization failures and tolerates legacy install paths", () => {
+  const source = fs.readFileSync(bootstrapperSourcePath, "utf8");
+
+  assert.match(source, /protected override void Run\(\)[\s\S]*try[\s\S]*RunInstaller\(\)[\s\S]*catch \(Exception error\)/);
+  assert.match(source, /Installer initialization failed:/);
+  assert.match(source, /MessageBox\.Show\([\s\S]*Installer could not start/);
+  assert.match(source, /ResolveInitialInstallFolder\(/);
+  assert.match(source, /TryNormalizeInstallFolder\(/);
+  assert.match(source, /ignoring invalid legacy installation location/i);
+});
+
+test("interactive Burn brings its clean-room child window to the foreground", () => {
+  const source = fs.readFileSync(installerWindowSourcePath, "utf8");
+
+  assert.match(source, /private readonly bool showFullUi/);
+  assert.doesNotMatch(source, /ContentRendered \+=/);
+  assert.match(source, /Loaded \+= \(_, __\) =>[\s\S]*BringToForeground\(\)/);
+  assert.match(source, /BringToForeground\(\)[\s\S]*if \(!showFullUi/);
+  assert.match(source, /WindowState = WindowState\.Normal/);
+  assert.match(source, /Activate\(\)/);
+  assert.match(source, /Topmost = true[\s\S]*Topmost = false/);
+  assert.match(source, /SetForegroundWindow\(windowHandle\)/);
+});
+
 test("managed Burn UI uses a localized multi-step install wizard", () => {
   const source = [bootstrapperSourcePath, installerWindowSourcePath, installerWindowXamlPath]
     .map((path) => fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "")
@@ -106,6 +130,23 @@ test("managed Burn project excludes stale local build intermediates", () => {
   const source = fs.readFileSync(bootstrapperProjectPath, "utf8");
 
   assert.match(source, /Compile Remove="obj\\\*\*\\\*\.cs"/);
+});
+
+test("Burn bootstraps the compact .NET 4.8 web prerequisite", () => {
+  const project = fs.readFileSync(bootstrapperProjectPath, "utf8");
+  const bundle = fs.readFileSync(bundleSourcePath, "utf8");
+  const build = fs.readFileSync(buildScriptPath, "utf8");
+  const verify = fs.readFileSync(verifyScriptPath, "utf8");
+
+  assert.match(project, /<TargetFramework>net48<\/TargetFramework>/);
+  assert.match(bundle, /<PackageGroupRef Id="NetFx48Web"\s*\/>/);
+  assert.doesNotMatch(bundle, /WixMbaPrereqPackageId" Value=""/);
+  assert.match(build, /WixNetFxExtension\.dll/);
+  assert.ok((build.match(/-ext \$netFxExtension/g) ?? []).length >= 2);
+  assert.match(verify, /@\("NetFx48Web", "MsiBase"\)/);
+  assert.match(verify, /burn:ExePackage/);
+  assert.match(verify, /WixMbaPrereqInformation/);
+  assert.match(verify, /PackageId -ne "NetFx48Web"/);
 });
 
 test("managed Burn UI uses the CodeStudio Lite WPF theme", () => {
@@ -189,6 +230,9 @@ test("Burn verification inspects the built manifest instead of trusting source a
   assert.match(script, /CodeStudioLite\.png/);
   assert.match(script, /MsiProperty\[@Id='INSTALLDIR'\]/);
   assert.match(script, /-VerifyPlanOnly=1/);
+  assert.match(script, /MainWindowHandle/);
+  assert.match(script, /MainWindowTitle/);
+  assert.match(script, /\.Responding/);
   assert.match(script, /Plan complete, result: 0x0/);
   assert.match(script, /Variable: InstallFolder/);
   assert.match(script, /Variable: SelectedLanguage/);

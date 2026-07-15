@@ -33,16 +33,34 @@ if (-not (Test-Path $manifestPath) -or -not (Test-Path $applicationDataPath)) {
 [xml]$manifest = Get-Content -Raw $manifestPath
 $burnNs = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
 $burnNs.AddNamespace("burn", "http://schemas.microsoft.com/wix/2008/Burn")
+[xml]$applicationData = Get-Content -Raw $applicationDataPath
+$applicationDataNs = New-Object System.Xml.XmlNamespaceManager($applicationData.NameTable)
+$applicationDataNs.AddNamespace("ba", "http://schemas.microsoft.com/wix/2010/BootstrapperApplicationData")
 
 $relatedBundle = $manifest.SelectSingleNode("//burn:RelatedBundle", $burnNs)
 if ($relatedBundle.Id -ne "{6B78C4D8-8C90-4C11-A1D8-893160DA17A7}") {
     throw "Unexpected Burn UpgradeCode: $($relatedBundle.Id)"
 }
 
-$expectedPackages = @("MsiBase")
-$actualPackages = @($manifest.SelectNodes("//burn:Chain/burn:MsiPackage", $burnNs) | ForEach-Object { $_.Id })
+$expectedPackages = @("NetFx48Web", "MsiBase")
+$actualPackages = @($manifest.SelectNodes("//burn:Chain/burn:ExePackage | //burn:Chain/burn:MsiPackage", $burnNs) | ForEach-Object { $_.Id })
 if (@(Compare-Object $expectedPackages $actualPackages).Count -ne 0) {
     throw "Unexpected Burn package IDs: $($actualPackages -join ', ')"
+}
+
+$netFxPackage = $manifest.SelectSingleNode("//burn:Chain/burn:ExePackage[@Id='NetFx48Web']", $burnNs)
+if (-not $netFxPackage -or $netFxPackage.PerMachine -ne "yes" -or $netFxPackage.Permanent -ne "yes" -or
+    $netFxPackage.Protocol -ne "netfx4" -or $netFxPackage.DetectCondition -notmatch "NETFRAMEWORK45.*528040") {
+    throw "The .NET Framework prerequisite is not authored as the expected permanent per-machine package."
+}
+$netFxPayload = $manifest.SelectSingleNode("//burn:Payload[@Id='NetFx48Web']", $burnNs)
+if (-not $netFxPayload -or $netFxPayload.Packaging -ne "external" -or
+    $netFxPayload.DownloadUrl -ne "https://go.microsoft.com/fwlink/?LinkId=2085155") {
+    throw "The .NET Framework prerequisite is not using the expected external Microsoft web payload."
+}
+$managedPrerequisite = $applicationData.SelectSingleNode("//ba:WixMbaPrereqInformation", $applicationDataNs)
+if (-not $managedPrerequisite -or $managedPrerequisite.PackageId -ne "NetFx48Web") {
+    throw "The managed bootstrapper host is not bound to the .NET Framework prerequisite."
 }
 
 $embeddedPayloadPaths = @($manifest.SelectNodes("//burn:Payload[@Container='WixAttachedContainer' and @Packaging='embedded']", $burnNs) | ForEach-Object { $_.FilePath })
@@ -157,6 +175,55 @@ foreach ($bundleId in $sameVersionRelatedBundles) {
 }
 if ($planLogContent -match 'Apply begin') {
     throw "Plan-only verification unexpectedly started installation."
+}
+
+$windowLogPath = Join-Path $extractRoot "window-ready.log"
+$windowProcess = Start-Process -FilePath $bundle `
+    -ArgumentList @("-log", "`"$windowLogPath`"") `
+    -PassThru
+$bundleFileName = [IO.Path]::GetFileName($bundle)
+$windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
+$readyWindowProcess = $null
+try {
+    while ([DateTime]::UtcNow -lt $windowDeadline -and -not $readyWindowProcess) {
+        $bundleProcesses = @(Get-CimInstance Win32_Process -Filter "Name = '$bundleFileName'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like "*$windowLogPath*" })
+        foreach ($candidate in $bundleProcesses) {
+            $process = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+            if ($process -and $process.MainWindowHandle -ne [IntPtr]::Zero -and
+                $process.MainWindowTitle -like "CodeStudio Lite*") {
+                $process.Refresh()
+                if ($process.Responding) {
+                    $readyWindowProcess = $process
+                    break
+                }
+            }
+        }
+        if (-not $readyWindowProcess) {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+} finally {
+    $testProcessIds = @(Get-CimInstance Win32_Process -Filter "Name = '$bundleFileName'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*$windowLogPath*" } |
+        ForEach-Object { $_.ProcessId })
+    $processIds = @($testProcessIds + $windowProcess.Id | Select-Object -Unique)
+    foreach ($processId in $processIds) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($processId in $processIds) {
+        Wait-Process -Id $processId -Timeout 5 -ErrorAction SilentlyContinue
+    }
+}
+if (-not $readyWindowProcess) {
+    throw "Burn did not create a visible and responsive interactive window within 30 seconds."
+}
+if (-not (Test-Path $windowLogPath)) {
+    throw "Burn interactive window verification did not produce a log."
+}
+$windowLogContent = Get-Content -Raw $windowLogPath
+if ($windowLogContent -match 'Apply begin') {
+    throw "Interactive window verification unexpectedly started installation."
 }
 
 $verifyRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot "src-tauri\target\burn\verify"))

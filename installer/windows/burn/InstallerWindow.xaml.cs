@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -20,6 +21,7 @@ namespace CodeStudioLite.Installer
 
         private readonly CodeStudioBootstrapperApplication bootstrapper;
         private readonly LaunchAction commandAction;
+        private readonly bool showFullUi;
         private InstallerPage page;
         private bool operationComplete;
         private bool detectionComplete;
@@ -38,6 +40,7 @@ namespace CodeStudioLite.Installer
             InitializeComponent();
             this.bootstrapper = bootstrapper;
             this.commandAction = commandAction;
+            this.showFullUi = showFullUi;
 
             LanguageSelector.Items.Add(new InstallerLanguage("zh-CN", "简体中文"));
             LanguageSelector.Items.Add(new InstallerLanguage("zh-TW", "繁體中文"));
@@ -47,6 +50,10 @@ namespace CodeStudioLite.Installer
             LoadBrandIcon();
             ShowDetecting();
             SourceInitialized += (_, __) => windowHandle = new WindowInteropHelper(this).Handle;
+            Loaded += (_, __) =>
+            {
+                BringToForeground();
+            };
             Closing += OnWindowClosing;
 
             if (!showFullUi)
@@ -60,6 +67,29 @@ namespace CodeStudioLite.Installer
         internal int ExitCode { get; set; }
 
         internal IntPtr Handle => windowHandle;
+
+        private void BringToForeground()
+        {
+            if (!showFullUi || windowHandle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            if (WindowState == WindowState.Minimized)
+            {
+                WindowState = WindowState.Normal;
+            }
+
+            Activate();
+            Topmost = true;
+            Topmost = false;
+            Focus();
+            SetForegroundWindow(windowHandle);
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr windowHandle);
 
         internal void SelectLanguage(string languageCode)
         {
