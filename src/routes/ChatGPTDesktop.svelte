@@ -89,7 +89,12 @@
   $: progressStepLabel = progress?.step && progress.stepTotal
     ? $t("chatgptDesktop.progressStep", { current: progress.step, total: progress.stepTotal })
     : "";
-  $: showProgress = Boolean(progress && (busyAction === "stage" || busyAction === "install" || progress.phase === "done"));
+  $: showProgress = Boolean(progress && (
+    busyAction === "stage"
+    || busyAction === "install"
+    || progress.phase === "done"
+    || progress.phase === "error"
+  ));
 
   onMount(() => {
     startChatGPTDesktopProgressListener();
@@ -134,6 +139,9 @@
   }
 
   function progressPhaseLabel(value: string) {
+    if (value === "error") {
+      return $t("common.error");
+    }
     const key = `chatgptDesktop.phase.${value}` as Parameters<typeof $t>[0];
     const label = $t(key);
     return label === key ? value : label;

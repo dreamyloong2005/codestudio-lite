@@ -84,6 +84,26 @@ test("managed Burn UI exposes the three-language selector", () => {
   assert.doesNotMatch(source, /InstalledProductLanguage/);
 });
 
+test("managed Burn falls back unsupported Windows UI languages to English before WPF starts", () => {
+  const source = fs.readFileSync(bootstrapperSourcePath, "utf8");
+  const script = fs.readFileSync(verifyScriptPath, "utf8");
+  const buildScript = fs.readFileSync(buildScriptPath, "utf8");
+
+  assert.match(source, /ResolveLanguageCode\(configuredLanguage\)/);
+  assert.match(source, /NormalizeLanguageCode\(name\)/);
+  assert.match(source, /return "en-US";/);
+  assert.match(source, /ApplySupportedUiCulture\(selectedLanguage\)/);
+  assert.match(source, /CultureInfo\.DefaultThreadCurrentUICulture\s*=\s*culture/);
+  assert.match(source, /Thread\.CurrentThread\.CurrentUICulture\s*=\s*culture/);
+  assert.ok(
+    source.indexOf("ApplySupportedUiCulture(selectedLanguage)") < source.indexOf("new Application")
+  );
+  assert.match(script, /-SelectedLanguage=ja-JP/);
+  assert.match(script, /Variable: SelectedLanguage = en-US/);
+  assert.match(buildScript, /Release\\net48\\CodeStudioBootstrapper\.dll/);
+  assert.doesNotMatch(buildScript, /Get-ChildItem \$baOutputDir -Recurse -Filter "CodeStudioBootstrapper\.dll"/);
+});
+
 test("managed Burn reports initialization failures and tolerates legacy install paths", () => {
   const source = fs.readFileSync(bootstrapperSourcePath, "utf8");
 

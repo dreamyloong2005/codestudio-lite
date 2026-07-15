@@ -22,7 +22,7 @@ import type {
   ToolInstallResult,
   ToolStatus
 } from "../types";
-import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./refreshCache";
+import { REFRESH_CACHE_TTL_MS, refreshTimestampFresh, writeRefreshTimestamp } from "./refreshCache";
 
 export const CLAUDE_DESKTOP_TOOL_ID = "claude-desktop";
 
@@ -134,7 +134,6 @@ const initialState: ClaudeDesktopViewState = {
 export const claudeDesktopView = writable<ClaudeDesktopViewState>(initialState);
 
 let loadPromise: Promise<void> | null = null;
-let lastNavigationRefreshAt = Math.max(readRefreshTimestamp("claudeDesktop"), readRefreshTimestamp("detection"));
 const NAVIGATION_REFRESH_TTL_MS = REFRESH_CACHE_TTL_MS;
 let progressListenerStarted = false;
 let localizationProgressListenerStarted = false;
@@ -475,8 +474,7 @@ export async function ensureClaudeDesktopLoaded() {
     await hydrateClaudeDesktopFromCache();
   }
   const current = get(claudeDesktopView);
-  lastNavigationRefreshAt = Math.max(readRefreshTimestamp("claudeDesktop"), readRefreshTimestamp("detection"));
-  const stale = !refreshTimestampFresh("claudeDesktop", NAVIGATION_REFRESH_TTL_MS) && !refreshTimestampFresh("detection", NAVIGATION_REFRESH_TTL_MS);
+  const stale = !refreshTimestampFresh("claudeDesktop", NAVIGATION_REFRESH_TTL_MS);
   if (!loadPromise && !hasLoadingView() && !hasBusyAction() && (!current.loaded || stale)) {
     loadPromise = refreshClaudeDesktop(false, get(claudeDesktopView).selectedKind, { forceFresh: false })
       .finally(() => {
@@ -528,9 +526,9 @@ export async function refreshClaudeDesktop(
       storeClaudeDesktopPlan(state.plan);
       applyClaudeDesktopPlan(state.plan);
     }
-    lastNavigationRefreshAt = Date.now();
-    writeRefreshTimestamp("claudeDesktop", lastNavigationRefreshAt);
-    writeRefreshTimestamp("detection", lastNavigationRefreshAt);
+    const refreshedAt = Date.now();
+    writeRefreshTimestamp("claudeDesktop", refreshedAt);
+    writeRefreshTimestamp("detection", refreshedAt);
     applyKindStatusesFromSnapshot(
       state.snapshot,
       state.installPlan,
@@ -584,7 +582,19 @@ async function runAction(
     }
     return result;
   } catch (err) {
-    patch({ error: err instanceof Error ? err.message : String(err) });
+    const message = err instanceof Error ? err.message : String(err);
+    const progress = get(claudeDesktopView).kindViews[kind].progress;
+    if ((action === "install" || action === "update") && progress) {
+      patchKind(kind, {
+        progress: {
+          ...progress,
+          phase: "error",
+          message,
+          percent: null
+        }
+      });
+    }
+    patch({ error: message });
     return null;
   } finally {
     patchKind(kind, { busyAction: null });

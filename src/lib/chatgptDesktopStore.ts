@@ -27,7 +27,7 @@ import type {
   ChatGPTDesktopStateCache
 } from "../types";
 import type { TranslationKey } from "./i18n";
-import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./refreshCache";
+import { REFRESH_CACHE_TTL_MS, refreshTimestampFresh, writeRefreshTimestamp } from "./refreshCache";
 
 export type ChatGPTDesktopInstallKind = "msix" | "portable";
 
@@ -99,7 +99,6 @@ const initialState: ChatGPTDesktopViewState = {
 export const chatgptDesktopView = writable<ChatGPTDesktopViewState>(initialState);
 
 let loadPromise: Promise<void> | null = null;
-let lastNavigationRefreshAt = Math.max(readRefreshTimestamp("chatgptDesktop"), readRefreshTimestamp("detection"));
 const NAVIGATION_REFRESH_TTL_MS = REFRESH_CACHE_TTL_MS;
 let progressListenerStarted = false;
 let settingsSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
@@ -419,8 +418,7 @@ export async function ensureChatGPTDesktopLoaded() {
     return;
   }
   const hydrated = snapshot.loaded ? true : await hydrateChatGPTDesktopFromCache();
-  lastNavigationRefreshAt = Math.max(readRefreshTimestamp("chatgptDesktop"), readRefreshTimestamp("detection"));
-  const stale = !refreshTimestampFresh("chatgptDesktop", NAVIGATION_REFRESH_TTL_MS) && !refreshTimestampFresh("detection", NAVIGATION_REFRESH_TTL_MS);
+  const stale = !refreshTimestampFresh("chatgptDesktop", NAVIGATION_REFRESH_TTL_MS);
   if (!loadPromise && !hasLoadingView() && !hasBusyAction()) {
     if (hydrated) {
       const settings = get(chatgptDesktopView).settingsDraft;
@@ -461,8 +459,7 @@ export async function refreshChatGPTDesktop(
       applyState(nextState, installKind, { preserveDraft: preserveDraft() });
     }
     const installKinds = await detectChatGPTDesktopInstallKinds().catch(() => null);
-    lastNavigationRefreshAt = Date.now();
-    writeRefreshTimestamp("chatgptDesktop", lastNavigationRefreshAt);
+    writeRefreshTimestamp("chatgptDesktop");
     patch({ installKinds });
   } catch (err) {
     patch({ error: err instanceof Error ? err.message : String(err) });
@@ -485,7 +482,19 @@ async function runAction<T>(
     await onSuccess?.(result);
     return result;
   } catch (err) {
-    patch({ error: err instanceof Error ? err.message : String(err) });
+    const message = err instanceof Error ? err.message : String(err);
+    const progress = get(chatgptDesktopView).kindViews[kind].progress;
+    if ((name === "stage" || name === "install") && progress) {
+      patchKind(kind, {
+        progress: {
+          ...progress,
+          phase: "error",
+          message,
+          percent: null
+        }
+      });
+    }
+    patch({ error: message });
     return null;
   } finally {
     patchKind(kind, { busyAction: null });

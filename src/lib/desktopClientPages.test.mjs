@@ -558,6 +558,31 @@ test("Claude Desktop localization progress keys are translated with fallbacks", 
   assert.doesNotMatch(store, /success:\s*progress\.phase === "done" \? progress\.message/);
 });
 
+test("Claude Desktop navigation does not treat detection refresh as update-plan freshness", () => {
+  const store = read("src/lib/claudeDesktopStore.ts");
+  const ensure = store.slice(
+    store.indexOf("export async function ensureClaudeDesktopLoaded"),
+    store.indexOf("export async function refreshClaudeDesktop")
+  );
+
+  assert.match(ensure, /const stale = !refreshTimestampFresh\("claudeDesktop", NAVIGATION_REFRESH_TTL_MS\)/);
+  assert.doesNotMatch(ensure, /refreshTimestampFresh\("detection"/);
+  assert.ok(!ensure.includes('Math.max(readRefreshTimestamp("claudeDesktop"), readRefreshTimestamp("detection"))'));
+});
+
+test("Claude Desktop keeps failed update progress visible with the backend error", () => {
+  const store = read("src/lib/claudeDesktopStore.ts");
+  const route = read("src/routes/ClaudeDesktop.svelte");
+  const runAction = store.slice(
+    store.indexOf("async function runAction"),
+    store.indexOf("export async function launchClaudeDesktopFromDashboard")
+  );
+
+  assert.match(runAction, /catch \(err\)[\s\S]*phase:\s*"error"[\s\S]*message/);
+  assert.match(route, /showProgress\s*=\s*Boolean\(progress && \([\s\S]*progress\.phase === "error"/);
+  assert.match(route, /if \(value === "error"\) \{[\s\S]*\$t\("common\.error"\)/);
+});
+
 test("desktop client launch buttons always show launch copy", () => {
   const claudeRoute = read("src/routes/ClaudeDesktop.svelte");
   const codexRoute = read("src/routes/ChatGPTDesktop.svelte");

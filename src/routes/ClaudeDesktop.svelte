@@ -74,7 +74,12 @@
   $: progressStepLabel = progress?.step && progress.stepTotal
     ? $t("claudeDesktop.progressStep", { current: progress.step, total: progress.stepTotal })
     : "";
-  $: showProgress = Boolean(progress && (busyAction === "install" || busyAction === "update" || progress.phase === "done"));
+  $: showProgress = Boolean(progress && (
+    busyAction === "install"
+    || busyAction === "update"
+    || progress.phase === "done"
+    || progress.phase === "error"
+  ));
   $: installed = status?.installState === "installed";
   $: statusLabel = installed ? $t("common.installed") : $t("common.missing");
   $: statusTone = (installed ? "ok" : "warning") as Severity;
@@ -209,6 +214,9 @@
   function progressPhaseLabel(value: string | null | undefined) {
     if (!value) {
       return $t("claudeDesktop.phase.preparing");
+    }
+    if (value === "error") {
+      return $t("common.error");
     }
     const key = `claudeDesktop.phase.${value}` as Parameters<typeof $t>[0];
     const label = $t(key);

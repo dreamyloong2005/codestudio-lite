@@ -163,10 +163,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "Managed bootstrapper build failed with exit code $LASTEXITCODE."
 }
 
-$baAssembly = Get-ChildItem $baOutputDir -Recurse -Filter "CodeStudioBootstrapper.dll" |
-    Select-Object -First 1 -ExpandProperty FullName
-if (-not $baAssembly) {
-    throw "Managed bootstrapper output was not found under $baOutputDir."
+$baAssembly = Join-Path $baOutputDir "Release\net48\CodeStudioBootstrapper.dll"
+if (-not (Test-Path $baAssembly)) {
+    throw "Managed bootstrapper output was not found: $baAssembly"
 }
 
 $baConfig = Join-Path $scriptDir "BootstrapperCore.config"

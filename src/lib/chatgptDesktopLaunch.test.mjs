@@ -366,6 +366,30 @@ test("ChatGPT desktop keeps cached update plan visible while background refresh 
   }
 });
 
+test("ChatGPT desktop navigation does not treat detection refresh as update-plan freshness", () => {
+  const store = read("src/lib/chatgptDesktopStore.ts");
+  const ensure = store.slice(
+    store.indexOf("export async function ensureChatGPTDesktopLoaded"),
+    store.indexOf("export async function refreshChatGPTDesktop")
+  );
+
+  assert.match(ensure, /const stale = !refreshTimestampFresh\("chatgptDesktop", NAVIGATION_REFRESH_TTL_MS\)/);
+  assert.doesNotMatch(ensure, /refreshTimestampFresh\("detection"/);
+  assert.ok(!ensure.includes('Math.max(readRefreshTimestamp("chatgptDesktop"), readRefreshTimestamp("detection"))'));
+});
+
+test("ChatGPT desktop keeps failed update progress visible with the backend error", () => {
+  const store = read("src/lib/chatgptDesktopStore.ts");
+  const route = read("src/routes/ChatGPTDesktop.svelte");
+  const runAction = store.slice(
+    store.indexOf("async function runAction"),
+    store.indexOf("export function updateChatGPTDesktopDraft")
+  );
+
+  assert.match(runAction, /catch \(err\)[\s\S]*phase:\s*"error"[\s\S]*message/);
+  assert.match(route, /showProgress\s*=\s*Boolean\(progress && \([\s\S]*progress\.phase === "error"/);
+});
+
 test("ChatGPT desktop refresh preserves draft edits made while the scan is in flight", () => {
   const store = read("src/lib/chatgptDesktopStore.ts");
 

@@ -6,6 +6,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
+using System.Threading;
 using System.Windows;
 using Microsoft.Win32;
 using Microsoft.Tools.WindowsInstallerXml.Bootstrapper;
@@ -90,7 +91,8 @@ namespace CodeStudioLite.Installer
             verifyPlanOnly = CommandLineValue("VerifyPlanOnly") == "1" || Engine.NumericVariables["VerifyPlanOnly"] == 1;
             launchAfterInstall = CommandLineValue("LaunchAfterInstall") == "1";
 
-            selectedLanguage = IsSupportedLanguage(configuredLanguage) ? configuredLanguage : DefaultLanguageCode();
+            selectedLanguage = ResolveLanguageCode(configuredLanguage);
+            ApplySupportedUiCulture(selectedLanguage);
             installFolder = ResolveInitialInstallFolder(configuredFolder);
             Engine.StringVariables["SelectedLanguage"] = selectedLanguage;
             Engine.StringVariables["InstallFolder"] = installFolder;
@@ -497,13 +499,36 @@ namespace CodeStudioLite.Installer
                 name = CultureInfo.CurrentUICulture.Name;
             }
 
-            if (name.Equals("zh-TW", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("zh-HK", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("zh-MO", StringComparison.OrdinalIgnoreCase))
+            return NormalizeLanguageCode(name);
+        }
+
+        private static string ResolveLanguageCode(string configuredLanguage)
+        {
+            return string.IsNullOrWhiteSpace(configuredLanguage)
+                ? DefaultLanguageCode()
+                : NormalizeLanguageCode(configuredLanguage);
+        }
+
+        private static string NormalizeLanguageCode(string name)
+        {
+            if (string.Equals(name, "zh-TW", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, "zh-HK", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, "zh-MO", StringComparison.OrdinalIgnoreCase))
             {
                 return "zh-TW";
             }
-            return name.StartsWith("zh", StringComparison.OrdinalIgnoreCase) ? "zh-CN" : "en-US";
+            if (!string.IsNullOrWhiteSpace(name) && name.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
+            {
+                return "zh-CN";
+            }
+            return "en-US";
+        }
+
+        private static void ApplySupportedUiCulture(string languageCode)
+        {
+            var culture = CultureInfo.GetCultureInfo(IsSupportedLanguage(languageCode) ? languageCode : "en-US");
+            CultureInfo.DefaultThreadCurrentUICulture = culture;
+            Thread.CurrentThread.CurrentUICulture = culture;
         }
 
         private static string CultureName(ushort languageId)

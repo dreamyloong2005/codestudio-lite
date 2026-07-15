@@ -163,6 +163,24 @@ if ($planLogContent -notmatch [Regex]::Escape("Variable: InstallFolder = $planIn
 if ($planLogContent -notmatch [Regex]::Escape("Variable: SelectedLanguage = $expectedLanguage")) {
     throw "Burn did not select the current Windows UI language: expected $expectedLanguage."
 }
+
+$unsupportedLanguageLogPath = Join-Path $extractRoot "unsupported-language-plan.log"
+$unsupportedLanguageProcess = Start-Process -FilePath $bundle `
+    -ArgumentList @("-quiet", "-log", "`"$unsupportedLanguageLogPath`"", "-VerifyPlanOnly=1", "-SelectedLanguage=ja-JP", "-InstallFolder=`"$planInstallFolder`"") `
+    -PassThru `
+    -WindowStyle Hidden
+if (-not $unsupportedLanguageProcess.WaitForExit(30000)) {
+    Stop-Process -Id $unsupportedLanguageProcess.Id -Force -ErrorAction SilentlyContinue
+    throw "Burn unsupported-language fallback verification did not exit within 30 seconds."
+}
+if ($unsupportedLanguageProcess.ExitCode -ne 0) {
+    throw "Burn unsupported-language fallback verification failed with exit code $($unsupportedLanguageProcess.ExitCode)."
+}
+$unsupportedLanguageLogContent = Get-Content -Raw $unsupportedLanguageLogPath
+if ($unsupportedLanguageLogContent -notmatch [Regex]::Escape("Variable: SelectedLanguage = en-US")) {
+    throw "Burn did not fall back an unsupported installer language to en-US."
+}
+
 $sameVersionRelatedBundles = [Regex]::Matches(
     $planLogContent,
     'Detected related bundle: (?<id>\{[^}]+\}), type: Upgrade,.*operation: None'
