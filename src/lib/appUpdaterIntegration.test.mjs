@@ -75,6 +75,14 @@ test("R2 updater release commands do not depend on GitHub workflows", () => {
   assert.doesNotMatch(documentation, /codestudio-lite-updates/);
 });
 
+test("README directs releases from 1.5.0 to the official website", () => {
+  const readme = read("README.md");
+
+  assert.match(readme, /https:\/\/www\.codestudio\.build/);
+  assert.match(readme, /从 1\.5\.0 版本起，安装包不再通过 GitHub Releases 提供/);
+  assert.match(readme, /Starting with version 1\.5\.0, installers are no longer distributed through GitHub Releases/);
+});
+
 test("updater signing key storage is locally protected and portably exportable", () => {
   const packageJson = JSON.parse(read("package.json"));
   const setup = read("scripts/setup-updater-signing-key.ps1");

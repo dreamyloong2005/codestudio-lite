@@ -4,6 +4,12 @@ CodeStudio Lite 是面向本机 AI 编程工具的桌面控制台。它把本地
 
 > English documentation starts at [English](#english).
 
+## 官网与下载
+
+官网：[https://www.codestudio.build](https://www.codestudio.build)
+
+从 1.5.0 版本起，安装包不再通过 GitHub Releases 提供，请前往官网获取适用于 Windows、macOS 和 Linux 的最新版本。
+
 ## 核心能力
 
 - **本地 AI 网关**：在 `127.0.0.1:43112` 提供 OpenAI / Anthropic / Gemini 风格接口，并用当前激活的 Provider Profile 转发请求。
@@ -200,6 +206,12 @@ CodeStudio Lite 是 GUI-only 桌面应用。当前仓库不计划加入：
 ## English
 
 CodeStudio Lite is a desktop control center for local AI coding tools. It brings Provider Profiles, a localhost gateway, tool detection, install/update flows, config writes, usage queries, and desktop-client patch workflows into one Tauri app, so tools such as Codex, Claude, Gemini, OpenCode, OpenClaw, Hermes, Grok, and Pi Agent can switch providers and models without repeated manual config edits.
+
+## Website and Downloads
+
+Official website: [https://www.codestudio.build](https://www.codestudio.build)
+
+Starting with version 1.5.0, installers are no longer distributed through GitHub Releases. Download the latest Windows, macOS, and Linux packages from the official website.
 
 ## Core Features
 
