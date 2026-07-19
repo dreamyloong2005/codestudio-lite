@@ -114,7 +114,7 @@ pub fn detect_first_msix_package(package_identities: &[&str]) -> Option<Installe
         // where the Appx module/profile load behaves differently). The AppModel
         // package repository is the same registry hive Get-AppxPackage reads
         // from, so reading it directly via Get-ItemProperty avoids the cmdlet
-        // entirely. Scans for any Claude_*_x64__* package regardless of the
+        // entirely. Scans for any Claude package on a supported architecture regardless of the
         // package-identity list, since the registry key is keyed by full
         // PackageFullName.
         .or_else(detect_claude_msix_package_from_registry)
@@ -122,7 +122,7 @@ pub fn detect_first_msix_package(package_identities: &[&str]) -> Option<Installe
 
 /// Read the AppModel package repository registry directly to detect a Claude
 /// MSIX install without relying on the Get-AppxPackage cmdlet. Returns the
-/// highest-version Claude_*_x64__* package found under the current user's
+/// highest-version Claude x64 or arm64 package found under the current user's
 /// package repository. Used as a fallback when Get-AppxPackage yields nothing.
 fn detect_claude_msix_package_from_registry() -> Option<InstalledMsixPackage> {
     if !cfg!(target_os = "windows") {
@@ -132,7 +132,7 @@ fn detect_claude_msix_package_from_registry() -> Option<InstalledMsixPackage> {
 $root = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages"
 if (-not (Test-Path $root)) { exit 0 }
 $best = Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object {
-  $_.PSChildName -like "Claude_*_x64__*"
+  $_.PSChildName -match '^Claude_[^_]+_(x64|arm64)__'
 } | Sort-Object -Descending | Select-Object -First 1
 if (-not $best) { exit 0 }
 $props = Get-ItemProperty $best.PSPath -ErrorAction SilentlyContinue
@@ -140,7 +140,7 @@ $id = [string]$best.PSChildName
 $parts = $id -split '_'
 $name = $parts[0]
 $version = $parts[1]
-$pfn = $name + "_" + ($id -replace '^.*_x64__','')
+$pfn = $name + "_" + ($id -replace '^.*_(x64|arm64)__','')
 [pscustomobject]@{
   path = [string]$props.PackageRootFolder
   version = $version
@@ -370,7 +370,7 @@ function Test-ClaudePackageDirectoryName {
     $expectedPrefix = $identity + '_'
     if ($Dir.Name.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
         $Dir.Name.EndsWith('__' + $publisherSuffix, [System.StringComparison]::OrdinalIgnoreCase) -and
-        $Dir.Name -like '*_x64__*') {
+        $Dir.Name -match '_(x64|arm64)__') {
       $matchedIdentity = $true
       break
     }
@@ -456,7 +456,7 @@ function Test-ClaudePackageDirectoryName {
     $expectedPrefix = $identity + '_'
     if ($Dir.Name.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
         $Dir.Name.EndsWith('__' + $publisherSuffix, [System.StringComparison]::OrdinalIgnoreCase) -and
-        $Dir.Name -like '*_x64__*') {
+        $Dir.Name -match '_(x64|arm64)__') {
       $matchedIdentity = $true
       break
     }
@@ -1669,6 +1669,7 @@ mod tests {
         assert!(script.contains("C:\\Program Files\\WindowsApps"));
         assert!(script.contains("$identityPrefixes = @('Claude', 'Anthropic.Claude')"));
         assert!(script.contains("$publisherSuffix = 'pzs8sxrjxfjjc'"));
+        assert!(script.contains("_(x64|arm64)__"));
         assert!(script.contains("AppxManifest.xml"));
         assert!(script.contains("app\\Claude.exe"));
         assert!(script.contains("Remove-Item -LiteralPath $dir.FullName -Recurse -Force"));

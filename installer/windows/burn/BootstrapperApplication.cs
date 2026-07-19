@@ -275,18 +275,53 @@ namespace CodeStudioLite.Installer
 
         internal void LaunchInstalledApp()
         {
-            string executablePath = Path.Combine(installFolder, "codestudio-lite.exe");
-            if (!File.Exists(executablePath))
-            {
-                throw new FileNotFoundException("The installed application executable was not found.", executablePath);
-            }
+            string executablePath = ResolveInstalledExecutablePath();
+            string workingDirectory = Path.GetDirectoryName(executablePath);
 
             Process.Start(new ProcessStartInfo
             {
                 FileName = executablePath,
-                WorkingDirectory = installFolder,
+                WorkingDirectory = workingDirectory,
                 UseShellExecute = true,
             });
+        }
+
+        private string ResolveInstalledExecutablePath()
+        {
+            var folders = new List<string> { installFolder };
+            folders.AddRange(RegistryInstallLocations(null));
+            folders.Add(DefaultInstallFolder());
+
+            var attemptedLocations = new List<string>();
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string folder in folders)
+            {
+                if (!TryNormalizeInstallFolder(folder, out string normalizedFolder))
+                {
+                    continue;
+                }
+
+                string candidate = Path.Combine(normalizedFolder, "codestudio-lite.exe");
+                if (!visited.Add(candidate))
+                {
+                    continue;
+                }
+
+                attemptedLocations.Add(candidate);
+                if (File.Exists(candidate))
+                {
+                    installFolder = normalizedFolder;
+                    Engine.StringVariables["InstallFolder"] = installFolder;
+                    return candidate;
+                }
+            }
+
+            string attempted = attemptedLocations.Count == 0
+                ? "No valid installation locations were available."
+                : "Tried: " + string.Join("; ", attemptedLocations);
+            throw new FileNotFoundException(
+                "The installed application executable was not found. " + attempted,
+                attemptedLocations.Count > 0 ? attemptedLocations[0] : null);
         }
 
         private void CloseIfUnattended()
@@ -352,9 +387,17 @@ namespace CodeStudioLite.Installer
 
         private static string RegistryInstallLocation(string productCode)
         {
+            IList<string> locations = RegistryInstallLocations(productCode);
+            return locations.Count > 0 ? locations[0] : null;
+        }
+
+        private static IList<string> RegistryInstallLocations(string productCode)
+        {
             const string uninstallPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
             RegistryHive[] hives = { RegistryHive.LocalMachine, RegistryHive.CurrentUser };
             RegistryView[] views = { RegistryView.Registry64, RegistryView.Registry32 };
+            var locations = new List<string>();
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (RegistryHive hive in hives)
             {
@@ -375,9 +418,9 @@ namespace CodeStudioLite.Installer
                                 using (RegistryKey productKey = uninstallKey.OpenSubKey(productCode))
                                 {
                                     string exactLocation = RegistryValue(productKey, "InstallLocation");
-                                    if (!string.IsNullOrWhiteSpace(exactLocation))
+                                    if (!string.IsNullOrWhiteSpace(exactLocation) && visited.Add(exactLocation))
                                     {
-                                        return exactLocation;
+                                        locations.Add(exactLocation);
                                     }
                                 }
                             }
@@ -393,9 +436,9 @@ namespace CodeStudioLite.Installer
                                     }
 
                                     string location = RegistryValue(productKey, "InstallLocation");
-                                    if (!string.IsNullOrWhiteSpace(location))
+                                    if (!string.IsNullOrWhiteSpace(location) && visited.Add(location))
                                     {
-                                        return location;
+                                        locations.Add(location);
                                     }
                                 }
                             }
@@ -416,7 +459,7 @@ namespace CodeStudioLite.Installer
                 }
             }
 
-            return null;
+            return locations;
         }
 
         private static string RegistryValue(RegistryKey key, string name) => key == null ? null : key.GetValue(name) as string;

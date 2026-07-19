@@ -213,8 +213,19 @@ test("application updates relaunch CodeStudio Lite only after Burn succeeds", ()
   assert.match(bootstrapper, /OnApplyComplete[\s\S]*e\.Status >= 0[\s\S]*launchAfterInstall/);
   assert.match(bootstrapper, /OnApplyComplete[\s\S]*LaunchInstalledApp\(\)/);
   assert.match(bootstrapper, /Process\.Start\(new ProcessStartInfo/);
-  assert.match(bootstrapper, /Path\.Combine\(installFolder, "codestudio-lite\.exe"\)/);
+  assert.match(bootstrapper, /ResolveInstalledExecutablePath\(\)/);
   assert.doesNotMatch(window, /Process\.Start/);
+});
+
+test("Burn resolves the post-install executable from authoritative installed locations", () => {
+  const bootstrapper = fs.readFileSync(bootstrapperSourcePath, "utf8");
+  const launchMethod = bootstrapper.match(/internal void LaunchInstalledApp\(\)[\s\S]*?\n        }/)?.[0] ?? "";
+
+  assert.match(launchMethod, /ResolveInstalledExecutablePath\(\)/);
+  assert.doesNotMatch(launchMethod, /Path\.Combine\(installFolder, "codestudio-lite\.exe"\)/);
+  assert.match(bootstrapper, /ResolveInstalledExecutablePath\(\)[\s\S]*RegistryInstallLocations\(/);
+  assert.match(bootstrapper, /File\.Exists\(candidate\)/);
+  assert.match(bootstrapper, /attemptedLocations/);
 });
 
 test("Windows build script creates the Burn bundle from one en-US MSI", () => {

@@ -1,6 +1,6 @@
 [package]
 name = "codestudio-lite"
-version = "1.5.0"
+version = "1.5.1"
 description = "A desktop-only Local AI Gateway and Provider Switcher for AI coding tools."
 authors = ["CodeStudio Lite"]
 license = "MIT"
@@ -45,7 +45,7 @@ minisign-verify = "0.2.5"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Networking_WinHttp", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Networking_WinHttp", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["macos-system-configuration"] }

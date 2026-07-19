@@ -3099,7 +3099,11 @@ Set-Content -LiteralPath (Join-Path $markerDir 'localized-launch.flag') -Value '
 $pkgNames = @('Claude', 'Anthropic.Claude')
 {localized_marker}$pkg = Get-AppxPackage | Where-Object {{ $pkgNames -contains $_.Name -or $_.PackageFullName -match 'Claude' }} | Sort-Object -Property Version -Descending | Select-Object -First 1
 if (-not $pkg -and $env:ProgramFiles) {{
-  $manifest = Get-ChildItem -Path (Join-Path $env:ProgramFiles 'WindowsApps\Claude_*_x64__pzs8sxrjxfjjc\AppxManifest.xml') -ErrorAction SilentlyContinue |
+  $manifestPaths = @(
+    (Join-Path $env:ProgramFiles 'WindowsApps\Claude_*_x64__pzs8sxrjxfjjc\AppxManifest.xml'),
+    (Join-Path $env:ProgramFiles 'WindowsApps\Claude_*_arm64__pzs8sxrjxfjjc\AppxManifest.xml')
+  )
+  $manifest = Get-ChildItem -Path $manifestPaths -ErrorAction SilentlyContinue |
     Sort-Object -Property LastWriteTime -Descending |
     Select-Object -First 1
   if ($manifest) {{

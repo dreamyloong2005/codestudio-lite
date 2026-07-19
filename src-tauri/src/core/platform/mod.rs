@@ -74,6 +74,83 @@ pub fn hidden_command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+pub(crate) fn native_macos_arch_for_runtime(
+    process_arch: &str,
+    arm64_hardware_available: bool,
+) -> Result<&'static str, String> {
+    match process_arch {
+        "aarch64" | "arm64" => Ok("arm64"),
+        "x86_64" | "x64" if arm64_hardware_available => Ok("arm64"),
+        "x86_64" | "x64" => Ok("x64"),
+        arch => Err(format!("Unsupported macOS architecture: {arch}.")),
+    }
+}
+
+pub(crate) fn macos_arm64_hardware_available() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    hidden_command("/usr/sbin/sysctl")
+        .args(["-n", "hw.optional.arm64"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "1")
+}
+
+pub(crate) fn native_windows_arch_for_runtime(
+    process_arch: &str,
+    native_arch: Option<&str>,
+) -> Result<&'static str, String> {
+    match native_arch
+        .unwrap_or(process_arch)
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "aarch64" | "arm64" => Ok("arm64"),
+        "x86_64" | "x64" | "amd64" => Ok("x64"),
+        arch => Err(format!("Unsupported Windows architecture: {arch}.")),
+    }
+}
+
+pub(crate) fn windows_native_architecture() -> Result<&'static str, String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{
+            IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+
+        let mut process_machine = 0;
+        let mut native_machine = 0;
+        let detected = unsafe {
+            IsWow64Process2(
+                GetCurrentProcess(),
+                &mut process_machine,
+                &mut native_machine,
+            )
+        } != 0;
+        if detected {
+            let native_arch = match native_machine {
+                IMAGE_FILE_MACHINE_ARM64 => Some("arm64"),
+                IMAGE_FILE_MACHINE_AMD64 => Some("x64"),
+                _ => None,
+            };
+            if native_arch.is_some() {
+                return native_windows_arch_for_runtime(std::env::consts::ARCH, native_arch);
+            }
+        }
+
+        let native_arch = env::var("PROCESSOR_ARCHITEW6432")
+            .ok()
+            .or_else(|| env::var("PROCESSOR_ARCHITECTURE").ok());
+        native_windows_arch_for_runtime(std::env::consts::ARCH, native_arch.as_deref())
+    }
+
+    #[cfg(not(windows))]
+    native_windows_arch_for_runtime(std::env::consts::ARCH, None)
+}
+
 pub fn run_powershell(script: &str) -> Result<String, String> {
     if !cfg!(target_os = "windows") {
         return Err("PowerShell is only available on Windows.".to_string());
@@ -383,6 +460,40 @@ mod tests {
             powershell_failure_message(None, b"", b""),
             "PowerShell execution failed (termination status unavailable): no output was captured"
         );
+    }
+
+    #[test]
+    fn native_macos_architecture_accounts_for_rosetta() {
+        assert_eq!(
+            native_macos_arch_for_runtime("aarch64", false).unwrap(),
+            "arm64"
+        );
+        assert_eq!(
+            native_macos_arch_for_runtime("x86_64", true).unwrap(),
+            "arm64"
+        );
+        assert_eq!(
+            native_macos_arch_for_runtime("x86_64", false).unwrap(),
+            "x64"
+        );
+        assert!(native_macos_arch_for_runtime("powerpc", false).is_err());
+    }
+
+    #[test]
+    fn native_windows_architecture_accounts_for_x64_emulation_on_arm64() {
+        assert_eq!(
+            native_windows_arch_for_runtime("aarch64", None).unwrap(),
+            "arm64"
+        );
+        assert_eq!(
+            native_windows_arch_for_runtime("x86_64", Some("arm64")).unwrap(),
+            "arm64"
+        );
+        assert_eq!(
+            native_windows_arch_for_runtime("x86_64", Some("x64")).unwrap(),
+            "x64"
+        );
+        assert!(native_windows_arch_for_runtime("powerpc", None).is_err());
     }
 
     #[cfg(windows)]

@@ -1,5 +1,9 @@
 use crate::core::activity_log;
 use crate::core::app_paths::app_paths;
+use crate::core::claude_desktop_release::{
+    claude_desktop_windows_msix_url, claude_desktop_windows_update_command,
+    LATEST_MACOS_URL as CLAUDE_DESKTOP_LATEST_MACOS_URL,
+};
 use crate::core::detector;
 use crate::core::download_http;
 use crate::core::env_health;
@@ -1460,7 +1464,7 @@ fn claude_desktop_plan_download_url() -> Result<String, String> {
         let latest = read_claude_desktop_latest_metadata(CLAUDE_DESKTOP_LATEST_MACOS_URL)?;
         Ok(claude_desktop_macos_dmg_url(&latest.version, &latest.hash))
     } else if cfg!(target_os = "windows") {
-        Ok(CLAUDE_DESKTOP_WINDOWS_MSIX_URL.to_string())
+        claude_desktop_windows_msix_url()
     } else {
         Err("Claude Desktop has no built-in Linux update plan.".to_string())
     }
@@ -1969,14 +1973,7 @@ const CLAUDE_DESKTOP_WINDOWS_BACKGROUND_PROCESS: &str = "cowork-svc";
 const WINGET_MULTIPLE_PACKAGES_EXIT_CODE: i32 = -1978335210;
 const WINGET_MULTIPLE_PACKAGES_HEX: &str = "0x8A150016";
 
-const CLAUDE_DESKTOP_WINDOWS_MSIX_URL: &str =
-    "https://claude.ai/api/desktop/win32/x64/msix/latest/redirect";
-const CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND: &str =
-    "Download and install the latest Claude Desktop MSIX from https://claude.ai/api/desktop/win32/x64/msix/latest/redirect with Add-AppxPackage -Path";
 const CLAUDE_DESKTOP_PLAN_CACHE_KEY: &str = "claude_desktop.update_plan";
-
-const CLAUDE_DESKTOP_LATEST_MACOS_URL: &str =
-    "https://downloads.claude.ai/releases/darwin/universal/.latest";
 const CLAUDE_DESKTOP_MACOS_APP_NAME: &str = "Claude.app";
 const CLAUDE_DESKTOP_MACOS_BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
 const CLAUDE_DESKTOP_MACOS_DESTINATION: &str = "/Applications/Claude.app";
@@ -2917,6 +2914,7 @@ fn run_claude_desktop_windows_msix_install(
     if !powershell_available() {
         return Ok(missing_command_output("powershell"));
     }
+    let download_url = claude_desktop_windows_msix_url()?;
 
     remove_stale_claude_desktop_windows_exe_uninstall_entries(progress)?;
 
@@ -2943,11 +2941,7 @@ fn run_claude_desktop_windows_msix_install(
         None,
         false,
     );
-    if let Err(err) = download_url_to_file(
-        CLAUDE_DESKTOP_WINDOWS_MSIX_URL,
-        &target,
-        download_context.as_ref(),
-    ) {
+    if let Err(err) = download_url_to_file(&download_url, &target, download_context.as_ref()) {
         let _ = fs::remove_dir_all(&temp_root);
         return Ok(failed_output_with_progress(&err, progress));
     }
@@ -2980,7 +2974,7 @@ fn run_claude_desktop_windows_msix_install(
         }
     };
     if let Some(expected) = load_cached_claude_desktop_plan()
-        .filter(|plan| plan.download_url == CLAUDE_DESKTOP_WINDOWS_MSIX_URL)
+        .filter(|plan| plan.download_url == download_url)
         .map(|plan| plan.sha256)
         .filter(|value| value.len() == 64)
     {
@@ -2996,7 +2990,7 @@ fn run_claude_desktop_windows_msix_install(
         }
     }
     store_cached_claude_desktop_plan(&ClaudeDesktopPlan {
-        download_url: CLAUDE_DESKTOP_WINDOWS_MSIX_URL.to_string(),
+        download_url,
         sha256: actual_sha256,
         install_location: "Windows App package registration".to_string(),
     });
@@ -3604,9 +3598,7 @@ fn command_preview(action: &InstallAction) -> String {
             format!("Download and install the latest {label} from downloads.claude.ai")
         }
         InstallAction::ClaudeDesktopWindowsMsix => {
-            format!(
-                "Download and install the latest Claude Desktop MSIX from {CLAUDE_DESKTOP_WINDOWS_MSIX_URL} with Add-AppxPackage -Path"
-            )
+            claude_desktop_windows_update_command().unwrap_or_else(|err| err)
         }
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
@@ -3670,9 +3662,7 @@ fn update_command_preview(action: &InstallAction) -> String {
             format!("Download and install the latest {label} from downloads.claude.ai")
         }
         InstallAction::ClaudeDesktopWindowsMsix => {
-            format!(
-                "Download and install the latest Claude Desktop MSIX from {CLAUDE_DESKTOP_WINDOWS_MSIX_URL} with Add-AppxPackage -Path"
-            )
+            claude_desktop_windows_update_command().unwrap_or_else(|err| err)
         }
         InstallAction::PowerShellScript(_, script) => {
             format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
@@ -3713,7 +3703,7 @@ fn update_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> Str
         return npm_global_command_preview("install", "npm@latest");
     }
     if tool_id == "claude-desktop" && cfg!(target_os = "windows") {
-        return CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND.to_string();
+        return claude_desktop_windows_update_command().unwrap_or_else(|err| err);
     }
     if tool_id == "hermes" {
         return "hermes update".to_string();

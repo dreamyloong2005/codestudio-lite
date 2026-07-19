@@ -279,7 +279,11 @@ fn claude_desktop_windows_update_does_not_use_stale_winget_source() {
     let command = update_command_preview_for_tool("claude-desktop", &definition.action);
 
     if cfg!(target_os = "windows") {
-        assert!(command.contains("claude.ai/api/desktop/win32/x64/msix/latest/redirect"));
+        let architecture = crate::core::claude_desktop_release::windows_release_architecture()
+            .expect("Windows release architecture");
+        assert!(command.contains(&format!(
+            "claude.ai/api/desktop/win32/{architecture}/msix/latest/redirect"
+        )));
         assert!(command.contains("Add-AppxPackage -Path"));
         assert!(!command.contains("winget"));
         assert!(!command.contains("win32/x64/.latest"));
@@ -287,6 +291,34 @@ fn claude_desktop_windows_update_does_not_use_stale_winget_source() {
     } else {
         assert_eq!(command, update_command_preview(&definition.action));
     }
+}
+
+#[test]
+fn claude_desktop_windows_download_urls_follow_native_architecture() {
+    assert_eq!(
+        crate::core::claude_desktop_release::claude_desktop_windows_latest_url_for_arch("arm64")
+            .unwrap(),
+        "https://downloads.claude.ai/releases/win32/arm64/.latest"
+    );
+    assert_eq!(
+        crate::core::claude_desktop_release::claude_desktop_windows_latest_url_for_arch("x64")
+            .unwrap(),
+        "https://downloads.claude.ai/releases/win32/x64/.latest"
+    );
+    assert_eq!(
+        crate::core::claude_desktop_release::claude_desktop_windows_msix_url_for_arch("arm64")
+            .unwrap(),
+        "https://claude.ai/api/desktop/win32/arm64/msix/latest/redirect"
+    );
+    assert_eq!(
+        crate::core::claude_desktop_release::claude_desktop_windows_msix_url_for_arch("x64")
+            .unwrap(),
+        "https://claude.ai/api/desktop/win32/x64/msix/latest/redirect"
+    );
+    assert!(
+        crate::core::claude_desktop_release::claude_desktop_windows_msix_url_for_arch("powerpc")
+            .is_err()
+    );
 }
 
 #[test]

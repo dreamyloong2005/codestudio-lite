@@ -131,6 +131,7 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   const api = read("src/lib/api.ts");
   const commands = read("src-tauri/src/commands/app_updater.rs");
   const core = read("src-tauri/src/core/app_updater.rs");
+  const platform = read("src-tauri/src/core/platform/mod.rs");
   const tauriLib = read("src-tauri/src/lib.rs");
   const cargo = read("src-tauri/Cargo.toml");
   const locales = ["en-US", "zh-CN", "zh-TW"].map((locale) => read(`src/lib/locales/${locale}.ts`));
@@ -162,7 +163,10 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   assert.match(core, /-quiet/);
   assert.match(core, /-norestart/);
   assert.match(core, /launch_macos_dmg_helper/);
-  assert.match(core, /must match the running \{architecture\} architecture/);
+  assert.match(core, /must match the running Mac's native \{architecture\} architecture/);
+  assert.match(core, /macos_arm64_hardware_available/);
+  assert.match(platform, /hw\.optional\.arm64/);
+  assert.match(platform, /native_macos_arch_for_runtime/);
   assert.match(core, /hdiutil/);
   assert.match(core, /ditto/);
   assert.match(core, /gateway::shutdown_for_app_exit/);

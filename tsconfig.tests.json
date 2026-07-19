@@ -6,5 +6,10 @@
     "noEmit": false,
     "emitDeclarationOnly": false
   },
-  "include": ["src/lib/profileSortable.ts", "src/lib/profileSummary.ts", "src/lib/profiles/catalog.ts"]
+  "include": [
+    "src/lib/profileSortable.ts",
+    "src/lib/profileSummary.ts",
+    "src/lib/profiles/catalog.ts",
+    "src/lib/profiles/presentation.ts"
+  ]
 }

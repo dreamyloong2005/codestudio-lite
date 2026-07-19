@@ -174,7 +174,7 @@ test("ChatGPT desktop restart closes the package parent instead of the app-serve
   assert.doesNotMatch(restartBody, /close_chatgpt_desktop_processes/);
 });
 
-test("ordinary ChatGPT desktop launch preserves a running session", () => {
+test("ChatGPT desktop launch restarts a running client only when history sync is enabled", () => {
   const core = read("src-tauri/src/core/chatgpt_desktop.rs");
   const launchBody = core
     .split("pub fn launch()")
@@ -187,11 +187,14 @@ test("ordinary ChatGPT desktop launch preserves a running session", () => {
     ?.split("pub fn restart()")
     .at(0);
 
-  assert.ok(launchBody, "ordinary launch body should exist");
-  assert.doesNotMatch(launchBody, /close_chatgpt_desktop_processes/);
+  assert.ok(launchBody, "launch body should exist");
   assert.doesNotMatch(launchBody, /launch_with_restart_notes/);
   assert.match(launchBody, /is_chatgpt_desktop_running/);
-  assert.match(launchBody, /if\s+!.*running[\s\S]*sync_history_if_enabled/);
+  assert.match(
+    launchBody,
+    /if\s+settings\.sync_history_on_launch\s*&&\s*running[\s\S]*close_chatgpt_desktop_processes[\s\S]*sync_history_if_enabled/
+  );
+  assert.match(launchBody, /else\s+if\s+!running[\s\S]*sync_history_if_enabled/);
 
   assert.ok(restartLaunchBody, "restart launch body should exist");
   assert.match(restartLaunchBody, /close_chatgpt_desktop_processes/);

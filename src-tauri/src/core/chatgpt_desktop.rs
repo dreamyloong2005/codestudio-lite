@@ -4,7 +4,10 @@ use crate::core::codex_plugin_marketplace;
 use crate::core::codex_provider_sync;
 use crate::core::computer_use_guard;
 use crate::core::download_http;
-use crate::core::platform::{hidden_command, package};
+use crate::core::platform::{
+    hidden_command, macos_arm64_hardware_available, native_macos_arch_for_runtime, package,
+    windows_native_architecture,
+};
 use crate::core::process_control;
 use crate::core::storage;
 use crate::core::types::{
@@ -16,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::net::TcpListener;
@@ -76,6 +79,10 @@ pub struct ChatGptDesktopSettings {
     pub keep_user_data_on_uninstall: bool,
     #[serde(default)]
     pub sync_history_on_launch: bool,
+    #[serde(default)]
+    pub history_sync_target_provider: String,
+    #[serde(default)]
+    pub history_sync_saved_providers: Vec<String>,
     #[serde(default = "default_true")]
     pub plugin_marketplace_unlock_on_launch: bool,
     #[serde(default = "default_true")]
@@ -109,6 +116,10 @@ pub struct UpdateChatGptDesktopSettingsRequest {
     pub keep_user_data_on_uninstall: Option<bool>,
     #[serde(default)]
     pub sync_history_on_launch: Option<bool>,
+    #[serde(default)]
+    pub history_sync_target_provider: Option<String>,
+    #[serde(default)]
+    pub history_sync_saved_providers: Option<Vec<String>>,
     #[serde(default)]
     pub plugin_marketplace_unlock_on_launch: Option<bool>,
     #[serde(default)]
@@ -315,6 +326,29 @@ struct WindowsSource {
     etag: Option<String>,
     product_id: Option<String>,
     update_manifest: Option<WindowsUpdateManifest>,
+    #[serde(default)]
+    architectures: BTreeMap<String, WindowsArchitectureSource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsArchitectureSource {
+    version: String,
+    package_moniker: String,
+    architecture: Option<String>,
+    content_length: Option<u64>,
+    etag: Option<String>,
+}
+
+#[derive(Debug)]
+struct SelectedWindowsSource {
+    version: String,
+    package_moniker: String,
+    architecture: String,
+    content_length: Option<u64>,
+    etag: Option<String>,
+    product_id: Option<String>,
+    package_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +398,8 @@ impl Default for ChatGptDesktopSettings {
             install_root: default_install_root(),
             keep_user_data_on_uninstall: true,
             sync_history_on_launch: false,
+            history_sync_target_provider: String::new(),
+            history_sync_saved_providers: Vec::new(),
             plugin_marketplace_unlock_on_launch: true,
             plugin_auto_expand_on_launch: true,
             model_whitelist_unlock_on_launch: true,
@@ -909,7 +945,11 @@ pub fn launch() -> Result<(), String> {
     let installed = detect_installed(&settings)
         .ok_or_else(|| "ChatGPT Desktop was not detected.".to_string())?;
     let running = is_chatgpt_desktop_running(Some(&installed));
-    if !running {
+    if settings.sync_history_on_launch && running {
+        let mut notes = Vec::new();
+        close_chatgpt_desktop_processes(&installed, &mut notes)?;
+        sync_history_if_enabled(&settings)?;
+    } else if !running {
         sync_history_if_enabled(&settings)?;
     }
     launch_detected_chatgpt_desktop(&settings, &installed)
@@ -992,6 +1032,12 @@ pub fn update_settings(
     if let Some(sync) = request.sync_history_on_launch {
         settings.sync_history_on_launch = sync;
     }
+    if let Some(provider) = request.history_sync_target_provider {
+        settings.history_sync_target_provider = normalize_history_sync_provider(&provider)?;
+    }
+    if let Some(providers) = request.history_sync_saved_providers {
+        settings.history_sync_saved_providers = normalize_history_sync_provider_list(providers)?;
+    }
     if let Some(enabled) = request.plugin_marketplace_unlock_on_launch {
         settings.plugin_marketplace_unlock_on_launch = enabled;
     }
@@ -1013,6 +1059,53 @@ pub fn update_settings(
     settings.signed_only = true;
     save_settings(&settings)?;
     Ok(settings)
+}
+
+pub fn remember_history_sync_provider(provider: &str) -> Result<(), String> {
+    let provider = normalize_history_sync_provider(provider)?;
+    if provider.is_empty() {
+        return Ok(());
+    }
+    let mut settings = load_settings()?;
+    settings.history_sync_target_provider = provider.clone();
+    settings.history_sync_saved_providers.push(provider);
+    settings.history_sync_saved_providers =
+        normalize_history_sync_provider_list(settings.history_sync_saved_providers)?;
+    save_settings(&settings)
+}
+
+pub fn history_sync_preferences() -> Result<(String, Vec<String>), String> {
+    let settings = load_settings()?;
+    Ok((
+        settings.history_sync_target_provider,
+        settings.history_sync_saved_providers,
+    ))
+}
+
+fn normalize_history_sync_provider(provider: &str) -> Result<String, String> {
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return Ok(String::new());
+    }
+    if provider
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        Ok(provider.to_string())
+    } else {
+        Err(format!("Invalid history provider id: {provider:?}"))
+    }
+}
+
+fn normalize_history_sync_provider_list(providers: Vec<String>) -> Result<Vec<String>, String> {
+    let mut normalized = BTreeSet::new();
+    for provider in providers {
+        let provider = normalize_history_sync_provider(&provider)?;
+        if !provider.is_empty() {
+            normalized.insert(provider);
+        }
+    }
+    Ok(normalized.into_iter().collect())
 }
 
 pub fn open_path(kind: String) -> Result<(), String> {
@@ -1389,7 +1482,9 @@ fn load_release(settings: &ChatGptDesktopSettings) -> Result<ChatGptDesktopRelea
     }
 
     let windows = manifest.sources.windows;
-    let package_url = format!("{base}/latest/win");
+    let arch = windows_native_architecture()?;
+    let windows = windows_source_for_arch(&windows, arch)?;
+    let package_url = windows_package_url(&base, arch);
     let sha256 =
         checksum_for_windows(&checksums_text, &windows.package_moniker).ok_or_else(|| {
             format!(
@@ -1401,15 +1496,13 @@ fn load_release(settings: &ChatGptDesktopSettings) -> Result<ChatGptDesktopRelea
     Ok(ChatGptDesktopRelease {
         version: windows.version,
         package_moniker: windows.package_moniker,
-        architecture: windows.architecture,
+        architecture: Some(windows.architecture),
         package_kind: "msix".to_string(),
         package_source: "mirror".to_string(),
         content_length: windows.content_length,
         etag: windows.etag,
         package_identity: windows
-            .update_manifest
-            .as_ref()
-            .and_then(|item| item.package_identity.clone())
+            .package_identity
             .or(windows.product_id)
             .or_else(|| Some(PACKAGE_IDENTITY.to_string())),
         package_url,
@@ -1985,24 +2078,93 @@ fn normalize_source(source: &str) -> String {
 }
 
 fn current_macos_source(macos: &MacosSources) -> Result<(&MacosSource, &'static str), String> {
-    if cfg!(target_arch = "aarch64") {
-        macos
+    let arch = macos_arch_for_runtime(std::env::consts::ARCH, macos_arm64_hardware_available())?;
+    macos_source_for_arch(macos, arch)
+}
+
+fn macos_arch_for_runtime(
+    process_arch: &str,
+    arm64_hardware_available: bool,
+) -> Result<&'static str, String> {
+    native_macos_arch_for_runtime(process_arch, arm64_hardware_available)
+        .map_err(|_| format!("Unsupported macOS architecture for ChatGPT Desktop: {process_arch}."))
+}
+
+fn macos_source_for_arch<'a>(
+    macos: &'a MacosSources,
+    arch: &str,
+) -> Result<(&'a MacosSource, &'static str), String> {
+    match arch {
+        "arm64" | "aarch64" => macos
             .arm64
             .as_ref()
             .map(|source| (source, "arm64"))
             .ok_or_else(|| {
                 "ChatGPT Desktop mirror manifest has no macOS arm64 installer information."
                     .to_string()
-            })
-    } else {
-        macos
+            }),
+        "x64" | "x86_64" => macos
             .x64
             .as_ref()
             .map(|source| (source, "x64"))
             .ok_or_else(|| {
                 "ChatGPT Desktop mirror manifest has no macOS x64 installer information."
                     .to_string()
-            })
+            }),
+        arch => Err(format!(
+            "Unsupported macOS architecture for ChatGPT Desktop: {arch}."
+        )),
+    }
+}
+
+fn windows_source_for_arch(
+    windows: &WindowsSource,
+    arch: &str,
+) -> Result<SelectedWindowsSource, String> {
+    if let Some(source) = windows.architectures.get(arch) {
+        return Ok(SelectedWindowsSource {
+            version: source.version.clone(),
+            package_moniker: source.package_moniker.clone(),
+            architecture: source
+                .architecture
+                .clone()
+                .unwrap_or_else(|| arch.to_string()),
+            content_length: source.content_length,
+            etag: source.etag.clone(),
+            product_id: windows.product_id.clone(),
+            package_identity: windows
+                .update_manifest
+                .as_ref()
+                .and_then(|item| item.package_identity.clone()),
+        });
+    }
+
+    let top_level_arch = windows.architecture.as_deref().unwrap_or("x64");
+    if top_level_arch == arch {
+        return Ok(SelectedWindowsSource {
+            version: windows.version.clone(),
+            package_moniker: windows.package_moniker.clone(),
+            architecture: top_level_arch.to_string(),
+            content_length: windows.content_length,
+            etag: windows.etag.clone(),
+            product_id: windows.product_id.clone(),
+            package_identity: windows
+                .update_manifest
+                .as_ref()
+                .and_then(|item| item.package_identity.clone()),
+        });
+    }
+
+    Err(format!(
+        "ChatGPT Desktop mirror manifest has no downloadable Windows {arch} installer."
+    ))
+}
+
+fn windows_package_url(base: &str, arch: &str) -> String {
+    if arch == "arm64" {
+        format!("{base}/latest/win-arm64")
+    } else {
+        format!("{base}/latest/win")
     }
 }
 
@@ -2645,14 +2807,30 @@ fn sync_history_if_enabled(settings: &ChatGptDesktopSettings) -> Result<(), Stri
     if !settings.sync_history_on_launch {
         return Ok(());
     }
-    let report = codex_provider_sync::run_default_provider_sync()?;
+    let report = codex_provider_sync::run_default_provider_sync();
+    if report.status == codex_provider_sync::ProviderSyncStatus::Skipped {
+        let _ = activity_log::append(
+            Severity::Warning,
+            format!(
+                "ChatGPT Desktop history sync was skipped: {}",
+                report.message
+            ),
+        );
+        return Ok(());
+    }
     let _ = activity_log::append(
         Severity::Info,
         format!(
-            "Synchronized ChatGPT Desktop history provider to {} ({} session files, {} sqlite rows).",
-            report.target_provider, report.changed_session_files, report.sqlite_rows_updated
+            "Synchronized ChatGPT Desktop history provider to {} ({} session files, {} sqlite rows, {} workspace fields).",
+            report.target_provider,
+            report.changed_session_files,
+            report.sqlite_rows_updated,
+            report.updated_workspace_roots
         ),
     );
+    if let Some(warning) = report.encrypted_content_warning {
+        let _ = activity_log::append(Severity::Warning, warning);
+    }
     Ok(())
 }
 

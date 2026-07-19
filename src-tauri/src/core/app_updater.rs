@@ -1,3 +1,4 @@
+use crate::core::platform::{macos_arm64_hardware_available, native_macos_arch_for_runtime};
 use crate::core::{app_paths, download_http, gateway};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use minisign_verify::{PublicKey, Signature};
@@ -35,10 +36,27 @@ pub struct AppUpdateProgress {
 }
 
 pub fn application_update_target() -> Result<&'static str, String> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    application_update_target_for_runtime(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        macos_arm64_hardware_available(),
+    )
+}
+
+fn application_update_target_for_runtime(
+    os: &str,
+    process_arch: &str,
+    arm64_hardware_available: bool,
+) -> Result<&'static str, String> {
+    match (os, process_arch) {
         ("windows", "x86_64") => Ok("windows-x86_64"),
-        ("macos", "aarch64") => Ok("darwin-aarch64"),
-        ("macos", "x86_64") => Ok("darwin-x86_64"),
+        ("macos", arch) => match native_macos_arch_for_runtime(arch, arm64_hardware_available)? {
+            "arm64" => Ok("darwin-aarch64"),
+            "x64" => Ok("darwin-x86_64"),
+            arch => Err(format!(
+                "Automatic application updates are unsupported on macos-{arch}."
+            )),
+        },
         ("linux", "x86_64") => Ok("linux-x86_64"),
         ("linux", "aarch64") => Ok("linux-aarch64"),
         ("linux", "arm") => Ok("linux-armv7"),
@@ -202,25 +220,28 @@ fn validate_request(request: &InstallApplicationUpdateRequest) -> Result<(), Str
         if !request.filename.ends_with(".dmg") {
             return Err("macOS application updates must use a DMG.".to_string());
         }
-        let architecture = if cfg!(target_arch = "aarch64") {
-            "arm64"
-        } else {
-            "x64"
-        };
-        if !request
-            .filename
-            .ends_with(&format!("-macOS-{architecture}.dmg"))
-        {
-            return Err(format!(
-                "macOS application updates must match the running {architecture} architecture."
-            ));
-        }
+        let architecture = native_macos_arch_for_runtime(
+            std::env::consts::ARCH,
+            macos_arm64_hardware_available(),
+        )?;
+        validate_macos_installer_filename(&request.filename, architecture)?;
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     return Err("Installer handoff is only supported on Windows and macOS.".to_string());
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_macos_installer_filename(filename: &str, architecture: &str) -> Result<(), String> {
+    if filename.ends_with(&format!("-macOS-{architecture}.dmg")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "macOS application updates must match the running Mac's native {architecture} architecture."
+        ))
+    }
 }
 
 fn updater_public_key() -> Result<PublicKey, String> {
@@ -399,10 +420,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn macos_update_target_prefers_native_apple_silicon_over_rosetta_process_architecture() {
+        assert_eq!(
+            application_update_target_for_runtime("macos", "aarch64", false).unwrap(),
+            "darwin-aarch64"
+        );
+        assert_eq!(
+            application_update_target_for_runtime("macos", "x86_64", true).unwrap(),
+            "darwin-aarch64"
+        );
+        assert_eq!(
+            application_update_target_for_runtime("macos", "x86_64", false).unwrap(),
+            "darwin-x86_64"
+        );
+
+        assert!(validate_macos_installer_filename(
+            "CodeStudio-Lite-1.5.0-macOS-arm64.dmg",
+            "arm64"
+        )
+        .is_ok());
+        assert!(
+            validate_macos_installer_filename("CodeStudio-Lite-1.5.0-macOS-x64.dmg", "arm64")
+                .is_err()
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn rejects_a_macos_installer_for_the_other_architecture() {
-        let other_architecture = if cfg!(target_arch = "aarch64") {
+        let current_architecture =
+            native_macos_arch_for_runtime(std::env::consts::ARCH, macos_arm64_hardware_available())
+                .unwrap();
+        let other_architecture = if current_architecture == "arm64" {
             "x64"
         } else {
             "arm64"

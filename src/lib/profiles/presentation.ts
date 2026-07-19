@@ -1,5 +1,4 @@
 import type { ProfileDraft, ProfileModelOption } from "../../types";
-import { canonicalProfileToolId, PROFILE_TOOL_LABELS } from "./catalog";
 
 export function providerIsOfficial(providerId: string): boolean {
   return providerId.trim() === "official";
@@ -13,13 +12,7 @@ export function profileDisplayName(profile: ProfileDraft, officialName?: string)
   if (profileUsesToolIcon(profile) && officialName) {
     return officialName;
   }
-  const toolName = PROFILE_TOOL_LABELS[canonicalProfileToolId(profile.app)];
-  if (!toolName) {
-    return profile.name;
-  }
-  return profile.name
-    .replace(new RegExp(`^${escapeRegExp(toolName)}\\s*[-:/]?\\s*`, "i"), "")
-    .trim() || profile.name;
+  return profile.name;
 }
 
 export function profileEndpoint(profile: ProfileDraft): string | null {
@@ -55,8 +48,4 @@ export function profileIconTextTooLong(value: string): boolean {
 export function profileModelOptionLabel(option: ProfileModelOption): string {
   const label = option.name && option.name !== option.id ? `${option.id} - ${option.name}` : option.id;
   return option.supports1m ? `${label} (1M)` : label;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

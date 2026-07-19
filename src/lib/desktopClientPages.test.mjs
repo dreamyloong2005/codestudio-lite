@@ -852,14 +852,16 @@ test("Claude Desktop Windows uninstall avoids ambiguous winget removal", () => {
 test("Claude Desktop Windows install uses official MSIX package instead of winget or legacy EXE", () => {
   const installer = read("src-tauri/src/core/tool_installer.rs");
   const detector = read("src-tauri/src/core/detector.rs");
+  const release = read("src-tauri/src/core/claude_desktop_release.rs");
 
   assert.match(installer, /ClaudeDesktopWindowsMsix/);
-  assert.match(installer, /CLAUDE_DESKTOP_WINDOWS_MSIX_URL/);
-  assert.match(installer, /claude\.ai\/api\/desktop\/win32\/x64\/msix\/latest\/redirect/);
+  assert.match(installer, /claude_desktop_windows_msix_url/);
+  assert.match(release, /win32\/\{architecture\}\/msix\/latest\/redirect/);
+  assert.match(release, /"arm64" \| "x64"/);
   assert.match(installer, /Add-AppxPackage -Path/);
-  assert.match(installer, /Download and install the latest Claude Desktop MSIX/);
+  assert.match(release, /Download and install the latest Claude Desktop MSIX/);
   assert.match(installer, /run_claude_desktop_windows_msix_install/);
-  assert.match(installer, /download_url_to_file\(\s*CLAUDE_DESKTOP_WINDOWS_MSIX_URL/);
+  assert.match(installer, /download_url_to_file\(&download_url/);
   assert.match(installer, /sha256_file\(&target\)/);
   assert.match(installer, /SHA-256 verification failed/);
   assert.match(installer, /emit_install_download_progress/);
@@ -890,10 +892,10 @@ test("Claude Desktop Windows install uses official MSIX package instead of winge
     detector.indexOf("fn update_command_for_tool"),
     detector.indexOf("fn read_npm_global_outdated")
   );
-  assert.match(detector, /CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND/);
-  assert.match(detector, /claude\.ai\/api\/desktop\/win32\/x64\/msix\/latest\/redirect/);
-  assert.match(detector, /Add-AppxPackage -Path/);
-  assert.match(updateCommandFunction, /CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND\.to_string\(\)/);
+  assert.match(detector, /claude_desktop_windows_update_command/);
+  assert.match(release, /claude\.ai\/api\/desktop\/win32\/\{architecture\}\/msix\/latest\/redirect/);
+  assert.match(release, /Add-AppxPackage -Path/);
+  assert.match(updateCommandFunction, /claude_desktop_windows_update_command\(\)\.ok\(\)/);
   assert.doesNotMatch(updateCommandFunction, /winget upgrade --id Anthropic\.Claude/);
 
   const wingetPackageFunction = detector.slice(

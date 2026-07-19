@@ -1,6 +1,10 @@
 use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path};
 use crate::core::chatgpt_desktop;
+use crate::core::claude_desktop_release::{
+    claude_desktop_windows_latest_url, claude_desktop_windows_update_command,
+    LATEST_MACOS_URL as CLAUDE_DESKTOP_LATEST_MACOS_URL,
+};
 use crate::core::download_http;
 use crate::core::env_health;
 use crate::core::npm_global;
@@ -43,12 +47,6 @@ const CHATGPT_DESKTOP_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const FOREGROUND_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(6000);
 const CLAUDE_DESKTOP_INSTALL_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const CLAUDE_DESKTOP_LATEST_WINDOWS_URL: &str =
-    "https://downloads.claude.ai/releases/win32/x64/.latest";
-const CLAUDE_DESKTOP_LATEST_MACOS_URL: &str =
-    "https://downloads.claude.ai/releases/darwin/universal/.latest";
-const CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND: &str =
-    "Download and install the latest Claude Desktop MSIX from https://claude.ai/api/desktop/win32/x64/msix/latest/redirect with Add-AppxPackage -Path";
 #[cfg(target_os = "windows")]
 const CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX: &str = "pzs8sxrjxfjjc";
 
@@ -1012,16 +1010,20 @@ fn push_claude_desktop_version_candidates(versions: &mut Vec<String>, version: &
 #[cfg(target_os = "windows")]
 fn claude_desktop_windows_known_manifest_candidates(version: &str) -> Vec<PathBuf> {
     let root = PathBuf::from(r"C:\Program Files\WindowsApps");
-    vec![
-        root.join(format!(
-            "Claude_{version}_x64__{CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX}"
-        ))
-        .join("AppxManifest.xml"),
-        root.join(format!(
-            "Anthropic.Claude_{version}_x64__{CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX}"
-        ))
-        .join("AppxManifest.xml"),
-    ]
+    ["arm64", "x64"]
+        .into_iter()
+        .flat_map(|architecture| {
+            ["Claude", "Anthropic.Claude"].into_iter().map({
+                let root = root.clone();
+                move |identity| {
+                    root.join(format!(
+                        "{identity}_{version}_{architecture}__{CLAUDE_DESKTOP_WINDOWS_PACKAGE_SUFFIX}"
+                    ))
+                    .join("AppxManifest.xml")
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -1036,7 +1038,7 @@ fn find_latest_claude_desktop_windows_stale_msix_dir() -> Option<PathBuf> {
         .filter_map(|entry| {
             let path = entry.path();
             let name = path.file_name()?.to_str()?;
-            if !name.starts_with("Claude_") || !name.contains("_x64__") {
+            if !name.starts_with("Claude_") || !is_claude_windows_package_architecture(name) {
                 return None;
             }
             let manifest = path.join("AppxManifest.xml");
@@ -1050,6 +1052,10 @@ fn find_latest_claude_desktop_windows_stale_msix_dir() -> Option<PathBuf> {
         .collect::<Vec<_>>();
     matches.sort_by(|left, right| compare_stale_claude_desktop_dirs(right, left));
     matches.into_iter().next()
+}
+
+fn is_claude_windows_package_architecture(name: &str) -> bool {
+    name.contains("_arm64__") || name.contains("_x64__")
 }
 
 #[cfg(target_os = "windows")]
@@ -1214,13 +1220,13 @@ struct ClaudeDesktopLatest {
 
 fn read_claude_desktop_latest_version() -> Option<String> {
     let url = if cfg!(target_os = "windows") {
-        CLAUDE_DESKTOP_LATEST_WINDOWS_URL
+        claude_desktop_windows_latest_url().ok()?
     } else if cfg!(target_os = "macos") {
-        CLAUDE_DESKTOP_LATEST_MACOS_URL
+        CLAUDE_DESKTOP_LATEST_MACOS_URL.to_string()
     } else {
         return None;
     };
-    read_claude_desktop_latest_version_from_url(url)
+    read_claude_desktop_latest_version_from_url(&url)
 }
 
 fn claude_desktop_update_cache() -> &'static Mutex<ClaudeDesktopUpdateCache> {
@@ -1527,7 +1533,7 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
                     .to_string(),
             )
         }
-        "claude-desktop" => Some(CLAUDE_DESKTOP_WINDOWS_UPDATE_COMMAND.to_string()),
+        "claude-desktop" => claude_desktop_windows_update_command().ok(),
         "claude-vscode" => {
             Some("code --install-extension anthropic.claude-code --force".to_string())
         }
@@ -2083,13 +2089,30 @@ mod tests {
             assert!(command.contains("downloads.claude.ai"));
             assert!(!command.contains("Homebrew"));
         } else {
-            assert!(command.contains("claude.ai/api/desktop/win32/x64/msix/latest/redirect"));
+            let architecture =
+                crate::core::claude_desktop_release::windows_release_architecture().unwrap();
+            assert!(command.contains(&format!(
+                "claude.ai/api/desktop/win32/{architecture}/msix/latest/redirect"
+            )));
             assert!(command.contains("Add-AppxPackage -Path"));
             assert!(
                 !command.contains("winget upgrade --id Anthropic.Claude"),
                 "Claude Desktop Windows updates must not use deprecated winget routing: {command}"
             );
         }
+    }
+
+    #[test]
+    fn claude_desktop_windows_package_detection_accepts_x64_and_arm64() {
+        assert!(is_claude_windows_package_architecture(
+            "Claude_1.22209.0_arm64__pzs8sxrjxfjjc"
+        ));
+        assert!(is_claude_windows_package_architecture(
+            "Claude_1.22209.0_x64__pzs8sxrjxfjjc"
+        ));
+        assert!(!is_claude_windows_package_architecture(
+            "Claude_1.22209.0_neutral__pzs8sxrjxfjjc"
+        ));
     }
 
     #[test]

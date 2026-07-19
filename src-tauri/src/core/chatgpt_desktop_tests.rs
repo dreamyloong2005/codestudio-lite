@@ -85,6 +85,93 @@ fn macos_generation_uses_bundle_executable_before_app_name_fallback() {
 }
 
 #[test]
+fn macos_download_architecture_prefers_native_apple_silicon_over_rosetta_process_architecture() {
+    assert_eq!(macos_arch_for_runtime("aarch64", false).unwrap(), "arm64");
+    assert_eq!(macos_arch_for_runtime("x86_64", true).unwrap(), "arm64");
+    assert_eq!(macos_arch_for_runtime("x86_64", false).unwrap(), "x64");
+    assert!(macos_arch_for_runtime("powerpc", false).is_err());
+
+    let macos = MacosSources {
+        arm64: Some(MacosSource {
+            url: Some("https://example.test/ChatGPT-arm64.dmg".to_string()),
+            content_length: None,
+            etag: None,
+            sha256: None,
+            bundle_short_version: None,
+            bundle_version: None,
+            bundle_identifier: None,
+        }),
+        x64: Some(MacosSource {
+            url: Some("https://example.test/ChatGPT-x64.dmg".to_string()),
+            content_length: None,
+            etag: None,
+            sha256: None,
+            bundle_short_version: None,
+            bundle_version: None,
+            bundle_identifier: None,
+        }),
+    };
+
+    let (arm64, arm64_label) = macos_source_for_arch(&macos, "arm64").unwrap();
+    let (x64, x64_label) = macos_source_for_arch(&macos, "x64").unwrap();
+    assert_eq!(arm64_label, "arm64");
+    assert_eq!(
+        arm64.url.as_deref(),
+        Some("https://example.test/ChatGPT-arm64.dmg")
+    );
+    assert_eq!(x64_label, "x64");
+    assert_eq!(
+        x64.url.as_deref(),
+        Some("https://example.test/ChatGPT-x64.dmg")
+    );
+}
+
+#[test]
+fn windows_download_architecture_selects_the_native_manifest_entry() {
+    let windows: WindowsSource = serde_json::from_value(serde_json::json!({
+        "version": "26.707.12708.0",
+        "packageMoniker": "OpenAI.Codex_26.707.12708.0_x64__publisher",
+        "architecture": "x64",
+        "contentLength": 728695101,
+        "architectures": {
+            "arm64": {
+                "version": "26.707.12708.0",
+                "packageMoniker": "OpenAI.Codex_26.707.12708.0_arm64__publisher",
+                "architecture": "arm64",
+                "contentLength": 724464899
+            },
+            "x64": {
+                "version": "26.707.12708.0",
+                "packageMoniker": "OpenAI.Codex_26.707.12708.0_x64__publisher",
+                "architecture": "x64",
+                "contentLength": 728695101
+            }
+        }
+    }))
+    .unwrap();
+
+    let arm64 = windows_source_for_arch(&windows, "arm64").unwrap();
+    let x64 = windows_source_for_arch(&windows, "x64").unwrap();
+    assert_eq!(
+        arm64.package_moniker,
+        "OpenAI.Codex_26.707.12708.0_arm64__publisher"
+    );
+    assert_eq!(arm64.content_length, Some(724464899));
+    assert_eq!(
+        x64.package_moniker,
+        "OpenAI.Codex_26.707.12708.0_x64__publisher"
+    );
+    assert_eq!(
+        windows_package_url("https://mirror.test", "arm64"),
+        "https://mirror.test/latest/win-arm64"
+    );
+    assert_eq!(
+        windows_package_url("https://mirror.test", "x64"),
+        "https://mirror.test/latest/win"
+    );
+}
+
+#[test]
 fn cached_desktop_generation_defaults_to_current_when_legacy_cache_omits_it() {
     let installed: InstalledChatGptDesktop = serde_json::from_value(serde_json::json!({
         "path": "C:\\Program Files\\WindowsApps\\OpenAI.Codex",

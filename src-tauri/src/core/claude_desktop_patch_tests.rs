@@ -209,6 +209,8 @@ fn localized_windows_command_uses_official_launcher_without_fused_inspect_args()
     if cfg!(target_os = "windows") {
         let script = windows_launch_script(true);
         assert!(script.contains("localized-launch.flag"));
+        assert!(script.contains("Claude_*_x64__pzs8sxrjxfjjc"));
+        assert!(script.contains("Claude_*_arm64__pzs8sxrjxfjjc"));
         assert!(!script.contains("--inspect"));
         assert!(!script.contains("remote-debugging-port"));
     } else {
