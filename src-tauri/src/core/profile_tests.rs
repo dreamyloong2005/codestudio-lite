@@ -2108,6 +2108,18 @@ fn codex_auth_status_infers_api_key_cache_without_exposing_values() {
     assert!(upper_status.available);
     assert!(matches!(upper_status.method, CodexAuthMethod::ApiKey));
     assert!(!upper_status.detail.contains("sk-secret"));
+
+    let bearer_status = codex_auth_status_from_file_content(
+        auth_path,
+        "file",
+        r#"{
+  "experimental_bearer_token": "sk-secret"
+}"#,
+    );
+
+    assert!(bearer_status.available);
+    assert!(matches!(bearer_status.method, CodexAuthMethod::ApiKey));
+    assert!(!bearer_status.detail.contains("sk-secret"));
 }
 
 #[test]
@@ -2134,6 +2146,7 @@ fn codex_auth_json_api_key_content_matches_cli_format_and_preserves_oauth_tokens
     let content = codex_auth_json_content_with_api_key(
         r#"{
   "auth_mode": "chatgpt",
+  "OPENAI_API_KEY": "stale-uppercase-key",
   "openai_api_key": "stale-lowercase-key",
   "api_key": "stale-legacy-key",
   "tokens": {
@@ -2153,10 +2166,11 @@ fn codex_auth_json_api_key_content_matches_cli_format_and_preserves_oauth_tokens
     );
     assert_eq!(
         value
-            .get("OPENAI_API_KEY")
+            .get("experimental_bearer_token")
             .and_then(serde_json::Value::as_str),
         Some("sk-current")
     );
+    assert!(value.get("OPENAI_API_KEY").is_none());
     assert!(value.get("openai_api_key").is_none());
     assert!(value.get("api_key").is_none());
     assert_eq!(
@@ -2177,6 +2191,7 @@ fn codex_official_auth_json_restores_preserved_oauth_mode() {
         r#"{
   "auth_mode": "apikey",
   "OPENAI_API_KEY": "codestudio-local-test",
+  "experimental_bearer_token": "codestudio-local-test",
   "tokens": {
     "access_token": "oauth-access",
     "refresh_token": "oauth-refresh"
@@ -2193,6 +2208,7 @@ fn codex_official_auth_json_restores_preserved_oauth_mode() {
         Some("chatgpt")
     );
     assert!(value.get("OPENAI_API_KEY").is_none());
+    assert!(value.get("experimental_bearer_token").is_none());
     assert_eq!(
         value
             .pointer("/tokens/access_token")
@@ -2854,10 +2870,11 @@ fn codex_direct_apply_plan_writes_auth_json_before_config() {
         Some("apikey")
     );
     assert_eq!(
-        auth.get("OPENAI_API_KEY")
+        auth.get("experimental_bearer_token")
             .and_then(serde_json::Value::as_str),
         Some("sk-direct-profile")
     );
+    assert!(auth.get("OPENAI_API_KEY").is_none());
     assert_eq!(
         auth.pointer("/tokens/refresh_token")
             .and_then(serde_json::Value::as_str),
@@ -2943,10 +2960,11 @@ fn codex_gateway_apply_plan_writes_local_token_to_auth_json_before_config() {
         Some("apikey")
     );
     assert_eq!(
-        auth.get("OPENAI_API_KEY")
+        auth.get("experimental_bearer_token")
             .and_then(serde_json::Value::as_str),
         Some(client.token.as_str())
     );
+    assert!(auth.get("OPENAI_API_KEY").is_none());
     assert_eq!(
         auth.pointer("/tokens/access_token")
             .and_then(serde_json::Value::as_str),

@@ -1038,10 +1038,11 @@ fn infer_codex_auth_method(value: &serde_json::Value) -> CodexAuthMethod {
         return CodexAuthMethod::AccessToken;
     }
 
-    if keys
-        .iter()
-        .any(|key| key.contains("api_key") || key.contains("apikey"))
-    {
+    if keys.iter().any(|key| {
+        key.contains("api_key")
+            || key.contains("apikey")
+            || key.contains("experimental_bearer_token")
+    }) {
         return CodexAuthMethod::ApiKey;
     }
 

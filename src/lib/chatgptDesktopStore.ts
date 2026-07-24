@@ -1,18 +1,14 @@
 import { get, writable } from "svelte/store";
 import {
-  applyChatGPTSessionIndexCleanup,
   detectChatGPTDesktopInstallKinds,
   inspectChatGPTDesktop,
   installChatGPTDesktop,
   loadCachedChatGPTDesktopStates,
   loadCachedDetection,
-  loadChatGPTHistorySyncTargets,
   launchChatGPTDesktop,
   listenChatGPTDesktopProgress,
   planChatGPTDesktopUpdate,
-  previewChatGPTSessionIndexCleanup,
   stageChatGPTDesktopUpdate,
-  syncChatGPTHistoryNow,
   uninstallChatGPTDesktop,
   updateChatGPTDesktopSettings
 } from "./api";
@@ -28,11 +24,7 @@ import type {
   ChatGPTDesktopSettings,
   ChatGPTDesktopStageReport,
   ChatGPTDesktopState,
-  ChatGPTDesktopStateCache,
-  ProviderSyncReport,
-  ProviderSyncTargetList,
-  SessionIndexCleanupPreview,
-  SessionIndexCleanupResult
+  ChatGPTDesktopStateCache
 } from "../types";
 import type { TranslationKey } from "./i18n";
 import { REFRESH_CACHE_TTL_MS, refreshTimestampFresh, writeRefreshTimestamp } from "./refreshCache";
@@ -67,12 +59,6 @@ interface ChatGPTDesktopViewState {
   installKinds: ChatGPTDesktopInstallKinds | null;
   // Which install-kind tab is selected: "msix" (Windows App) or "portable".
   selectedKind: ChatGPTDesktopInstallKind;
-  historySyncTargets: ProviderSyncTargetList | null;
-  historySyncResult: ProviderSyncReport | null;
-  historySyncLoading: boolean;
-  historySyncBusyAction: "sync" | "preview" | "cleanup" | null;
-  sessionIndexCleanupPreview: SessionIndexCleanupPreview | null;
-  sessionIndexCleanupResult: SessionIndexCleanupResult | null;
 }
 
 const INSTALL_KINDS: ChatGPTDesktopInstallKind[] = ["msix", "portable"];
@@ -107,13 +93,7 @@ const initialState: ChatGPTDesktopViewState = {
   success: null,
   confirmUninstall: false,
   installKinds: null,
-  selectedKind: "msix",
-  historySyncTargets: null,
-  historySyncResult: null,
-  historySyncLoading: false,
-  historySyncBusyAction: null,
-  sessionIndexCleanupPreview: null,
-  sessionIndexCleanupResult: null
+  selectedKind: "msix"
 };
 
 export const chatgptDesktopView = writable<ChatGPTDesktopViewState>(initialState);
@@ -144,8 +124,6 @@ function defaultChatGPTDesktopSettings(): ChatGPTDesktopSettings {
     installRoot: "",
     keepUserDataOnUninstall: true,
     syncHistoryOnLaunch: false,
-    historySyncTargetProvider: "",
-    historySyncSavedProviders: [],
     pluginMarketplaceUnlockOnLaunch: true,
     pluginAutoExpandOnLaunch: true,
     modelWhitelistUnlockOnLaunch: true,
@@ -234,8 +212,6 @@ function settingsKey(settings: ChatGPTDesktopSettings) {
     installRoot: settings.installRoot,
     keepUserDataOnUninstall: settings.keepUserDataOnUninstall,
     syncHistoryOnLaunch: settings.syncHistoryOnLaunch,
-    historySyncTargetProvider: settings.historySyncTargetProvider,
-    historySyncSavedProviders: settings.historySyncSavedProviders,
     pluginMarketplaceUnlockOnLaunch: settings.pluginMarketplaceUnlockOnLaunch,
     pluginAutoExpandOnLaunch: settings.pluginAutoExpandOnLaunch,
     modelWhitelistUnlockOnLaunch: settings.modelWhitelistUnlockOnLaunch,
@@ -266,12 +242,6 @@ function mergeScannedSettings(
     syncHistoryOnLaunch: preserveLaunchOptions && draft
       ? draft.syncHistoryOnLaunch
       : stateSettings.syncHistoryOnLaunch,
-    historySyncTargetProvider: preserveLaunchOptions && draft
-      ? draft.historySyncTargetProvider
-      : stateSettings.historySyncTargetProvider,
-    historySyncSavedProviders: preserveLaunchOptions && draft
-      ? draft.historySyncSavedProviders
-      : stateSettings.historySyncSavedProviders,
     pluginMarketplaceUnlockOnLaunch: preserveLaunchOptions && draft
       ? draft.pluginMarketplaceUnlockOnLaunch
       : stateSettings.pluginMarketplaceUnlockOnLaunch,
@@ -589,93 +559,6 @@ export function setChatGPTDesktopSelectedKind(kind: ChatGPTDesktopInstallKind) {
   const kindView = view.kindViews[kind];
   if ((!kindView.loaded || kindView.planStale) && !kindView.loading && !kindView.busyAction && view.loaded) {
     void refreshChatGPTDesktop(true, false, kind);
-  }
-}
-
-export async function loadChatGPTHistorySyncManagement() {
-  patch({ historySyncLoading: true });
-  try {
-    const historySyncTargets = await loadChatGPTHistorySyncTargets();
-    patch({ historySyncTargets, historySyncLoading: false });
-    const current = get(chatgptDesktopView);
-    if (
-      current.settingsDraft
-      && !current.settingsDraft.historySyncTargetProvider
-      && historySyncTargets.currentProvider
-    ) {
-      updateChatGPTDesktopDraft({
-        historySyncTargetProvider: historySyncTargets.currentProvider
-      });
-    }
-  } catch (err) {
-    patch({
-      historySyncLoading: false,
-      error: err instanceof Error ? err.message : String(err)
-    });
-  }
-}
-
-export async function runChatGPTHistorySync() {
-  const target = get(chatgptDesktopView).settingsDraft?.historySyncTargetProvider?.trim() || null;
-  patch({ historySyncBusyAction: "sync", error: null, sessionIndexCleanupResult: null });
-  try {
-    const historySyncResult = await syncChatGPTHistoryNow(target);
-    patch({ historySyncResult });
-    if (historySyncResult.status === "skipped") {
-      patch({ error: historySyncResult.message });
-    } else {
-      const settings = get(chatgptDesktopView).settingsDraft;
-      if (settings) {
-        updateChatGPTDesktopDraft({
-          historySyncTargetProvider: historySyncResult.targetProvider,
-          historySyncSavedProviders: [...new Set([
-            ...settings.historySyncSavedProviders,
-            historySyncResult.targetProvider
-          ])].sort()
-        });
-      }
-      patch({ success: historySyncResult.message });
-    }
-    await loadChatGPTHistorySyncManagement();
-  } catch (err) {
-    patch({ error: err instanceof Error ? err.message : String(err) });
-  } finally {
-    patch({ historySyncBusyAction: null });
-  }
-}
-
-export async function previewChatGPTHistoryIndexCleanup() {
-  patch({ historySyncBusyAction: "preview", error: null, sessionIndexCleanupResult: null });
-  try {
-    const sessionIndexCleanupPreview = await previewChatGPTSessionIndexCleanup();
-    patch({ sessionIndexCleanupPreview });
-  } catch (err) {
-    patch({ error: err instanceof Error ? err.message : String(err) });
-  } finally {
-    patch({ historySyncBusyAction: null });
-  }
-}
-
-export async function applyChatGPTHistoryIndexCleanup(threadIds: string[]) {
-  const preview = get(chatgptDesktopView).sessionIndexCleanupPreview;
-  if (!preview || threadIds.length === 0) {
-    return;
-  }
-  patch({ historySyncBusyAction: "cleanup", error: null });
-  try {
-    const sessionIndexCleanupResult = await applyChatGPTSessionIndexCleanup(
-      preview.snapshotSha256,
-      threadIds
-    );
-    patch({
-      sessionIndexCleanupResult,
-      sessionIndexCleanupPreview: null,
-      success: `Removed ${sessionIndexCleanupResult.prunedEntries} stale session index entries.`
-    });
-  } catch (err) {
-    patch({ error: err instanceof Error ? err.message : String(err) });
-  } finally {
-    patch({ historySyncBusyAction: null });
   }
 }
 

@@ -26,7 +26,7 @@ test("release manifests share the global application version", () => {
   const cargoManifestVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
   const cargoLockVersion = cargoLock.match(/\[\[package\]\]\s+name = "codestudio-lite"\s+version = "([^"]+)"/)?.[1];
 
-  assert.equal(packageJson.version, "1.5.1");
+  assert.equal(packageJson.version, "1.5.2");
   assert.equal(packageLock.version, packageJson.version);
   assert.equal(packageLock.packages[""].version, packageJson.version);
   assert.equal(tauriConfig.version, packageJson.version);

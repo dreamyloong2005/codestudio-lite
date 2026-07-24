@@ -5,14 +5,10 @@
   } from "../lib/api";
   import {
     chatgptDesktopView,
-    applyChatGPTHistoryIndexCleanup,
     installOrUpdateChatGPTDesktop,
     launchManagedChatGPTDesktop,
-    loadChatGPTHistorySyncManagement,
-    previewChatGPTHistoryIndexCleanup,
     refreshChatGPTDesktop,
     removeChatGPTDesktop,
-    runChatGPTHistorySync,
     setChatGPTDesktopConfirmUninstall,
     setChatGPTDesktopSelectedKind,
     stageChatGPTDesktopPackage,
@@ -72,11 +68,6 @@
   $: operationResult = kindView.operationResult;
   $: progress = kindView.progress;
   $: confirmUninstall = view.confirmUninstall;
-  $: historySyncTargets = view.historySyncTargets;
-  $: historySyncResult = view.historySyncResult;
-  $: historySyncBusyAction = view.historySyncBusyAction;
-  $: sessionIndexCleanupPreview = view.sessionIndexCleanupPreview;
-  $: sessionIndexCleanupResult = view.sessionIndexCleanupResult;
   $: installed = state?.installed ?? null;
   $: plan = state?.plan ?? null;
   $: release = state?.release ?? null;
@@ -104,11 +95,8 @@
     || progress.phase === "done"
     || progress.phase === "error"
   ));
-  let selectedCleanupThreadIds = new Set<string>();
-
   onMount(() => {
     startChatGPTDesktopProgressListener();
-    void loadChatGPTHistorySyncManagement();
   });
 
   function brandDesktopText(value: string) {
@@ -133,32 +121,6 @@
 
   async function refreshCodex() {
     await refreshChatGPTDesktop();
-  }
-
-  async function previewIndexCleanup() {
-    selectedCleanupThreadIds = new Set();
-    await previewChatGPTHistoryIndexCleanup();
-  }
-
-  function toggleCleanupThread(id: string, checked: boolean) {
-    const next = new Set(selectedCleanupThreadIds);
-    if (checked) {
-      next.add(id);
-    } else {
-      next.delete(id);
-    }
-    selectedCleanupThreadIds = next;
-  }
-
-  function toggleAllCleanupThreads(checked: boolean) {
-    selectedCleanupThreadIds = checked
-      ? new Set(sessionIndexCleanupPreview?.candidates.map((candidate) => candidate.id) ?? [])
-      : new Set();
-  }
-
-  async function applyIndexCleanup() {
-    await applyChatGPTHistoryIndexCleanup([...selectedCleanupThreadIds]);
-    selectedCleanupThreadIds = new Set();
   }
 
   function formatBytes(value: number | null | undefined) {
@@ -244,49 +206,6 @@
   const warningRowClass = css({
     borderColor: "color-mix(in srgb, var(--amber) 35%, transparent) !important",
     background: "color-mix(in srgb, var(--amber) 8%, var(--surface-strong)) !important"
-  });
-  const historyControlsClass = css({
-    display: "grid",
-    gridTemplateColumns: "minmax(220px, 1fr) auto",
-    gap: "10px",
-    alignItems: "end",
-    mdDown: { gridTemplateColumns: "1fr" }
-  });
-  const historyFieldClass = css({
-    display: "grid",
-    gap: "7px",
-    minWidth: 0,
-    '& > span': { color: "var(--text-muted)", fontSize: "0.78rem" },
-    '& > input': {
-      width: "100%",
-      minWidth: 0,
-      border: "1px solid var(--line)",
-      background: "var(--surface-strong)",
-      color: "var(--text)",
-      padding: "9px 10px"
-    }
-  });
-  const historyWarningClass = css({
-    marginTop: "12px",
-    borderLeft: "3px solid var(--amber)",
-    padding: "9px 11px",
-    color: "var(--text)",
-    background: "color-mix(in srgb, var(--amber) 8%, transparent)",
-    fontSize: "0.82rem",
-    lineHeight: 1.55
-  });
-  const cleanupActionsClass = css({
-    display: "flex",
-    gap: "9px",
-    alignItems: "center",
-    justifyContent: "space-between",
-    flexWrap: "wrap",
-    marginTop: "14px"
-  });
-  const historyDangerButtonClass = css({
-    borderColor: "color-mix(in srgb, var(--danger) 45%, transparent) !important",
-    color: "var(--danger) !important",
-    _hover: { background: "color-mix(in srgb, var(--danger) 9%, var(--surface-hover)) !important" }
   });
 </script>
 
@@ -427,113 +346,6 @@
             </span>
           </label>
         {/if}
-      </div>
-    {/if}
-  </section>
-
-  <section class={panelRecipe()} data-history-sync-management>
-    <div class={sectionHeadingRecipe()}>
-      <div class={headingCopyClass}>
-        <h2>{$t("chatgptDesktop.historySyncTitle")}</h2>
-        <p>{$t("chatgptDesktop.historySyncHint")}</p>
-      </div>
-      {#if historySyncResult}
-        <StatusPill
-          status={historySyncResult.status === "synced" ? "ok" : "warning"}
-          label={$t(`chatgptDesktop.historySyncStatus.${historySyncResult.status}` as TranslationKey)}
-        />
-      {/if}
-    </div>
-    <div class={historyControlsClass}>
-      <label class={historyFieldClass}>
-        <span>{$t("chatgptDesktop.historySyncProvider")}</span>
-        <input
-          list="chatgpt-history-provider-targets"
-          value={settingsDraft?.historySyncTargetProvider ?? historySyncTargets?.currentProvider ?? ""}
-          on:input={(event) => updateChatGPTDesktopDraft({ historySyncTargetProvider: event.currentTarget.value })}
-          placeholder={historySyncTargets?.currentProvider ?? "openai"}
-          disabled={historySyncBusyAction !== null}
-        />
-        <datalist id="chatgpt-history-provider-targets">
-          {#each historySyncTargets?.targets ?? [] as target}
-            <option value={target.id}>{target.sources.join(" / ")}</option>
-          {/each}
-        </datalist>
-      </label>
-      <button
-        class={actionButtonRecipe({ tone: "primary" })}
-        disabled={historySyncBusyAction !== null}
-        on:click={runChatGPTHistorySync}
-      >
-        <AppIcon name={historySyncBusyAction === "sync" ? "loading" : "refresh"} class={historySyncBusyAction === "sync" ? spinRecipe() : ""} size={16} />
-        {$t(historySyncBusyAction === "sync" ? "chatgptDesktop.historySyncRunning" : "chatgptDesktop.historySyncNow")}
-      </button>
-    </div>
-    {#if historySyncResult}
-      <div class={desktopClientPreviewListRecipe()}>
-        <div><strong>{$t("chatgptDesktop.historySyncFiles")}</strong><span>{historySyncResult.changedSessionFiles}</span></div>
-        <div><strong>{$t("chatgptDesktop.historySyncDatabaseRows")}</strong><span>{historySyncResult.sqliteRowsUpdated}</span></div>
-        <div><strong>{$t("chatgptDesktop.historySyncWorkspaceFields")}</strong><span>{historySyncResult.updatedWorkspaceRoots}</span></div>
-        <div><strong>{$t("chatgptDesktop.historySyncBackup")}</strong><span>{historySyncResult.backupDir ?? $t("common.none")}</span></div>
-      </div>
-      {#if historySyncResult.encryptedContentWarning}
-        <div class={historyWarningClass}>{historySyncResult.encryptedContentWarning}</div>
-      {/if}
-    {/if}
-    <div class={cleanupActionsClass}>
-      <div>
-        <strong>{$t("chatgptDesktop.sessionIndexCleanupTitle")}</strong>
-        <p>{$t("chatgptDesktop.sessionIndexCleanupHint")}</p>
-      </div>
-      <button class={actionButtonRecipe()} disabled={historySyncBusyAction !== null} on:click={previewIndexCleanup}>
-        <AppIcon name={historySyncBusyAction === "preview" ? "loading" : "eye"} class={historySyncBusyAction === "preview" ? spinRecipe() : ""} size={16} />
-        {$t("chatgptDesktop.sessionIndexPreview")}
-      </button>
-    </div>
-    {#if sessionIndexCleanupPreview}
-      {#if sessionIndexCleanupPreview.candidates.length > 0}
-        <label class={nativeToggleRecipe()} data-native-toggle>
-          <input
-            type="checkbox"
-            checked={selectedCleanupThreadIds.size === sessionIndexCleanupPreview.candidates.length}
-            on:change={(event) => toggleAllCleanupThreads(event.currentTarget.checked)}
-          />
-          <span><strong>{$t("chatgptDesktop.sessionIndexSelectAll")}</strong></span>
-        </label>
-        <div class={desktopClientSettingsListRecipe()}>
-          {#each sessionIndexCleanupPreview.candidates as candidate}
-            <label class={nativeToggleRecipe()} data-native-toggle>
-              <input
-                type="checkbox"
-                checked={selectedCleanupThreadIds.has(candidate.id)}
-                on:change={(event) => toggleCleanupThread(candidate.id, event.currentTarget.checked)}
-              />
-              <span>
-                <strong>{candidate.threadName || candidate.id}</strong>
-                <small>{candidate.id}{candidate.updatedAt ? ` / ${candidate.updatedAt}` : ""}</small>
-              </span>
-            </label>
-          {/each}
-        </div>
-        <div class={cleanupActionsClass}>
-          <span>{$t("chatgptDesktop.sessionIndexSelected", { count: selectedCleanupThreadIds.size })}</span>
-          <button
-            class={cx(actionButtonRecipe(), historyDangerButtonClass)}
-            disabled={historySyncBusyAction !== null || selectedCleanupThreadIds.size === 0}
-            on:click={applyIndexCleanup}
-          >
-            <AppIcon name={historySyncBusyAction === "cleanup" ? "loading" : "delete"} class={historySyncBusyAction === "cleanup" ? spinRecipe() : ""} size={16} />
-            {$t("chatgptDesktop.sessionIndexClean")}
-          </button>
-        </div>
-      {:else}
-        <div class={emptyRowRecipe()}>{$t("chatgptDesktop.sessionIndexEmpty")}</div>
-      {/if}
-    {/if}
-    {#if sessionIndexCleanupResult}
-      <div class={historyWarningClass}>
-        {$t("chatgptDesktop.sessionIndexCleaned", { count: sessionIndexCleanupResult.prunedEntries })}
-        {sessionIndexCleanupResult.backupDir}
       </div>
     {/if}
   </section>

@@ -747,8 +747,6 @@ export interface ChatGPTDesktopSettings {
   installRoot: string;
   keepUserDataOnUninstall: boolean;
   syncHistoryOnLaunch: boolean;
-  historySyncTargetProvider: string;
-  historySyncSavedProviders: string[];
   pluginMarketplaceUnlockOnLaunch: boolean;
   pluginAutoExpandOnLaunch: boolean;
   modelWhitelistUnlockOnLaunch: boolean;
@@ -766,59 +764,12 @@ export interface UpdateChatGPTDesktopSettingsRequest {
   installRoot?: string | null;
   keepUserDataOnUninstall?: boolean | null;
   syncHistoryOnLaunch?: boolean | null;
-  historySyncTargetProvider?: string | null;
-  historySyncSavedProviders?: string[] | null;
   pluginMarketplaceUnlockOnLaunch?: boolean | null;
   pluginAutoExpandOnLaunch?: boolean | null;
   modelWhitelistUnlockOnLaunch?: boolean | null;
   serviceTierControlsOnLaunch?: boolean | null;
   officialRemotePluginCacheOnLaunch?: boolean | null;
   computerUseGuardOnLaunch?: boolean | null;
-}
-
-export type ProviderSyncStatus = "disabled" | "skipped" | "synced";
-export type ProviderSyncTargetSource = "config" | "rollout" | "sqlite" | "manual";
-
-export interface ProviderSyncTargetOption {
-  id: string;
-  sources: ProviderSyncTargetSource[];
-  isCurrentProvider: boolean;
-}
-
-export interface ProviderSyncTargetList {
-  currentProvider: string;
-  targets: ProviderSyncTargetOption[];
-}
-
-export interface ProviderSyncReport {
-  status: ProviderSyncStatus;
-  message: string;
-  targetProvider: string;
-  changedSessionFiles: number;
-  skippedLockedRolloutFiles: string[];
-  sqliteRowsUpdated: number;
-  sqliteProviderRowsUpdated: number;
-  sqliteUserEventRowsUpdated: number;
-  sqliteCwdRowsUpdated: number;
-  updatedWorkspaceRoots: number;
-  encryptedContentWarning: string | null;
-  backupDir: string | null;
-}
-
-export interface SessionIndexCleanupCandidate {
-  id: string;
-  threadName: string;
-  updatedAt: string;
-}
-
-export interface SessionIndexCleanupPreview {
-  snapshotSha256: string;
-  candidates: SessionIndexCleanupCandidate[];
-}
-
-export interface SessionIndexCleanupResult {
-  prunedEntries: number;
-  backupDir: string;
 }
 
 export interface PlanChatGPTDesktopUpdateRequest {

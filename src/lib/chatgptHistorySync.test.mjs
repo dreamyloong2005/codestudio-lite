@@ -4,12 +4,13 @@ import test from "node:test";
 
 const read = (path) => fs.readFileSync(path, "utf8");
 
-test("ChatGPT Desktop exposes complete history sync management", () => {
+test("ChatGPT Desktop removes manual history management surfaces", () => {
   const commands = read("src-tauri/src/commands/chatgpt_desktop.rs");
   const lib = read("src-tauri/src/lib.rs");
   const api = read("src/lib/api.ts");
   const store = read("src/lib/chatgptDesktopStore.ts");
   const page = read("src/routes/ChatGPTDesktop.svelte");
+  const types = read("src/types.ts");
 
   for (const command of [
     "load_chatgpt_history_sync_targets",
@@ -17,17 +18,19 @@ test("ChatGPT Desktop exposes complete history sync management", () => {
     "preview_chatgpt_session_index_cleanup",
     "apply_chatgpt_session_index_cleanup"
   ]) {
-    assert.match(commands, new RegExp(`fn ${command}`));
-    assert.match(lib, new RegExp(`commands::chatgpt_desktop::${command}`));
-    assert.match(api, new RegExp(`invoke\\(\"${command}\"`));
+    assert.doesNotMatch(commands, new RegExp(`fn ${command}`));
+    assert.doesNotMatch(lib, new RegExp(`commands::chatgpt_desktop::${command}`));
+    assert.doesNotMatch(api, new RegExp(`invoke\\(\"${command}\"`));
   }
 
-  assert.match(store, /historySyncTargets/);
-  assert.match(store, /historySyncResult/);
-  assert.match(store, /sessionIndexCleanupPreview/);
-  assert.match(page, /data-history-sync-management/);
-  assert.match(page, /encryptedContentWarning/);
-  assert.match(page, /sessionIndexCleanupPreview/);
+  assert.doesNotMatch(store, /historySyncTargets/);
+  assert.doesNotMatch(store, /sessionIndexCleanupPreview/);
+  assert.doesNotMatch(types, /ProviderSyncTargetList/);
+  assert.doesNotMatch(types, /SessionIndexCleanupPreview/);
+  assert.doesNotMatch(page, /data-history-sync-management/);
+  assert.doesNotMatch(page, /runChatGPTHistorySync/);
+  assert.doesNotMatch(page, /previewChatGPTHistoryIndexCleanup/);
+  assert.match(page, /settingsDraft\.syncHistoryOnLaunch/);
 });
 
 test("automatic history sync is non-blocking but records failures", () => {

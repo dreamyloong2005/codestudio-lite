@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::net::TcpListener;
@@ -79,10 +79,6 @@ pub struct ChatGptDesktopSettings {
     pub keep_user_data_on_uninstall: bool,
     #[serde(default)]
     pub sync_history_on_launch: bool,
-    #[serde(default)]
-    pub history_sync_target_provider: String,
-    #[serde(default)]
-    pub history_sync_saved_providers: Vec<String>,
     #[serde(default = "default_true")]
     pub plugin_marketplace_unlock_on_launch: bool,
     #[serde(default = "default_true")]
@@ -116,10 +112,6 @@ pub struct UpdateChatGptDesktopSettingsRequest {
     pub keep_user_data_on_uninstall: Option<bool>,
     #[serde(default)]
     pub sync_history_on_launch: Option<bool>,
-    #[serde(default)]
-    pub history_sync_target_provider: Option<String>,
-    #[serde(default)]
-    pub history_sync_saved_providers: Option<Vec<String>>,
     #[serde(default)]
     pub plugin_marketplace_unlock_on_launch: Option<bool>,
     #[serde(default)]
@@ -398,8 +390,6 @@ impl Default for ChatGptDesktopSettings {
             install_root: default_install_root(),
             keep_user_data_on_uninstall: true,
             sync_history_on_launch: false,
-            history_sync_target_provider: String::new(),
-            history_sync_saved_providers: Vec::new(),
             plugin_marketplace_unlock_on_launch: true,
             plugin_auto_expand_on_launch: true,
             model_whitelist_unlock_on_launch: true,
@@ -1032,12 +1022,6 @@ pub fn update_settings(
     if let Some(sync) = request.sync_history_on_launch {
         settings.sync_history_on_launch = sync;
     }
-    if let Some(provider) = request.history_sync_target_provider {
-        settings.history_sync_target_provider = normalize_history_sync_provider(&provider)?;
-    }
-    if let Some(providers) = request.history_sync_saved_providers {
-        settings.history_sync_saved_providers = normalize_history_sync_provider_list(providers)?;
-    }
     if let Some(enabled) = request.plugin_marketplace_unlock_on_launch {
         settings.plugin_marketplace_unlock_on_launch = enabled;
     }
@@ -1059,53 +1043,6 @@ pub fn update_settings(
     settings.signed_only = true;
     save_settings(&settings)?;
     Ok(settings)
-}
-
-pub fn remember_history_sync_provider(provider: &str) -> Result<(), String> {
-    let provider = normalize_history_sync_provider(provider)?;
-    if provider.is_empty() {
-        return Ok(());
-    }
-    let mut settings = load_settings()?;
-    settings.history_sync_target_provider = provider.clone();
-    settings.history_sync_saved_providers.push(provider);
-    settings.history_sync_saved_providers =
-        normalize_history_sync_provider_list(settings.history_sync_saved_providers)?;
-    save_settings(&settings)
-}
-
-pub fn history_sync_preferences() -> Result<(String, Vec<String>), String> {
-    let settings = load_settings()?;
-    Ok((
-        settings.history_sync_target_provider,
-        settings.history_sync_saved_providers,
-    ))
-}
-
-fn normalize_history_sync_provider(provider: &str) -> Result<String, String> {
-    let provider = provider.trim();
-    if provider.is_empty() {
-        return Ok(String::new());
-    }
-    if provider
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-    {
-        Ok(provider.to_string())
-    } else {
-        Err(format!("Invalid history provider id: {provider:?}"))
-    }
-}
-
-fn normalize_history_sync_provider_list(providers: Vec<String>) -> Result<Vec<String>, String> {
-    let mut normalized = BTreeSet::new();
-    for provider in providers {
-        let provider = normalize_history_sync_provider(&provider)?;
-        if !provider.is_empty() {
-            normalized.insert(provider);
-        }
-    }
-    Ok(normalized.into_iter().collect())
 }
 
 pub fn open_path(kind: String) -> Result<(), String> {

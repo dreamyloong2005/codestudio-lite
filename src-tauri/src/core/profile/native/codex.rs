@@ -20,16 +20,21 @@ pub(in crate::core::profile) fn auth_json_has_chatgpt_markers(value: &serde_json
 }
 
 fn auth_api_key_from_value(value: &serde_json::Value) -> Option<String> {
-    ["OPENAI_API_KEY", "openai_api_key", "api_key"]
-        .into_iter()
-        .find_map(|key| {
-            value
-                .get(key)
-                .and_then(|item| item.as_str())
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(ToString::to_string)
-        })
+    [
+        "experimental_bearer_token",
+        "OPENAI_API_KEY",
+        "openai_api_key",
+        "api_key",
+    ]
+    .into_iter()
+    .find_map(|key| {
+        value
+            .get(key)
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+    })
 }
 
 fn wire_api_for_protocol(protocol: &str) -> Result<&'static str, String> {
@@ -348,9 +353,10 @@ pub(in crate::core::profile) fn auth_json_content_with_api_key(
         serde_json::Value::String("apikey".to_string()),
     );
     object.insert(
-        "OPENAI_API_KEY".to_string(),
+        "experimental_bearer_token".to_string(),
         serde_json::Value::String(api_key.to_string()),
     );
+    object.remove("OPENAI_API_KEY");
     object.remove("openai_api_key");
     object.remove("api_key");
     render_auth_json(&value)
@@ -376,6 +382,7 @@ pub(in crate::core::profile) fn official_auth_json_content(
     object.remove("OPENAI_API_KEY");
     object.remove("openai_api_key");
     object.remove("api_key");
+    object.remove("experimental_bearer_token");
     render_auth_json(&value).map(Some)
 }
 

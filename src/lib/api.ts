@@ -59,8 +59,6 @@ import type {
   ChatGPTDesktopUninstallRequest,
   PlanChatGPTDesktopUpdateRequest,
   StageChatGPTDesktopUpdateRequest,
-  SessionIndexCleanupPreview,
-  SessionIndexCleanupResult,
   DeleteProfileDraftRequest,
   DetectionSnapshot,
   DoctorReport,
@@ -78,8 +76,6 @@ import type {
   PreviewProfileApplyResult,
   PreviewProfileWriteRequest,
   PreviewProfileWriteResult,
-  ProviderSyncReport,
-  ProviderSyncTargetList,
   ProfileDraft,
   ProfileModelMapping,
   ProviderApplyMode,
@@ -1086,56 +1082,6 @@ export async function launchChatGPTDesktop(): Promise<void> {
   }
 }
 
-export async function loadChatGPTHistorySyncTargets(): Promise<ProviderSyncTargetList> {
-  if (isTauri()) {
-    return invoke("load_chatgpt_history_sync_targets");
-  }
-  return {
-    currentProvider: "openai",
-    targets: [
-      { id: "openai", sources: ["config"], isCurrentProvider: true },
-      { id: "gateway", sources: ["config", "manual"], isCurrentProvider: false }
-    ]
-  };
-}
-
-export async function syncChatGPTHistoryNow(targetProvider?: string | null): Promise<ProviderSyncReport> {
-  if (isTauri()) {
-    return invoke("sync_chatgpt_history_now", { targetProvider: targetProvider ?? null });
-  }
-  return {
-    status: "synced",
-    message: "History provider synchronization completed.",
-    targetProvider: targetProvider?.trim() || "openai",
-    changedSessionFiles: 2,
-    skippedLockedRolloutFiles: [],
-    sqliteRowsUpdated: 3,
-    sqliteProviderRowsUpdated: 1,
-    sqliteUserEventRowsUpdated: 1,
-    sqliteCwdRowsUpdated: 1,
-    updatedWorkspaceRoots: 1,
-    encryptedContentWarning: null,
-    backupDir: "C:\\Users\\you\\.codex\\backups_state\\provider-sync\\preview"
-  };
-}
-
-export async function previewChatGPTSessionIndexCleanup(): Promise<SessionIndexCleanupPreview> {
-  if (isTauri()) {
-    return invoke("preview_chatgpt_session_index_cleanup");
-  }
-  return { snapshotSha256: "browser-preview", candidates: [] };
-}
-
-export async function applyChatGPTSessionIndexCleanup(
-  snapshotSha256: string,
-  threadIds: string[]
-): Promise<SessionIndexCleanupResult> {
-  if (isTauri()) {
-    return invoke("apply_chatgpt_session_index_cleanup", { snapshotSha256, threadIds });
-  }
-  return { prunedEntries: threadIds.length, backupDir: "browser-preview" };
-}
-
 export async function launchClaudeDesktop(request: ClaudeDesktopLaunchRequest = {}): Promise<void> {
   if (isTauri()) {
     return invoke("launch_claude_desktop", { localize: request.localize });
@@ -1192,8 +1138,6 @@ export async function updateChatGPTDesktopSettings(
     installRoot: request.installRoot ?? mockChatGPTDesktopSettings.installRoot,
     keepUserDataOnUninstall: request.keepUserDataOnUninstall ?? mockChatGPTDesktopSettings.keepUserDataOnUninstall,
     syncHistoryOnLaunch: request.syncHistoryOnLaunch ?? mockChatGPTDesktopSettings.syncHistoryOnLaunch,
-    historySyncTargetProvider: request.historySyncTargetProvider ?? mockChatGPTDesktopSettings.historySyncTargetProvider,
-    historySyncSavedProviders: request.historySyncSavedProviders ?? mockChatGPTDesktopSettings.historySyncSavedProviders,
     pluginMarketplaceUnlockOnLaunch: request.pluginMarketplaceUnlockOnLaunch ?? mockChatGPTDesktopSettings.pluginMarketplaceUnlockOnLaunch,
     pluginAutoExpandOnLaunch: request.pluginAutoExpandOnLaunch ?? mockChatGPTDesktopSettings.pluginAutoExpandOnLaunch,
     modelWhitelistUnlockOnLaunch: request.modelWhitelistUnlockOnLaunch ?? mockChatGPTDesktopSettings.modelWhitelistUnlockOnLaunch,
@@ -1357,8 +1301,6 @@ let mockChatGPTDesktopSettings: ChatGPTDesktopSettings = {
   installRoot: "C:\\Users\\you\\AppData\\Local\\Programs\\Codex",
   keepUserDataOnUninstall: true,
   syncHistoryOnLaunch: false,
-  historySyncTargetProvider: "",
-  historySyncSavedProviders: [],
   pluginMarketplaceUnlockOnLaunch: true,
   pluginAutoExpandOnLaunch: true,
   modelWhitelistUnlockOnLaunch: true,
