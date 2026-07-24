@@ -5,6 +5,9 @@ pub(in crate::core::profile) fn load_profiles() -> Result<Vec<ProfileDraft>, Str
     let usage_enabled_profile_ids = storage::load_usage_enabled_profile_ids()?;
     for mut profile in storage::load_profiles()? {
         let app = canonical_profile_app(&profile.app);
+        if tool_catalog::profile_capabilities(&app).is_none() {
+            continue;
+        }
         if is_builtin_profile_id(&profile.id) {
             continue;
         }
@@ -109,7 +112,6 @@ fn default_builtin_profile_icon(app: &str) -> &'static str {
         "codex" => "C",
         "claude-desktop" => "CD",
         "claude" => "CC",
-        "gemini" => "G",
         "gemini-code-assist" => "GA",
         "opencode" => "OC",
         "openclaw" => "O",
@@ -267,11 +269,10 @@ pub(in crate::core::profile) fn default_active_profile_id(
     active_profiles: &HashMap<String, String>,
     drafts: &[ProfileDraft],
 ) -> Option<String> {
-    const PREFERRED_APPS: [&str; 10] = [
+    const PREFERRED_APPS: [&str; 9] = [
         "codex",
         "claude-desktop",
         "claude",
-        "gemini",
         "gemini-code-assist",
         "opencode",
         "openclaw",

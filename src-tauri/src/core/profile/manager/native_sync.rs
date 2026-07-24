@@ -44,21 +44,6 @@ pub(in crate::core::profile) fn sync_active_profiles_from_native_configs(
         )?;
     }
 
-    if let Some(adapter) = native::adapter("gemini") {
-        let gemini_config = fs::read_to_string(adapter.target(paths)).unwrap_or_default();
-        changed |= sync_or_import_native_config_profile(
-            config,
-            drafts,
-            "gemini",
-            |profile| {
-                adapter
-                    .matches(&gemini_config, profile, SecretMatchMode::KeychainReference)
-                    .unwrap_or(false)
-            },
-            || adapter.inspect(&gemini_config).ok().flatten(),
-        )?;
-    }
-
     if let Some(adapter) = native::adapter("gemini-code-assist") {
         let settings = fs::read_to_string(adapter.target(paths)).unwrap_or_default();
         changed |= sync_or_import_native_config_profile(
@@ -636,7 +621,6 @@ fn native_profile_tool_name(app: &str) -> &'static str {
         "codex" => "Codex",
         "claude-desktop" => "Claude Desktop",
         "claude" => "Claude Code",
-        "gemini" => "Gemini CLI",
         "gemini-code-assist" => "Gemini Code Assist",
         "opencode" => "OpenCode",
         "openclaw" => "OpenClaw",

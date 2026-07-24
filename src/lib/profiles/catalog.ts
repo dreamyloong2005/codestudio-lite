@@ -54,17 +54,6 @@ export const PROFILE_TOOL_CATALOG: readonly ProfileToolDefinition[] = [
     supportsModelMappings: true
   },
   {
-    id: "gemini",
-    label: "Gemini CLI",
-    officialProfileNameKey: "profiles.officialProfile.gemini",
-    defaultProfileNameKey: "wizard.defaultProfile.gemini",
-    officialProtocol: "google-gemini",
-    defaultProtocol: "google-gemini",
-    configProtocols: ["google-gemini"],
-    supportsReviewModel: false,
-    supportsModelMappings: false
-  },
-  {
     id: "gemini-code-assist",
     label: "Gemini Code Assist",
     officialProfileNameKey: "profiles.officialProfile.geminiCodeAssist",
@@ -151,8 +140,8 @@ export function canonicalProfileToolId(toolId: string): string {
   if (["claude", "claude-code", "claude-vscode", "claude-code-vscode", "claude-vs-code"].includes(normalized)) {
     return "claude";
   }
-  if (["gemini", "gemini-cli"].includes(normalized)) {
-    return "gemini";
+  if (["antigravity", "antigravity-cli", "agy"].includes(normalized)) {
+    return "antigravity";
   }
   if (["gemini-code-assist", "gemini-vscode", "gemini-code-vscode", "gemini-vs-code"].includes(normalized)) {
     return "gemini-code-assist";

@@ -24,7 +24,6 @@ function mockToolConfigPath(toolId: string): string | null {
     codex: "~/.codex/config.toml",
     claude: "~/.claude",
     "claude-desktop": `~/AppData/Local/Claude-3p/configLibrary/${CLAUDE_DESKTOP_PROFILE_ID}.json`,
-    gemini: "~/.gemini",
     "gemini-code-assist": "~/AppData/Roaming/Code/User/settings.json",
     opencode: "~/.config/opencode",
     openclaw: "~/.openclaw",
@@ -46,9 +45,6 @@ export function mockNativeConfigPath(app: string, mode: ProviderApplyMode, provi
     }
     if (canonicalApp === "claude") {
       return "~/.claude/settings.json";
-    }
-    if (canonicalApp === "gemini") {
-      return "~/.gemini/.env";
     }
     if (canonicalApp === "opencode") {
       return "~/.config/opencode/opencode.json";
@@ -78,9 +74,6 @@ export function mockNativeConfigPath(app: string, mode: ProviderApplyMode, provi
   }
   if (canonicalApp === "claude") {
     return "~/.claude/settings.json";
-  }
-  if (canonicalApp === "gemini") {
-    return "~/.gemini/.env";
   }
   if (canonicalApp === "gemini-code-assist") {
     return "~/AppData/Roaming/Code/User/settings.json";
@@ -482,42 +475,6 @@ function mockNonCodexNativeConfigPreview(
     };
   }
 
-  if (app === "gemini") {
-    return {
-      tool: app,
-      path,
-      status: "preview",
-      writeEnabled: true,
-      changes: [
-        {
-          key: "GEMINI_API_KEY",
-          action: "add",
-          before: null,
-          after: secret,
-          detail: "Stores the selected Provider API key for Gemini CLI."
-        },
-        {
-          key: "GOOGLE_GEMINI_BASE_URL",
-          action: "update",
-          before: "https://generativelanguage.googleapis.com",
-          after: profile.baseUrl,
-          detail: "Points Gemini CLI at the selected upstream Provider Base URL."
-        },
-        {
-          key: "GEMINI_MODEL",
-          action: model ? "update" : "remove",
-          before: "gemini-2.5-pro",
-          after: model || null,
-          detail: model ? "Sets Gemini CLI to the selected upstream model." : "Model is optional; no Gemini model override will be written."
-        }
-      ],
-      warnings: [
-        "Gemini CLI reads API key and base URL from environment variables, so this adapter writes ~/.gemini/.env.",
-        "Restart Gemini CLI or open a new terminal session after applying so environment variables reload."
-      ]
-    };
-  }
-
   if (app === "gemini-code-assist") {
     return {
       tool: app,
@@ -885,39 +842,6 @@ function mockNonCodexOfficialNativeConfigPreview(
       warnings: [
         "Official provider restores Claude Code to its own login.",
         "CodeStudio Lite removes managed API or Gateway fields from Claude settings."
-      ]
-    };
-  }
-
-  if (app === "gemini") {
-    return {
-      ...base,
-      changes: [
-        {
-          key: "GEMINI_API_KEY",
-          action: "remove",
-          before: "<redacted>",
-          after: null,
-          detail: "Removes the CodeStudio Lite managed Gemini API key."
-        },
-        {
-          key: "GOOGLE_GEMINI_BASE_URL",
-          action: "remove",
-          before: "https://api.example.test/v1",
-          after: null,
-          detail: "Restores Gemini CLI to the client's own official endpoint."
-        },
-        {
-          key: "GEMINI_MODEL",
-          action: "remove",
-          before: "gemini-2.5-pro",
-          after: null,
-          detail: "Removes the CodeStudio Lite managed model override."
-        }
-      ],
-      warnings: [
-        "Official provider restores Gemini CLI to its own login.",
-        "CodeStudio Lite removes managed API or Gateway values from ~/.gemini/.env."
       ]
     };
   }
@@ -1322,43 +1246,6 @@ function mockNonCodexGatewayNativeConfigPreview(
     };
   }
 
-  if (app === "gemini") {
-    return {
-      tool: app,
-      path,
-      status: "preview",
-      writeEnabled: true,
-      changes: [
-        {
-          key: "GEMINI_API_KEY",
-          action: "add",
-          before: null,
-          after: localToken,
-          detail: "Stores only the local CodeStudio token, not the real upstream Provider API key."
-        },
-        {
-          key: "GOOGLE_GEMINI_BASE_URL",
-          action: "update",
-          before: "https://generativelanguage.googleapis.com",
-          after: gatewayBaseUrl,
-          detail: "Points Gemini CLI at the tool-scoped CodeStudio Lite Local Gateway."
-        },
-        {
-          key: "GEMINI_MODEL",
-          action: "update",
-          before: "gemini-2.5-pro",
-          after: localModel,
-          detail: "Sets Gemini CLI to the virtual model name resolved by the Local Gateway."
-        }
-      ],
-      warnings: [
-        "Gateway profiles write Gemini CLI environment values to the tool-scoped local gateway URL.",
-        "Restart Gemini CLI or open a new terminal session after applying so environment variables reload.",
-        ...commonWarnings
-      ]
-    };
-  }
-
   if (app === "opencode") {
     return {
       tool: app,
@@ -1696,5 +1583,3 @@ export function mockModePreviews(
     }
   ];
 }
-
-

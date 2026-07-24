@@ -6,7 +6,6 @@ const BUILTIN_DEFINITIONS = [
   ["codex", "Codex Official", "openai-responses"],
   ["claude-desktop", "Claude Desktop Official", "anthropic-messages"],
   ["claude", "Claude Code Official", "anthropic-messages"],
-  ["gemini", "Gemini CLI Official", "google-gemini"],
   ["gemini-code-assist", "Gemini Code Assist Official", "google-gemini"],
   ["opencode", "OpenCode Official", "openai-chat-completions"],
   ["openclaw", "OpenClaw Official", "openai-chat-completions"],

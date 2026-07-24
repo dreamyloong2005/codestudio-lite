@@ -41,14 +41,6 @@ const PROFILE_CAPABILITIES: &[ProfileCapabilities] = &[
         supports_model_mappings: true,
     },
     ProfileCapabilities {
-        id: "gemini",
-        display_name: "Gemini CLI",
-        official_protocol: GOOGLE_GEMINI,
-        config_protocols: &[GOOGLE_GEMINI],
-        supports_review_model: false,
-        supports_model_mappings: false,
-    },
-    ProfileCapabilities {
         id: "gemini-code-assist",
         display_name: "Gemini Code Assist",
         official_protocol: GOOGLE_GEMINI,
@@ -117,7 +109,7 @@ pub fn canonical_tool_id(value: &str) -> String {
         "claude" | "claude-code" | "claude-vscode" | "claude-code-vscode" | "claude-vs-code" => {
             "claude".to_string()
         }
-        "gemini" | "gemini-cli" => "gemini".to_string(),
+        "antigravity" | "antigravity-cli" | "agy" => "antigravity".to_string(),
         "gemini-code-assist" | "gemini-vscode" | "gemini-code-vscode" | "gemini-vs-code" => {
             "gemini-code-assist".to_string()
         }
@@ -167,7 +159,7 @@ mod tests {
             ("codex-vscode", "codex"),
             ("claude-app", "claude-desktop"),
             ("claude-vscode", "claude"),
-            ("gemini-cli", "gemini"),
+            ("agy", "antigravity"),
             ("gemini-vscode", "gemini-code-assist"),
             ("open-code", "opencode"),
             ("open-claw", "openclaw"),
@@ -177,7 +169,11 @@ mod tests {
         ];
         for (alias, expected) in cases {
             assert_eq!(canonical_tool_id(alias), expected);
-            assert_eq!(canonical_profile_tool_id(alias).as_deref(), Some(expected));
+            if expected == "antigravity" {
+                assert_eq!(canonical_profile_tool_id(alias), None);
+            } else {
+                assert_eq!(canonical_profile_tool_id(alias).as_deref(), Some(expected));
+            }
         }
     }
 

@@ -15,11 +15,12 @@ const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "
 test("profile catalog centralizes aliases and capabilities", () => {
   assert.equal(canonicalProfileToolId("chatgpt-desktop"), "codex");
   assert.equal(canonicalProfileToolId("claude-vscode"), "claude");
-  assert.equal(canonicalProfileToolId("gemini-cli"), "gemini");
+  assert.equal(canonicalProfileToolId("antigravity-cli"), "antigravity");
   assert.equal(canonicalProfileToolId("open-code"), "opencode");
   assert.equal(canonicalProfileToolId("pi-coding-agent"), "pi");
 
-  assert.equal(PROFILE_TOOL_CATALOG.length, 10);
+  assert.equal(PROFILE_TOOL_CATALOG.length, 9);
+  assert.equal(PROFILE_TOOL_CATALOG.some((tool) => tool.id === "antigravity"), false);
   assert.deepEqual(configProtocolIdsForTool("codex"), ["openai-chat-completions", "openai-responses"]);
   assert.equal(profileSupportsConfigProtocol("grok", "anthropic-messages"), true);
   assert.equal(profileSupportsConfigProtocol("codex", "anthropic-messages"), false);

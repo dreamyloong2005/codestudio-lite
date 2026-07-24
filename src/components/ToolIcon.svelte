@@ -8,7 +8,7 @@
   export let category: "ai_tool" | "system" | string | null | undefined = null;
   export let variant: "card" | "choice" | "heading" = "card";
 
-  type ToolIconTone = "default" | "light" | "codex" | "claude" | "gemini" | "openclaw" | "vscode" | "chatgpt-desktop-current" | "chatgpt-desktop-legacy" | "hermes" | "grok" | "pi";
+  type ToolIconTone = "default" | "light" | "codex" | "claude" | "antigravity" | "openclaw" | "vscode" | "chatgpt-desktop-current" | "chatgpt-desktop-legacy" | "hermes" | "grok" | "pi";
 
   type IconDef = {
     src: string;
@@ -21,7 +21,7 @@
     claude: { src: "/tool-icons/claude-code.svg", tone: "claude" },
     "claude-desktop": { src: "/tool-icons/claude-desktop.svg", tone: "claude" },
     "claude-vscode": { src: "/tool-icons/claude-vscode.svg", tone: "vscode" },
-    gemini: { src: "/tool-icons/gemini-cli.svg", tone: "gemini" },
+    antigravity: { src: "/tool-icons/antigravity.png", tone: "antigravity" },
     "gemini-code-assist": { src: "/tool-icons/gemini-code-assist.svg", tone: "vscode" },
     opencode: { src: "/tool-icons/opencode.svg", tone: "light" },
     openclaw: { src: "/tool-icons/openclaw.svg", tone: "openclaw" },
@@ -76,9 +76,10 @@
       case "pi-agent":
       case "pi-coding-agent":
         return "pi";
-      case "gemini":
-      case "gemini-cli":
-        return "gemini";
+      case "antigravity":
+      case "antigravity-cli":
+      case "agy":
+        return "antigravity";
       case "gemini-code-assist":
       case "gemini-vscode":
       case "gemini-code-vscode":

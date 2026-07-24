@@ -245,12 +245,6 @@ fn official_non_codex_configs_match_when_not_managed() {
     assert!(sync_native_config_profile(
         &mut test_app_config(),
         &drafts,
-        "gemini",
-        |profile| gemini_env_matches_profile(&HashMap::new(), profile)
-    ));
-    assert!(sync_native_config_profile(
-        &mut test_app_config(),
-        &drafts,
         "gemini-code-assist",
         |profile| { gemini_code_assist_settings_match_profile(&serde_json::json!({}), profile) }
     ));
@@ -310,18 +304,6 @@ fn official_non_codex_configs_do_not_match_managed_values() {
             &serde_json::json!({ "env": { "ANTHROPIC_BASE_URL": "https://example.test" } }),
             profile,
         )
-    ));
-    assert!(!sync_native_config_profile(
-        &mut test_app_config(),
-        &drafts,
-        "gemini",
-        |profile| {
-            let env = HashMap::from([(
-                "GOOGLE_GEMINI_BASE_URL".to_string(),
-                "https://example.test".to_string(),
-            )]);
-            gemini_env_matches_profile(&env, profile)
-        }
     ));
     assert!(!sync_native_config_profile(
         &mut test_app_config(),
@@ -1348,35 +1330,6 @@ fn non_codex_native_config_matching_requires_same_api_key_for_same_endpoint() {
         false,
     ));
 
-    let mut gemini_profile = test_profile("gemini", ProviderApplyMode::Config);
-    gemini_profile.provider = "gemini-compatible".to_string();
-    gemini_profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
-    gemini_profile.model = "gemini-3-pro".to_string();
-    gemini_profile.base_url = "https://generativelanguage.googleapis.com/v1beta".to_string();
-    gemini_profile.auth_ref = Some("keychain:test/gemini-same-url/api_key".to_string());
-    store_test_profile_secret(&gemini_profile, "sk-gemini-old");
-    let gemini_old_env = HashMap::from([
-        (
-            "GOOGLE_GEMINI_BASE_URL".to_string(),
-            "https://generativelanguage.googleapis.com/v1beta".to_string(),
-        ),
-        ("GEMINI_API_KEY".to_string(), "sk-gemini-old".to_string()),
-        ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
-    ]);
-    assert!(gemini_env_matches_profile(&gemini_old_env, &gemini_profile));
-    let gemini_new_env = HashMap::from([
-        (
-            "GOOGLE_GEMINI_BASE_URL".to_string(),
-            "https://generativelanguage.googleapis.com/v1beta".to_string(),
-        ),
-        ("GEMINI_API_KEY".to_string(), "sk-gemini-new".to_string()),
-        ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
-    ]);
-    assert!(!gemini_env_matches_profile(
-        &gemini_new_env,
-        &gemini_profile
-    ));
-
     let mut code_assist_profile = test_profile("gemini-code-assist", ProviderApplyMode::Config);
     code_assist_profile.provider = "gemini-compatible".to_string();
     code_assist_profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
@@ -1588,18 +1541,6 @@ fn direct_config_runtime_base_url_does_not_add_v1_for_non_openai_protocols() {
         json_string_lookup(&claude_value, &["env", "ANTHROPIC_BASE_URL"]).as_deref(),
         Some("https://api.anthropic.test/")
     );
-
-    let mut gemini_profile = test_profile("gemini", ProviderApplyMode::Config);
-    gemini_profile.provider = "gemini-compatible".to_string();
-    gemini_profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
-    gemini_profile.base_url = "https://generativelanguage.googleapis.com".to_string();
-    let gemini_config = gemini_env_content_with_api_key("", &gemini_profile, "gemini-test-key")
-        .expect("Gemini env should render");
-    let gemini_env = parse_env_content(&gemini_config);
-    assert_eq!(
-        gemini_env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
-        Some("https://generativelanguage.googleapis.com/")
-    );
 }
 
 #[test]
@@ -1777,15 +1718,6 @@ fn gateway_configs_use_profile_model_instead_of_legacy_default_model() {
     assert!(claude.contains("gpt-5.5"));
     assert!(!claude.contains("codestudio-default"));
 
-    profile.app = "gemini".to_string();
-    let gemini = gemini_gateway_env_content("", &profile).expect("Gemini env");
-    let gemini_env = parse_env_content(&gemini);
-    assert_eq!(
-        gemini_env.get("GEMINI_MODEL").map(String::as_str),
-        Some("gpt-5.5")
-    );
-    assert!(!gemini.contains("codestudio-default"));
-
     profile.app = "opencode".to_string();
     let opencode = opencode_gateway_config_content("{}", &profile).expect("OpenCode config");
     assert!(opencode.contains("custom/gpt-5.5"));
@@ -1877,18 +1809,6 @@ wire_api = "responses"
     )
     .expect("config should parse");
     assert!(detect_codex_native_profile(&gateway).is_none());
-
-    let env = HashMap::from([
-        (
-            "GOOGLE_GEMINI_BASE_URL".to_string(),
-            "http://127.0.0.1:43112/tools/gemini".to_string(),
-        ),
-        (
-            "GEMINI_API_KEY".to_string(),
-            "codestudio-local-token".to_string(),
-        ),
-    ]);
-    assert!(detect_gemini_native_profile(&env).is_none());
 }
 
 #[test]
@@ -1906,19 +1826,6 @@ fn detects_json_env_native_profiles() {
     assert_eq!(detected.model, "claude-sonnet-4-6");
     assert_eq!(detected.base_url, "https://api.anthropic.test/v1");
     assert_eq!(detected.api_key, "sk-claude");
-
-    let gemini = HashMap::from([
-        (
-            "GOOGLE_GEMINI_BASE_URL".to_string(),
-            "https://generativelanguage.googleapis.com/v1beta".to_string(),
-        ),
-        ("GEMINI_API_KEY".to_string(), "sk-gemini".to_string()),
-        ("GEMINI_MODEL".to_string(), "gemini-3-pro".to_string()),
-    ]);
-    let detected = detect_gemini_native_profile(&gemini).expect("gemini profile");
-    assert_eq!(detected.app, "gemini");
-    assert_eq!(detected.protocol, PROTOCOL_GOOGLE_GEMINI);
-    assert_eq!(detected.model, "gemini-3-pro");
 
     let gemini_code_assist =
         serde_json::json!({ GEMINI_CODE_ASSIST_API_KEY_SETTING: "sk-code-assist" });
@@ -2463,13 +2370,6 @@ fn native_config_paths_route_supported_tools() {
         Some(paths.home_dir.join(".codex").join("config.toml"))
     );
 
-    profile.app = "gemini".to_string();
-    assert_eq!(
-        native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
-            .expect("gateway path should resolve"),
-        Some(paths.home_dir.join(".gemini").join(".env"))
-    );
-
     profile.app = "openclaw".to_string();
     assert_eq!(
         native_config_path_for_profile_mode(&profile, &paths, ProviderApplyMode::Gateway)
@@ -2783,45 +2683,6 @@ fn official_claude_config_preview_includes_restore_content() {
 }
 
 #[test]
-fn unchanged_native_preview_is_not_write_enabled() {
-    let paths = test_paths();
-    let mut profile = test_profile("gemini", ProviderApplyMode::Config);
-    profile.provider = "official".to_string();
-    profile.auth_ref = None;
-    profile.protocol = PROTOCOL_GOOGLE_GEMINI.to_string();
-
-    let preview = build_native_config_preview(&profile, None, &paths, ProviderApplyMode::Config)
-        .expect("preview should build");
-    let preview =
-        attach_native_config_content_preview(preview, &profile, &paths, ProviderApplyMode::Config)
-            .expect("preview should be available");
-
-    assert!(!preview.write_enabled);
-    assert!(preview.changes.is_empty());
-    assert!(preview.content.is_none());
-}
-
-#[test]
-fn unchanged_native_apply_plan_is_filtered_out() {
-    let paths = test_paths();
-    let profile = test_profile("gemini", ProviderApplyMode::Gateway);
-    let plans = build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Gateway, false)
-        .expect("plan should build");
-    assert_eq!(plans.len(), 1);
-
-    let path = plans[0].path.clone();
-    fs::create_dir_all(path.parent().expect("env parent")).expect("env parent should be created");
-    fs::write(&path, &plans[0].content).expect("env content should be written");
-
-    let plans = filter_native_write_plans(
-        build_native_apply_plan(&profile, &paths, &ProviderApplyMode::Gateway, false)
-            .expect("plan should rebuild"),
-    )
-    .expect("plans should filter");
-    assert!(plans.is_empty());
-}
-
-#[test]
 fn codex_direct_apply_plan_writes_auth_json_before_config() {
     let paths = test_paths();
     let auth_path = codex_auth_json_path(&paths);
@@ -3000,35 +2861,6 @@ fn codex_gateway_apply_plan_writes_local_token_to_auth_json_before_config() {
 }
 
 #[test]
-fn gemini_env_update_preserves_unrelated_values_and_removes_empty_model() {
-    let current = "# user note\nOTHER=1\nGEMINI_MODEL=\"old\"\n";
-    let updated = update_env_content(
-        current,
-        &[
-            ("GEMINI_API_KEY", Some("secret-key".to_string())),
-            (
-                "GOOGLE_GEMINI_BASE_URL",
-                Some("https://example.test/v1".to_string()),
-            ),
-            ("GEMINI_MODEL", None),
-        ],
-    );
-    let env = parse_env_content(&updated);
-
-    assert!(updated.contains("# user note"));
-    assert_eq!(env.get("OTHER").map(String::as_str), Some("1"));
-    assert_eq!(
-        env.get("GEMINI_API_KEY").map(String::as_str),
-        Some("secret-key")
-    );
-    assert_eq!(
-        env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
-        Some("https://example.test/v1")
-    );
-    assert!(!env.contains_key("GEMINI_MODEL"));
-}
-
-#[test]
 fn json5_preview_parser_accepts_comments() {
     let value = parse_json5_or_empty(
         r#"
@@ -3102,13 +2934,6 @@ fn builtin_official_profiles_use_tool_native_protocols() {
             .iter()
             .any(|profile| profile.app == "claude-vscode"),
         false
-    );
-    assert_eq!(
-        profiles
-            .iter()
-            .find(|profile| profile.app == "gemini")
-            .map(|profile| profile.protocol.as_str()),
-        Some(PROTOCOL_GOOGLE_GEMINI)
     );
     assert_eq!(
         profiles
@@ -3377,7 +3202,7 @@ fn replace_deleted_active_profile_uses_official_for_config_mode() {
     config
         .active_profiles_by_mode
         .gateway
-        .insert("gemini".to_string(), "keep-me".to_string());
+        .insert("hermes".to_string(), "keep-me".to_string());
 
     assert!(replace_deleted_active_profile_with_official(
         &mut config,
@@ -3390,7 +3215,7 @@ fn replace_deleted_active_profile_uses_official_for_config_mode() {
     );
     assert!(!config.active_profiles_by_mode.gateway.contains_key("codex"));
     assert_eq!(
-        config.active_profiles_by_mode.gateway.get("gemini"),
+        config.active_profiles_by_mode.gateway.get("hermes"),
         Some(&"keep-me".to_string())
     );
 }

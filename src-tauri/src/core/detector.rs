@@ -45,6 +45,10 @@ const WINGET_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CLAUDE_DESKTOP_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const CHATGPT_DESKTOP_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(1);
 const FOREGROUND_UPDATE_WAIT_BUDGET: Duration = Duration::from_millis(6000);
+const ANTIGRAVITY_WINDOWS_INSTALL_COMMAND: &str =
+    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://antigravity.google/cli/install.ps1 | iex\"";
+const ANTIGRAVITY_UNIX_INSTALL_COMMAND: &str =
+    "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 const CLAUDE_DESKTOP_INSTALL_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(target_os = "windows")]
@@ -1500,7 +1504,6 @@ fn npm_package_for_tool(tool_id: &str) -> Option<&'static str> {
     match tool_id {
         "codex" => Some("@openai/codex"),
         "claude" => Some("@anthropic-ai/claude-code"),
-        "gemini" => Some("@google/gemini-cli"),
         "opencode" => Some("opencode-ai"),
         "openclaw" => Some("openclaw"),
         "pi" => Some("@earendil-works/pi-coding-agent"),
@@ -1537,7 +1540,10 @@ fn update_command_for_tool(tool_id: &str) -> Option<String> {
         "claude-vscode" => {
             Some("code --install-extension anthropic.claude-code --force".to_string())
         }
-        "gemini" => Some(npm_global_update_command("@google/gemini-cli")),
+        "antigravity" if cfg!(target_os = "windows") => {
+            Some(ANTIGRAVITY_WINDOWS_INSTALL_COMMAND.to_string())
+        }
+        "antigravity" => Some(ANTIGRAVITY_UNIX_INSTALL_COMMAND.to_string()),
         "gemini-code-assist" => {
             Some("code --install-extension Google.geminicodeassist --force".to_string())
         }

@@ -65,14 +65,14 @@ pub fn ai_tools() -> Vec<ToolDefinition> {
             install_command: Some("code --install-extension anthropic.claude-code"),
         },
         ToolDefinition {
-            id: "gemini",
-            name: "Gemini CLI",
+            id: "antigravity",
+            name: "Antigravity CLI",
             category: ToolCategory::AiTool,
-            command: "gemini",
+            command: "agy",
             version_args: &["--version"],
             version_output_contains: None,
-            config_relative_path: Some(".gemini"),
-            install_command: Some("npm install -g @google/gemini-cli"),
+            config_relative_path: Some(".gemini/antigravity-cli"),
+            install_command: antigravity_install_command(),
         },
         ToolDefinition {
             id: "gemini-code-assist",
@@ -226,6 +226,8 @@ fn claude_desktop_install_command() -> Option<&'static str> {
 
 const HERMES_UNIX_INSTALL_COMMAND: &str =
     "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash";
+const ANTIGRAVITY_UNIX_INSTALL_COMMAND: &str =
+    "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 const BUN_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://bun.sh/install | bash";
 const GIT_MACOS_COMMAND_LINE_TOOLS_INSTALL_COMMAND: &str = "xcode-select --install";
 const NODE_MACOS_OFFICIAL_PKG_INSTALL_COMMAND: &str = r#"set -e; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; version="$(curl -fsSL https://nodejs.org/dist/index.json | grep -m 1 '"lts":"[^"]*"' | sed -E 's/.*"version":"([^"]+)".*/\1/')"; if [ -z "$version" ]; then echo "Unable to resolve latest Node.js LTS version." >&2; exit 1; fi; pkg="$tmp/node-$version.pkg"; curl -fL "https://nodejs.org/dist/$version/node-$version.pkg" -o "$pkg"; sudo installer -pkg "$pkg" -target /"#;
@@ -239,6 +241,16 @@ fn hermes_install_command() -> Option<&'static str> {
         Some(HERMES_UNIX_INSTALL_COMMAND)
     } else {
         Some(HERMES_UNIX_INSTALL_COMMAND)
+    }
+}
+
+fn antigravity_install_command() -> Option<&'static str> {
+    if cfg!(target_os = "windows") {
+        Some(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://antigravity.google/cli/install.ps1 | iex\"",
+        )
+    } else {
+        Some(ANTIGRAVITY_UNIX_INSTALL_COMMAND)
     }
 }
 

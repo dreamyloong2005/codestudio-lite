@@ -1,7 +1,6 @@
 pub(in crate::core::profile) mod claude;
 pub(in crate::core::profile) mod claude_desktop;
 pub(in crate::core::profile) mod codex;
-pub(in crate::core::profile) mod gemini;
 pub(in crate::core::profile) mod gemini_code_assist;
 pub(in crate::core::profile) mod grok;
 pub(in crate::core::profile) mod hermes;
@@ -74,7 +73,6 @@ pub(in crate::core::profile) fn adapter(
     match tool_id {
         "claude" => Some(&claude::CLAUDE_ADAPTER),
         "codex" => Some(&codex::CODEX_ADAPTER),
-        "gemini" => Some(&gemini::GEMINI_ADAPTER),
         "gemini-code-assist" => Some(&gemini_code_assist::GEMINI_CODE_ASSIST_ADAPTER),
         "grok" => Some(&grok::GROK_ADAPTER),
         "hermes" => Some(&hermes::HERMES_ADAPTER),

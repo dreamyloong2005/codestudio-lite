@@ -71,8 +71,6 @@ use native::codex::{
     CODEX_ACTOR_AUTHORIZATION_INLINE_TOML, CODEX_ACTOR_AUTHORIZATION_VALUE,
 };
 #[cfg(test)]
-use native::gemini::*;
-#[cfg(test)]
 use native::gemini_code_assist::*;
 #[cfg(test)]
 use native::grok::*;
@@ -179,7 +177,7 @@ use native::claude_desktop::{
     safe_model_id as claude_desktop_safe_model_id,
     InferenceModelSpec as ClaudeDesktopInferenceModelSpec, PROFILE_ID as CLAUDE_DESKTOP_PROFILE_ID,
 };
-const BUILTIN_OFFICIAL_PROFILES: [(&str, &str, &str); 10] = [
+const BUILTIN_OFFICIAL_PROFILES: [(&str, &str, &str); 9] = [
     ("codex", "Codex Official", PROTOCOL_OPENAI_RESPONSES),
     (
         "claude-desktop",
@@ -191,7 +189,6 @@ const BUILTIN_OFFICIAL_PROFILES: [(&str, &str, &str); 10] = [
         "Claude Code Official",
         PROTOCOL_ANTHROPIC_MESSAGES,
     ),
-    ("gemini", "Gemini CLI Official", PROTOCOL_GOOGLE_GEMINI),
     (
         "gemini-code-assist",
         "Gemini Code Assist Official",
@@ -1381,7 +1378,7 @@ fn native_config_path_for_profile_mode(
     }
     if mode == ProviderApplyMode::Gateway {
         return match canonical_profile_app(&profile.app).as_str() {
-            "codex" | "claude-desktop" | "claude" | "gemini" => {
+            "codex" | "claude-desktop" | "claude" => {
                 native_config_path_for_profile(profile, paths).map(Some)
             }
             _ => Ok(None),
@@ -1394,7 +1391,7 @@ fn native_config_path_for_profile_mode(
 
     if provider_is_official(&profile.provider) && !is_codex_family_app(&profile.app) {
         return match canonical_profile_app(&profile.app).as_str() {
-            "claude" | "gemini" | "gemini-code-assist" => {
+            "claude" | "gemini-code-assist" => {
                 native_config_path_for_profile(profile, paths).map(Some)
             }
             _ => Ok(None),
@@ -1973,114 +1970,6 @@ fn redacted_yaml_value(value: &serde_norway::Value) -> String {
     }
 }
 
-fn update_env_content(current: &str, updates: &[(&str, Option<String>)]) -> String {
-    let mut seen = HashSet::new();
-    let mut output = Vec::new();
-
-    for line in current.lines() {
-        if let Some(key) = parse_env_assignment_key(line) {
-            if let Some((_, value)) = updates.iter().find(|(candidate, _)| *candidate == key) {
-                seen.insert(key.clone());
-                if let Some(value) = value {
-                    output.push(format!("{}={}", key, quote_env_value(value)));
-                }
-                continue;
-            }
-        }
-        output.push(line.to_string());
-    }
-
-    for (key, value) in updates {
-        if seen.contains(*key) {
-            continue;
-        }
-        if let Some(value) = value {
-            output.push(format!("{}={}", key, quote_env_value(value)));
-        }
-    }
-
-    if output.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", output.join("\n"))
-    }
-}
-
-fn parse_env_assignment_key(line: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return None;
-    }
-    let (key, _) = trimmed.split_once('=')?;
-    let key = key.trim();
-    if key.is_empty()
-        || !key
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-    {
-        return None;
-    }
-    Some(key.to_string())
-}
-
-fn quote_env_value(value: &str) -> String {
-    format!(
-        "\"{}\"",
-        value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-    )
-}
-
-fn parse_env_content(content: &str) -> HashMap<String, String> {
-    let mut values = HashMap::new();
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            continue;
-        }
-        values.insert(key.to_string(), unquote_env_value(value.trim()));
-    }
-    values
-}
-
-fn unquote_env_value(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        let mut output = String::new();
-        let mut chars = inner.chars();
-        while let Some(character) = chars.next() {
-            if character != '\\' {
-                output.push(character);
-                continue;
-            }
-            match chars.next() {
-                Some('n') => output.push('\n'),
-                Some('r') => output.push('\r'),
-                Some('"') => output.push('"'),
-                Some('\\') => output.push('\\'),
-                Some(other) => output.push(other),
-                None => output.push('\\'),
-            }
-        }
-        output
-    } else if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn build_native_config_preview(
     profile: &ProfileDraft,
     native_config_path: Option<&str>,
@@ -2152,22 +2041,6 @@ fn read_json_preview(
             ))
         }
     }
-}
-
-fn read_env_preview(
-    path: &Path,
-    warnings: &mut Vec<String>,
-) -> Result<(HashMap<String, String>, String), String> {
-    if !path.exists() {
-        warnings.push(
-            "Gemini environment file does not exist yet; adapter would create it after confirmation."
-                .to_string(),
-        );
-        return Ok((HashMap::new(), "missing".to_string()));
-    }
-
-    let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    Ok((parse_env_content(&content), "parsed".to_string()))
 }
 
 fn read_yaml_preview(
@@ -2252,45 +2125,6 @@ fn json_diff_remove_line(
     diff_value_line(
         path.join("."),
         json_lookup(root, path).map(redacted_json_value),
-        None,
-        detail,
-    )
-}
-
-fn env_diff_line(
-    env: &HashMap<String, String>,
-    key: &str,
-    after: &str,
-    detail: &str,
-) -> NativeConfigDiffLine {
-    diff_value_line(
-        key.to_string(),
-        env.get(key).map(|value| {
-            if looks_sensitive(value) {
-                "<redacted>".to_string()
-            } else {
-                value.clone()
-            }
-        }),
-        Some(after.to_string()),
-        detail,
-    )
-}
-
-fn env_diff_remove_line(
-    env: &HashMap<String, String>,
-    key: &str,
-    detail: &str,
-) -> NativeConfigDiffLine {
-    diff_value_line(
-        key.to_string(),
-        env.get(key).map(|value| {
-            if looks_sensitive(value) {
-                "<redacted>".to_string()
-            } else {
-                value.clone()
-            }
-        }),
         None,
         detail,
     )

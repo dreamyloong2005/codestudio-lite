@@ -113,7 +113,7 @@ fn profile_env(profile: &ProfileDraft) -> Result<Vec<(String, String)>, String> 
             push_non_empty(&mut env, "ANTHROPIC_BASE_URL", &profile.base_url);
             push_non_empty(&mut env, "ANTHROPIC_MODEL", &profile.model);
         }
-        "gemini" | "gemini-code-assist" => {
+        "gemini-code-assist" => {
             push_non_empty(&mut env, "GEMINI_API_KEY", &secret);
             push_non_empty(&mut env, "GOOGLE_GEMINI_BASE_URL", &profile.base_url);
             push_non_empty(&mut env, "GEMINI_MODEL", &profile.model);
@@ -142,6 +142,7 @@ fn push_non_empty(env: &mut Vec<(String, String)>, key: &str, value: &str) {
 fn launch_command_for_tool(tool_id: &str, command: &str) -> String {
     match tool_id {
         "codex-vscode" | "claude-vscode" | "gemini-code-assist" => "code".to_string(),
+        "antigravity" => "agy".to_string(),
         "claude-desktop" if cfg!(target_os = "macos") => "open -a Claude".to_string(),
         "claude-desktop" => claude_desktop_patch::base_launch_command(tool_id, "Claude"),
         _ => command.to_string(),
@@ -404,7 +405,6 @@ mod tests {
 
     const PROTOCOL_OPENAI_RESPONSES: &str = "openai-responses";
     const PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
-    const PROTOCOL_GOOGLE_GEMINI: &str = "google-gemini";
 
     fn test_profile(app: &str, protocol: &str) -> ProfileDraft {
         ProfileDraft {
@@ -447,17 +447,6 @@ mod tests {
             env.get("CODESTUDIO_PROFILE_PROVIDER").map(String::as_str),
             Some("apikey.fun")
         );
-    }
-
-    #[test]
-    fn profile_env_maps_gemini_to_gemini_variables() {
-        let env = env_map(profile_env(&test_profile("gemini", PROTOCOL_GOOGLE_GEMINI)).unwrap());
-
-        assert_eq!(
-            env.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
-            Some("https://api.example.test/v1")
-        );
-        assert_eq!(env.get("GEMINI_MODEL").map(String::as_str), Some("model-a"));
     }
 
     #[test]

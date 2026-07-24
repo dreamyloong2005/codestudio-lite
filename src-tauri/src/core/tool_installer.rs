@@ -44,10 +44,6 @@ enum InstallAction {
         destination: &'static str,
     },
     ClaudeDesktopWindowsMsix,
-    // Reserved install action for a bundled PowerShell script. The match arms
-    // across plan/run/preview already handle it; no tool currently constructs
-    // it, so it is intentionally dead until a tool opts in.
-    #[allow(dead_code)]
     PowerShellScript(&'static str, &'static str),
     ShellScript(&'static str, &'static str),
     InteractiveShellScript(&'static str, &'static str),
@@ -862,7 +858,19 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
             }
         }
         "claude-vscode" => InstallAction::VsCodeExtension("anthropic.claude-code"),
-        "gemini" => InstallAction::NpmGlobal("@google/gemini-cli"),
+        "antigravity" => {
+            if cfg!(target_os = "windows") {
+                InstallAction::PowerShellScript(
+                    "Antigravity CLI official install script",
+                    ANTIGRAVITY_WINDOWS_INSTALL_SCRIPT,
+                )
+            } else {
+                InstallAction::ShellScript(
+                    "Antigravity CLI official install script",
+                    ANTIGRAVITY_UNIX_INSTALL_SCRIPT,
+                )
+            }
+        }
         "gemini-code-assist" => InstallAction::VsCodeExtension("Google.geminicodeassist"),
         "opencode" => InstallAction::NpmGlobal("opencode-ai"),
         "openclaw" => InstallAction::NpmGlobal("openclaw"),
@@ -1979,6 +1987,10 @@ const CLAUDE_DESKTOP_MACOS_BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
 const CLAUDE_DESKTOP_MACOS_DESTINATION: &str = "/Applications/Claude.app";
 const HERMES_UNIX_INSTALL_COMMAND: &str =
     "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash";
+const ANTIGRAVITY_WINDOWS_INSTALL_SCRIPT: &str =
+    "irm https://antigravity.google/cli/install.ps1 | iex";
+const ANTIGRAVITY_UNIX_INSTALL_SCRIPT: &str =
+    "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 const GROK_WINDOWS_INSTALL_COMMAND: &str = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://x.ai/cli/install.ps1 | iex\"";
 const GROK_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://x.ai/cli/install.sh | bash";
 const BUN_UNIX_INSTALL_COMMAND: &str = "curl -fsSL https://bun.sh/install | bash";
@@ -3809,9 +3821,9 @@ fn update_process_targets(tool_id: &str) -> UpdateProcessTargets {
             },
             command_line_markers: vec!["@anthropic-ai/claude-code"],
         },
-        "gemini" => UpdateProcessTargets {
-            process_names: vec!["gemini"],
-            command_line_markers: vec!["@google/gemini-cli"],
+        "antigravity" => UpdateProcessTargets {
+            process_names: vec!["agy", "antigravity"],
+            command_line_markers: vec!["antigravity-cli"],
         },
         "opencode" => UpdateProcessTargets {
             process_names: vec!["opencode"],

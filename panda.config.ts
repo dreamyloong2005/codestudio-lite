@@ -723,7 +723,7 @@ export default defineConfig({
               height: "22px",
               objectFit: "contain"
             },
-            "&[data-tool-icon-tone='gemini'] img, &[data-tool-icon-tone='openclaw'] img": {
+            "&[data-tool-icon-tone='antigravity'] img, &[data-tool-icon-tone='openclaw'] img": {
               width: "30px",
               height: "30px",
               borderRadius: "7px"
@@ -772,7 +772,7 @@ export default defineConfig({
                   width: "18px",
                   height: "18px"
                 },
-                "&[data-tool-icon-tone='gemini'] img, &[data-tool-icon-tone='openclaw'] img": {
+                "&[data-tool-icon-tone='antigravity'] img, &[data-tool-icon-tone='openclaw'] img": {
                   width: "23px",
                   height: "23px",
                   borderRadius: "5px"
@@ -812,7 +812,7 @@ export default defineConfig({
                   width: "20px",
                   height: "20px"
                 },
-                "&[data-tool-icon-tone='gemini'] img, &[data-tool-icon-tone='openclaw'] img": {
+                "&[data-tool-icon-tone='antigravity'] img, &[data-tool-icon-tone='openclaw'] img": {
                   width: "24px",
                   height: "24px"
                 },
@@ -852,7 +852,7 @@ export default defineConfig({
               claude: {
                 background: "color-mix(in srgb, #d97757 12%, var(--surface-soft))"
               },
-              gemini: {
+              antigravity: {
                 background: "var(--surface-soft)"
               },
               openclaw: {

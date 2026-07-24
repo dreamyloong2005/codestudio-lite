@@ -1311,7 +1311,7 @@ let mockChatGPTDesktopSettings: ChatGPTDesktopSettings = {
 
 let mockChatGPTDesktopInstalled: ChatGPTDesktopState["installed"] = null;
 
-let mockInstalledToolIds = new Set<string>(["codex", "claude", "gemini", "node", "git", "npm"]);
+let mockInstalledToolIds = new Set<string>(["codex", "claude", "antigravity", "node", "git", "npm"]);
 let mockUpdatedToolIds = new Set<string>();
 const mockVsCodeAvailable = false;
 const mockVsCodePluginToolIds = new Set(["codex-vscode", "claude-vscode", "gemini-code-assist"]);
@@ -1333,7 +1333,7 @@ const mockInitialToolVersions: Record<string, string> = {
   "claude-desktop": "installed",
   claude: "2.1.126",
   "claude-vscode": "anthropic.claude-code@1.0.0",
-  gemini: "0.4.1",
+  antigravity: "1.0.0",
   "gemini-code-assist": "google.geminicodeassist@1.0.0",
   opencode: "1.17.4",
   openclaw: "2026.6.6",
@@ -1374,10 +1374,10 @@ const mockToolUpdates: Record<string, { latestVersion: string; command: string; 
     installedVersion: "anthropic.claude-code@1.1.0",
     command: "code --install-extension anthropic.claude-code --force"
   },
-  gemini: {
-    latestVersion: "0.4.2",
-    installedVersion: "0.4.2",
-    command: "npm install -g @google/gemini-cli@latest"
+  antigravity: {
+    latestVersion: "latest",
+    installedVersion: "latest",
+    command: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://antigravity.google/cli/install.ps1 | iex\""
   },
   "gemini-code-assist": {
     latestVersion: "latest",
@@ -1715,16 +1715,16 @@ function mockDetection(): DetectionSnapshot {
       ...mockToolUpdateFields("claude-vscode")
     }),
     mockTool({
-      id: "gemini",
-      name: "Gemini CLI",
-      command: "gemini",
-      version: mockToolVersion("gemini"),
-      installState: mockInstalledToolIds.has("gemini") ? "installed" : "missing",
-      configState: "unconfigured",
-      configPath: "~/.gemini",
-      installCommand: "npm install -g @google/gemini-cli",
-      details: mockInstalledToolIds.has("gemini") ? "Profile needed" : "Command not found",
-      ...mockToolUpdateFields("gemini")
+      id: "antigravity",
+      name: "Antigravity CLI",
+      command: "agy",
+      version: mockToolVersion("antigravity"),
+      installState: mockInstalledToolIds.has("antigravity") ? "installed" : "missing",
+      configState: "unknown",
+      configPath: "~/.gemini/antigravity-cli",
+      installCommand: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://antigravity.google/cli/install.ps1 | iex\"",
+      details: mockInstalledToolIds.has("antigravity") ? "Ready" : "Command not found",
+      ...mockToolUpdateFields("antigravity")
     }),
     mockTool({
       id: "gemini-code-assist",
@@ -1945,7 +1945,11 @@ function mockToolInstallPlan(toolId: string): ToolInstallPlan {
       manager: "vscode",
       command: "code --install-extension anthropic.claude-code"
     },
-    gemini: { toolName: "Gemini CLI", manager: "npm", command: "npm install -g @google/gemini-cli" },
+    antigravity: {
+      toolName: "Antigravity CLI",
+      manager: "terminal",
+      command: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://antigravity.google/cli/install.ps1 | iex\""
+    },
     "gemini-code-assist": {
       toolName: "Gemini Code Assist",
       manager: "vscode",
@@ -2518,7 +2522,7 @@ function mockProfileIsActive(profile: ProfileDraft): boolean {
 
 function mockDefaultActiveProfile(): ProfileDraft | null {
   const activeProfiles = browserState.activeProfilesByMode.gateway;
-  const preferredApps = ["codex", "claude-desktop", "claude", "gemini", "gemini-code-assist", "opencode", "openclaw", "hermes", "grok", "pi"];
+  const preferredApps = ["codex", "claude-desktop", "claude", "gemini-code-assist", "opencode", "openclaw", "hermes", "grok", "pi"];
   for (const app of preferredApps) {
     const profileId = activeProfiles[app] ?? (app === "codex"
       ? activeProfiles["chatgpt-desktop"]
@@ -2546,7 +2550,6 @@ function mockRestartMessageForProfile(profile: ProfileDraft, syncClaudeVsCode = 
     codex: "ChatGPT Desktop, Codex CLI, or Codex VS Code extension backend",
     "claude-desktop": "Claude Desktop",
     claude: syncClaudeVsCode ? "Claude Code or Claude VS Code extension backend" : "Claude Code",
-    gemini: "Gemini CLI",
     "gemini-code-assist": "Gemini Code Assist",
     opencode: "OpenCode",
     openclaw: "OpenClaw",
@@ -2587,7 +2590,6 @@ function mockToolConfigPath(toolId: string): string | null {
     codex: "~/.codex/config.toml",
     claude: "~/.claude",
     "claude-desktop": `~/AppData/Local/Claude-3p/configLibrary/${CLAUDE_DESKTOP_PROFILE_ID}.json`,
-    gemini: "~/.gemini",
     "gemini-code-assist": "~/AppData/Roaming/Code/User/settings.json",
     opencode: "~/.config/opencode",
     openclaw: "~/.openclaw",

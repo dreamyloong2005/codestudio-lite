@@ -74,7 +74,7 @@ AI 工具检测与配置：
 - Claude Desktop
 - Claude Code
 - Claude VS Code
-- Gemini CLI
+- Antigravity CLI
 - Gemini Code Assist
 - OpenCode
 - OpenClaw
@@ -277,7 +277,7 @@ AI tool detection and configuration:
 - Claude Desktop
 - Claude Code
 - Claude VS Code
-- Gemini CLI
+- Antigravity CLI
 - Gemini Code Assist
 - OpenCode
 - OpenClaw

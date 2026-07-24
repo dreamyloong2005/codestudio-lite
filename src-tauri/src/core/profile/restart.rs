@@ -137,8 +137,6 @@ pub(in crate::core::profile) fn restart_targets_for_app(
         "resources/native-binary/claude",
         "resources\\native-binary\\claude",
     ];
-    const GEMINI_CLI_NAMES: &[&str] = &["gemini.exe", "gemini"];
-    const GEMINI_CLI_MARKERS: &[&str] = &["@google/gemini-cli", "@google\\gemini-cli"];
     const OPENCODE_NAMES: &[&str] = &["opencode.exe", "opencode"];
     const OPENCODE_MARKERS: &[&str] = &["opencode-ai"];
     const OPENCLAW_NAMES: &[&str] = &["openclaw.exe", "openclaw"];
@@ -223,18 +221,6 @@ pub(in crate::core::profile) fn restart_targets_for_app(
             }
             targets
         }
-        "gemini" => vec![RestartTarget {
-            label: "Gemini CLI",
-            process_names: GEMINI_CLI_NAMES,
-            command_markers: GEMINI_CLI_MARKERS,
-            exclude_command_markers: EMPTY,
-            require_window: false,
-            reject_window: false,
-            launch: RestartLaunch::Command {
-                command: "gemini",
-                hidden: true,
-            },
-        }],
         "gemini-code-assist" => vec![RestartTarget {
             label: "Gemini Code Assist",
             process_names: VSCODE_NAMES,
@@ -319,7 +305,6 @@ fn restart_category_label(app: &str, context: RestartContext) -> &'static str {
             "Claude Code or Claude VS Code extension backend"
         }
         "claude" => "Claude Code",
-        "gemini" => "Gemini CLI",
         "gemini-code-assist" => "Gemini Code Assist",
         "opencode" => "OpenCode",
         "openclaw" => "OpenClaw",
