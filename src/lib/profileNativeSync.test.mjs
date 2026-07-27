@@ -28,8 +28,10 @@ test("dashboard refresh reads the profile summary after native detection sync", 
     app.indexOf("async function loadDashboardWithCache")
   );
 
-  const detectionIndex = refresh.indexOf("detectEnvironment({ waitForUpdates })");
+  const detectionIndex = refresh.indexOf("detectEnvironment({");
+  const progressIndex = refresh.indexOf("onProgress:", detectionIndex);
   const summaryIndex = refresh.indexOf("ensureAppDirs()");
   assert.ok(detectionIndex >= 0, "dashboard refresh should run environment detection");
+  assert.ok(progressIndex > detectionIndex, "dashboard refresh should stream completed detections");
   assert.ok(summaryIndex > detectionIndex, "profile summary must be read after native detection sync finishes");
 });

@@ -9,6 +9,7 @@
   "include": [
     "src/lib/profileSortable.ts",
     "src/lib/profileSummary.ts",
+    "src/lib/detectionProgress.ts",
     "src/lib/profiles/catalog.ts",
     "src/lib/profiles/presentation.ts"
   ]

@@ -26,6 +26,7 @@
   import { ensureChatGPTDesktopLoaded } from "./lib/chatgptDesktopStore";
   import { setLocale, t } from "./lib/i18n";
   import { updateGatewayProfileDisplay, upsertProfileDraftInSummary } from "./lib/profileSummary";
+  import { mergeDetectionProgressSnapshot } from "./lib/detectionProgress";
   import { REFRESH_CACHE_TTL_MS, readRefreshTimestamp, refreshTimestampFresh, writeRefreshTimestamp } from "./lib/refreshCache";
   import { applyTheme } from "./lib/theme";
   import { disposeTerminalSession } from "./lib/terminalSessionStore";
@@ -39,6 +40,7 @@
   import TerminalPanel from "./routes/TerminalPanel.svelte";
   import SetupWizard from "./routes/SetupWizard.svelte";
   import type {
+    DetectionProgress,
     DetectionSnapshot,
     GatewayStatus,
     PrivacyFilterMode,
@@ -189,6 +191,10 @@
     }
   }
 
+  function applyDetectionProgress(progress: DetectionProgress) {
+    applyDetectionSnapshot(mergeDetectionProgressSnapshot(snapshot, progress.snapshot));
+  }
+
   function profileSummaryUiChanged(current: ProfileSummary | null, next: ProfileSummary) {
     if (!current) {
       return true;
@@ -246,7 +252,18 @@
     }
     try {
       const [nextSnapshot, nextGatewayStatus] = await Promise.all([
-        detectEnvironment({ waitForUpdates }),
+        detectEnvironment({
+          waitForUpdates,
+          onProgress: (progress) => {
+            if (runId !== dashboardRefreshRunId) {
+              return;
+            }
+            applyDetectionProgress(progress);
+            if (!quiet && visibleRefreshRunId === runId) {
+              dashboardLoading = false;
+            }
+          }
+        }),
         loadGatewayStatus()
       ]);
       const nextProfileSummary = await ensureAppDirs();

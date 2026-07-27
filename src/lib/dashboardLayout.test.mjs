@@ -192,7 +192,7 @@ test("dashboard foreground refresh waits for update checks while background refr
   const app = read("src/App.svelte");
 
   assert.match(app, /const waitForUpdates = options\.waitForUpdates \?\? showRefreshIndicator/);
-  assert.match(app, /detectEnvironment\(\{ waitForUpdates \}\)/);
+  assert.match(app, /detectEnvironment\(\{[\s\S]*?waitForUpdates,[\s\S]*?onProgress:/);
   assert.match(
     app,
     /refreshDashboard\(\{ quiet: true, scheduleFollowup: true, showRefreshIndicator: false, waitForUpdates: false \}\)/

@@ -74,7 +74,9 @@ test("ChatGPT desktop generation is shared by detection and installed state", ()
   assert.match(desktop, /pub generation: ChatGptDesktopProductGeneration/);
   assert.match(desktop, /fn chatgpt_desktop_generation_from_windows_root\(/);
   assert.match(desktop, /fn chatgpt_desktop_generation_from_macos_identity\(/);
-  assert.match(detector, /chatgpt_desktop_product_generation:\s*chatgpt_desktop::detected_product_generation\(\)/);
+  assert.match(desktop, /tool_status_with_generation\(\)[\s\S]*\(status, generation\)/);
+  assert.match(detector, /let \(mut tools, mut system, chatgpt_desktop_product_generation\)/);
+  assert.match(detector, /chatgpt_desktop_product_generation,[\s\S]*claude_install_kinds/);
 });
 
 test("desktop branding defaults to current and only rewrites the product phrase", () => {

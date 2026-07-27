@@ -32,6 +32,7 @@ import {
   profileSupportsConfigProtocol
 } from "./profiles/catalog";
 import { normalizeChatGPTDesktopDetectionSnapshot } from "./chatgptDesktopBranding";
+import { Channel } from "@tauri-apps/api/core";
 import type {
   ActivityEvent,
   ActiveProfilesByMode,
@@ -61,6 +62,7 @@ import type {
   StageChatGPTDesktopUpdateRequest,
   DeleteProfileDraftRequest,
   DetectionSnapshot,
+  DetectionProgress,
   DoctorReport,
   DuplicateProfileDraftRequest,
   GatewayControlResult,
@@ -212,16 +214,47 @@ export async function loadProfileSummary(): Promise<ProfileSummary> {
   return profileApi.loadSummary();
 }
 
-type DetectEnvironmentOptions = {
+export type DetectEnvironmentOptions = {
   waitForUpdates?: boolean;
+  onProgress?: (progress: DetectionProgress) => void;
 };
 
 export async function detectEnvironment(options: DetectEnvironmentOptions = {}): Promise<DetectionSnapshot> {
   if (isTauri()) {
-    const snapshot = await invoke<DetectionSnapshot>("detect_environment", { request: options });
+    const progress = new Channel<DetectionProgress>((event) => {
+      options.onProgress?.({
+        ...event,
+        snapshot: normalizeChatGPTDesktopDetectionSnapshot(event.snapshot)
+      });
+    });
+    const snapshot = await invoke<DetectionSnapshot>("detect_environment", {
+      request: { waitForUpdates: options.waitForUpdates },
+      progress
+    });
     return normalizeChatGPTDesktopDetectionSnapshot(snapshot);
   }
   const snapshot = mockDetection();
+  const streamedTools: ToolStatus[] = [];
+  const streamedSystem: ToolStatus[] = [];
+  const statuses = [...snapshot.tools, ...snapshot.system];
+  for (const status of statuses) {
+    if (status.category === "system") {
+      streamedSystem.push(status);
+    } else {
+      streamedTools.push(status);
+    }
+    options.onProgress?.({
+      completed: streamedTools.length + streamedSystem.length,
+      total: statuses.length,
+      snapshot: normalizeChatGPTDesktopDetectionSnapshot({
+        ...snapshot,
+        tools: [...streamedTools],
+        system: [...streamedSystem],
+        problems: []
+      })
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
   writeMockDetectionCache(snapshot);
   return normalizeChatGPTDesktopDetectionSnapshot(snapshot);
 }

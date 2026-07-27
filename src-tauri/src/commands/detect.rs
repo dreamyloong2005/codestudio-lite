@@ -1,9 +1,10 @@
 use crate::core::platform::package;
 use crate::core::types::{
-    ChatGptDesktopInstallKinds, ClaudeDesktopInstallKinds, DetectionSnapshot,
+    ChatGptDesktopInstallKinds, ClaudeDesktopInstallKinds, DetectionProgress, DetectionSnapshot,
 };
 use crate::core::{chatgpt_desktop, detector};
 use serde::Deserialize;
+use tauri::ipc::Channel;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,12 +15,18 @@ pub struct DetectEnvironmentRequest {
 #[tauri::command]
 pub async fn detect_environment(
     request: Option<DetectEnvironmentRequest>,
+    progress: Channel<DetectionProgress>,
 ) -> Result<DetectionSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+    tauri::async_runtime::spawn_blocking(move || {
         let request = request.unwrap_or_default();
-        detector::detect_environment_with_options(detector::DetectionOptions {
-            wait_for_updates: request.wait_for_updates.unwrap_or(false),
-        })
+        detector::detect_environment_with_progress(
+            detector::DetectionOptions {
+                wait_for_updates: request.wait_for_updates.unwrap_or(false),
+            },
+            |event| {
+                let _ = progress.send(event);
+            },
+        )
         .map_err(|err| err.to_string())
     })
     .await

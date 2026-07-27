@@ -14,8 +14,9 @@ use crate::core::profile;
 use crate::core::storage;
 use crate::core::tool_catalog::{ai_tools, system_tools, ToolDefinition};
 use crate::core::types::{
-    ClaudeDesktopInstallKinds, ConfigState, DesktopInstallKindInfo, DetectionSnapshot,
-    DetectionSource, InstallState, Problem, Severity, ToolCategory, ToolStatus,
+    ChatGptDesktopProductGeneration, ClaudeDesktopInstallKinds, CodexAuthStatus, ConfigState,
+    DesktopInstallKindInfo, DetectionProgress, DetectionSnapshot, DetectionSource,
+    EnvironmentVariableConflict, InstallState, Problem, Severity, ToolCategory, ToolStatus,
 };
 use chrono::Utc;
 use serde::Deserialize;
@@ -25,7 +26,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -96,22 +97,55 @@ pub fn detect_environment() -> Result<DetectionSnapshot, String> {
 pub fn detect_environment_with_options(
     options: DetectionOptions,
 ) -> Result<DetectionSnapshot, String> {
+    detect_environment_with_progress(options, |_| {})
+}
+
+pub fn detect_environment_with_progress<F>(
+    options: DetectionOptions,
+    mut progress: F,
+) -> Result<DetectionSnapshot, String>
+where
+    F: FnMut(DetectionProgress),
+{
     profile::ensure_app_dirs()?;
     let paths = app_paths().map_err(|err| err.to_string())?;
-    let mut tools = detect_tools(ai_tools_for_environment(resolve_command("code").is_some()));
-    if supports_chatgpt_desktop() {
-        tools.push(chatgpt_desktop::tool_status());
-    }
-    let mut system = detect_tools(system_tools());
-    annotate_update_status(&mut tools, &mut system, options);
     let profile_summary = profile::load_profile_summary()?;
-    let active_profile = profile_summary.active_profile.clone();
-    let active_profile_name = profile_summary.active_profile_name.clone();
-    let codex_auth = profile_summary.codex_auth.clone();
     let env_conflicts = env_health::claude_env_conflicts_for_active_config(
         &profile_summary.drafts,
         &profile_summary.active_profiles_by_mode.config,
     );
+    let base = DetectionProgressBase {
+        generated_at: Utc::now().to_rfc3339(),
+        platform: current_platform_label(),
+        home_dir: display_path(&paths.home_dir),
+        app_config_dir: display_path(&paths.config_dir),
+        active_profile: profile_summary.active_profile.clone(),
+        active_profile_name: profile_summary.active_profile_name.clone(),
+        codex_auth: profile_summary.codex_auth.clone(),
+        env_conflicts: env_conflicts.clone(),
+    };
+
+    let ai_definitions = ai_tools_for_environment(resolve_command("code").is_some());
+    let system_definitions = system_tools();
+    let total =
+        ai_definitions.len() + system_definitions.len() + usize::from(supports_chatgpt_desktop());
+
+    let (mut tools, mut system, chatgpt_desktop_product_generation) = detect_tools_with_progress(
+        ai_definitions,
+        system_definitions,
+        supports_chatgpt_desktop(),
+        |partial_tools, partial_system, completed, product_generation| {
+            progress(DetectionProgress {
+                completed,
+                total,
+                snapshot: base.snapshot(partial_tools, partial_system, product_generation),
+            });
+        },
+    );
+    annotate_update_status(&mut tools, &mut system, options);
+    let active_profile = profile_summary.active_profile.clone();
+    let active_profile_name = profile_summary.active_profile_name.clone();
+    let codex_auth = profile_summary.codex_auth.clone();
     let mut problems = Vec::new();
 
     for tool in tools.iter().chain(system.iter()) {
@@ -183,12 +217,50 @@ pub fn detect_environment_with_options(
         system,
         problems,
         env_conflicts,
-        chatgpt_desktop_product_generation: chatgpt_desktop::detected_product_generation(),
+        chatgpt_desktop_product_generation,
         claude_install_kinds,
         chatgpt_desktop_install_kinds,
     };
     let _ = storage::store_detection_cache(&snapshot);
     Ok(snapshot)
+}
+
+struct DetectionProgressBase {
+    generated_at: String,
+    platform: String,
+    home_dir: String,
+    app_config_dir: String,
+    active_profile: Option<String>,
+    active_profile_name: Option<String>,
+    codex_auth: CodexAuthStatus,
+    env_conflicts: Vec<EnvironmentVariableConflict>,
+}
+
+impl DetectionProgressBase {
+    fn snapshot(
+        &self,
+        tools: Vec<ToolStatus>,
+        system: Vec<ToolStatus>,
+        chatgpt_desktop_product_generation: ChatGptDesktopProductGeneration,
+    ) -> DetectionSnapshot {
+        DetectionSnapshot {
+            generated_at: self.generated_at.clone(),
+            source: DetectionSource::Live,
+            platform: self.platform.clone(),
+            home_dir: self.home_dir.clone(),
+            app_config_dir: self.app_config_dir.clone(),
+            active_profile: self.active_profile.clone(),
+            active_profile_name: self.active_profile_name.clone(),
+            codex_auth: self.codex_auth.clone(),
+            tools,
+            system,
+            problems: Vec::new(),
+            env_conflicts: self.env_conflicts.clone(),
+            chatgpt_desktop_product_generation,
+            claude_install_kinds: None,
+            chatgpt_desktop_install_kinds: None,
+        }
+    }
 }
 
 /// Force a fresh install re-detection for a manual per-tool page refresh.
@@ -307,14 +379,97 @@ pub fn invalidate_install_cache() {
     cache.checked_at = None;
 }
 
-fn detect_tools(definitions: Vec<ToolDefinition>) -> Vec<ToolStatus> {
-    definitions
+enum CompletedDetection {
+    Ai(usize, ToolStatus),
+    ChatGptDesktop(ToolStatus, ChatGptDesktopProductGeneration),
+    System(usize, ToolStatus),
+}
+
+fn detect_tools_with_progress<F>(
+    ai_definitions: Vec<ToolDefinition>,
+    system_definitions: Vec<ToolDefinition>,
+    include_chatgpt_desktop: bool,
+    mut on_progress: F,
+) -> (
+    Vec<ToolStatus>,
+    Vec<ToolStatus>,
+    ChatGptDesktopProductGeneration,
+)
+where
+    F: FnMut(Vec<ToolStatus>, Vec<ToolStatus>, usize, ChatGptDesktopProductGeneration),
+{
+    let ai_total = ai_definitions.len();
+    let system_total = system_definitions.len();
+    let (sender, receiver) = mpsc::channel();
+    let mut handles = ai_definitions
         .into_iter()
-        .map(|definition| thread::spawn(move || detect_tool(&definition)))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .filter_map(|handle| handle.join().ok())
-        .collect()
+        .enumerate()
+        .map(|(index, definition)| {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let _ = sender.send(CompletedDetection::Ai(index, detect_tool(&definition)));
+            })
+        })
+        .collect::<Vec<_>>();
+    handles.extend(
+        system_definitions
+            .into_iter()
+            .enumerate()
+            .map(|(index, definition)| {
+                let sender = sender.clone();
+                thread::spawn(move || {
+                    let _ =
+                        sender.send(CompletedDetection::System(index, detect_tool(&definition)));
+                })
+            }),
+    );
+    if include_chatgpt_desktop {
+        let sender = sender.clone();
+        handles.push(thread::spawn(move || {
+            let (status, generation) = chatgpt_desktop::tool_status_with_generation();
+            let _ = sender.send(CompletedDetection::ChatGptDesktop(status, generation));
+        }));
+    }
+    drop(sender);
+
+    let mut ai_completed = vec![None; ai_total];
+    let mut system_completed = vec![None; system_total];
+    let mut chatgpt_desktop_completed = None;
+    let mut chatgpt_desktop_product_generation = ChatGptDesktopProductGeneration::default();
+    let mut completed = 0;
+    for result in receiver {
+        match result {
+            CompletedDetection::Ai(index, status) => ai_completed[index] = Some(status),
+            CompletedDetection::ChatGptDesktop(status, generation) => {
+                chatgpt_desktop_completed = Some(status);
+                chatgpt_desktop_product_generation = generation;
+            }
+            CompletedDetection::System(index, status) => system_completed[index] = Some(status),
+        }
+        completed += 1;
+        let mut tools = ai_completed
+            .iter()
+            .filter_map(Clone::clone)
+            .collect::<Vec<_>>();
+        tools.extend(chatgpt_desktop_completed.iter().cloned());
+        on_progress(
+            tools,
+            system_completed.iter().filter_map(Clone::clone).collect(),
+            completed,
+            chatgpt_desktop_product_generation,
+        );
+    }
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let mut tools = ai_completed.into_iter().flatten().collect::<Vec<_>>();
+    tools.extend(chatgpt_desktop_completed);
+    (
+        tools,
+        system_completed.into_iter().flatten().collect(),
+        chatgpt_desktop_product_generation,
+    )
 }
 
 fn ai_tools_for_environment(vscode_available: bool) -> Vec<ToolDefinition> {

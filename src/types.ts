@@ -318,6 +318,12 @@ export interface DetectionSnapshot {
   chatgptDesktopInstallKinds?: ChatGPTDesktopInstallKinds | null;
 }
 
+export interface DetectionProgress {
+  snapshot: DetectionSnapshot;
+  completed: number;
+  total: number;
+}
+
 export type CodexAuthMethod = "chat_gpt" | "api_key" | "access_token" | "unknown" | "none";
 export type CodexAuthStorage = "auth_json" | "keyring" | "auto" | "none" | "unknown";
 

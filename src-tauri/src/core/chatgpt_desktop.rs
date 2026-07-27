@@ -1062,6 +1062,10 @@ pub fn open_path(kind: String) -> Result<(), String> {
 }
 
 pub fn tool_status() -> ToolStatus {
+    tool_status_with_generation().0
+}
+
+pub fn tool_status_with_generation() -> (ToolStatus, ChatGptDesktopProductGeneration) {
     let settings = load_settings().unwrap_or_default();
     let installed = detect_installed(&settings);
     let generation = installed
@@ -1070,7 +1074,7 @@ pub fn tool_status() -> ToolStatus {
         .unwrap_or_default();
     let product_name = chatgpt_desktop_product_name(generation);
     let config_path = app_paths().ok().map(|paths| paths.home_dir.join(".codex"));
-    ToolStatus {
+    let status = ToolStatus {
         id: "chatgpt-desktop".to_string(),
         name: product_name.to_string(),
         category: ToolCategory::AiTool,
@@ -1109,7 +1113,8 @@ pub fn tool_status() -> ToolStatus {
             .or_else(|| Some(format!("Official {product_name} client was not detected"))),
         install_kind: None,
         running: is_chatgpt_desktop_running(installed.as_ref()),
-    }
+    };
+    (status, generation)
 }
 
 fn is_chatgpt_desktop_running(installed: Option<&InstalledChatGptDesktop>) -> bool {

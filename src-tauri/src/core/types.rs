@@ -429,6 +429,14 @@ pub struct DetectionSnapshot {
     pub chatgpt_desktop_install_kinds: Option<ChatGptDesktopInstallKinds>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectionProgress {
+    pub snapshot: DetectionSnapshot,
+    pub completed: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexAuthMethod {
