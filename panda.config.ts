@@ -271,8 +271,7 @@ export default defineConfig({
           base: {
             width: "100%",
             minWidth: 0,
-            minHeight: 0,
-            height: "100%",
+            minHeight: "100%",
             "& .cs-top-strip, & .cs-panel, & .cs-tool-card": {
               animation: "surface-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) backwards",
               animationDelay: "calc(min(var(--surface-index, 0), 8) * 28ms)"
@@ -303,6 +302,14 @@ export default defineConfig({
                 animation: "none",
                 transition: "none",
                 transform: "none !important"
+              }
+            }
+          },
+          variants: {
+            fill: {
+              true: {
+                height: "100%",
+                minHeight: 0
               }
             }
           }

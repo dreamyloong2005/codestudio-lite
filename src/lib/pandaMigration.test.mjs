@@ -1013,7 +1013,7 @@ test("App shell and navigation use Panda recipes", () => {
   assert.match(app, /appNavUpdateDotRecipe\(\)/);
   assert.match(app, /appWorkspaceRecipe\(\)/);
   assert.match(app, /appErrorBannerRecipe\(\)/);
-  assert.match(app, /appRouteTransitionRecipe\(\)/);
+  assert.match(app, /appRouteTransitionRecipe\(\{ fill: route === "terminal" \}\)/);
 
   assert.doesNotMatch(app, /class="app-shell"/);
   assert.doesNotMatch(app, /class="sidebar"/);

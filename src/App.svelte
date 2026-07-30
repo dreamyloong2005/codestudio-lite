@@ -547,7 +547,7 @@
     {/if}
 
     {#key route}
-      <div class={appRouteTransitionRecipe()} in:fly={routeEnterTransition} out:fade={routeExitTransition}>
+      <div class={appRouteTransitionRecipe({ fill: route === "terminal" })} in:fly={routeEnterTransition} out:fade={routeExitTransition}>
         {#if route === "dashboard"}
           <Dashboard
             {snapshot}

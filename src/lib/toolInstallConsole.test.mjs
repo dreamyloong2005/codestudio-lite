@@ -156,7 +156,7 @@ test("embedded terminal uses FitAddon and only syncs applied xterm dimensions", 
   assert.doesNotMatch(terminalPanel, /BACKEND_RESIZE_SETTLE_MS|pendingBackendResize/);
   assert.match(
     pandaConfig,
-    /appRouteTransitionRecipe:\s*\{[\s\S]*?base:\s*\{\s*width: "100%",\s*minWidth: 0,\s*minHeight: 0,\s*height: "100%"/
+    /appRouteTransitionRecipe:\s*\{[\s\S]*?base:\s*\{\s*width: "100%",\s*minWidth: 0,\s*minHeight: "100%"[\s\S]*?variants:\s*\{[\s\S]*?fill:\s*\{[\s\S]*?true:\s*\{\s*height: "100%",\s*minHeight: 0/
   );
   assert.match(
     pandaConfig,
