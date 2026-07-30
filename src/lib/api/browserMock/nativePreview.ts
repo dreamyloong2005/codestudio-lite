@@ -158,8 +158,8 @@ export function mockNativeConfigPreview(
             key: "model_providers.openai.requires_openai_auth",
             action: "add",
             before: null,
-            after: "false",
-            detail: "Disables Codex's built-in OpenAI auth requirement for this managed provider."
+            after: "true",
+            detail: "Enables Codex's built-in OpenAI auth requirement for this managed provider."
           },
           {
             key: "model_providers.openai.http_headers",
@@ -210,8 +210,8 @@ export function mockNativeConfigPreview(
         key: `model_providers.${providerId}.requires_openai_auth`,
         action: "add",
         before: null,
-        after: "false",
-        detail: "Disables Codex's built-in OpenAI auth requirement for this managed provider."
+        after: "true",
+        detail: "Enables Codex's built-in OpenAI auth requirement for this managed provider."
       },
       {
         key: `model_providers.${providerId}.http_headers`,
@@ -294,8 +294,8 @@ export function mockNativeConfigPreview(
         key: "model_providers.custom.requires_openai_auth",
         action: "add",
         before: null,
-        after: "false",
-        detail: "Disables Codex's built-in OpenAI auth requirement for this managed provider."
+        after: "true",
+        detail: "Enables Codex's built-in OpenAI auth requirement for this managed provider."
       },
       {
         key: "model_providers.custom.http_headers",

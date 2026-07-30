@@ -197,8 +197,8 @@ fn preview_config(
         diff_line(
             &value,
             &format!("model_providers.{provider_id}.requires_openai_auth"),
-            "false",
-            "Disables Codex's built-in OpenAI auth requirement for this managed provider.",
+            "true",
+            "Enables Codex's built-in OpenAI auth requirement for this managed provider.",
         ),
         diff_line(
             &value,
@@ -542,7 +542,7 @@ pub(in crate::core::profile) fn managed_provider_auth_contract_matches(
         &format!("model_providers.{provider_id}.requires_openai_auth"),
     )
     .and_then(|item| item.as_bool())
-        == Some(false)
+        == Some(true)
         && toml_lookup(
             value,
             &format!(
@@ -554,13 +554,26 @@ pub(in crate::core::profile) fn managed_provider_auth_contract_matches(
 }
 
 fn managed_provider_auth_matches_legacy_or_current(value: &toml::Value, provider_id: &str) -> bool {
-    managed_provider_auth_contract_matches(value, provider_id)
-        || toml_lookup(
+    if managed_provider_auth_contract_matches(value, provider_id) {
+        return true;
+    }
+    let requires_openai_auth = toml_lookup(
+        value,
+        &format!("model_providers.{provider_id}.requires_openai_auth"),
+    )
+    .and_then(|item| item.as_bool());
+    if requires_openai_auth == Some(true) {
+        return true;
+    }
+    requires_openai_auth == Some(false)
+        && toml_lookup(
             value,
-            &format!("model_providers.{provider_id}.requires_openai_auth"),
+            &format!(
+                "model_providers.{provider_id}.http_headers.{CODEX_ACTOR_AUTHORIZATION_HEADER}"
+            ),
         )
-        .and_then(|item| item.as_bool())
-            == Some(true)
+        .and_then(|item| item.as_str())
+            == Some(CODEX_ACTOR_AUTHORIZATION_VALUE)
 }
 
 fn active_provider_id_for_profile(value: &toml::Value, profile: &ProfileDraft) -> Option<String> {
@@ -797,7 +810,7 @@ fn remove_provider_entry(document: &mut toml_edit::DocumentMut, provider_id: &st
 }
 
 fn set_managed_provider_auth(document: &mut toml_edit::DocumentMut, provider_id: &str) {
-    document["model_providers"][provider_id]["requires_openai_auth"] = toml_edit::value(false);
+    document["model_providers"][provider_id]["requires_openai_auth"] = toml_edit::value(true);
     let mut headers = toml_edit::InlineTable::new();
     let header_key = format!("\"{CODEX_ACTOR_AUTHORIZATION_HEADER}\"")
         .parse::<toml_edit::Key>()

@@ -82,7 +82,7 @@ test("mock Codex official preview uses the managed actor-authorization contract"
   assert.equal(officialBranch.includes("model_providers.openai.http_headers"), true);
   assert.equal(officialBranch.includes('key: "cli_auth_credentials_store"'), true);
   assert.equal(officialBranch.includes('key: "model_providers.openai.base_url"'), true);
-  assert.equal(officialBranch.includes('after: "false"'), true);
+  assert.equal(officialBranch.includes('after: "true"'), true);
   assert.equal(officialBranch.includes("x-openai-actor-authorization"), true);
   assert.equal(officialBranch.includes("codestudio-lite"), true);
   assert.equal(officialBranch.includes('after: "file"'), true);
@@ -103,7 +103,7 @@ test("mock Codex direct and gateway previews use auth.json plus the managed acto
 
   assert.equal(directBranch.includes('key: "cli_auth_credentials_store"'), true);
   assert.equal(directBranch.includes('after: "file"'), true);
-  assert.equal(directBranch.includes('after: "false"'), true);
+  assert.equal(directBranch.includes('after: "true"'), true);
   assert.equal(directBranch.includes(".http_headers"), true);
   assert.equal(directBranch.includes("x-openai-actor-authorization"), true);
   assert.equal(directBranch.includes("codestudio-lite"), true);
@@ -111,7 +111,7 @@ test("mock Codex direct and gateway previews use auth.json plus the managed acto
   assert.equal(gatewayBranch.includes('key: "model_providers.custom.requires_openai_auth"'), true);
   assert.equal(gatewayBranch.includes('key: "model_providers.custom.http_headers"'), true);
   assert.equal(gatewayBranch.includes('key: "cli_auth_credentials_store"'), true);
-  assert.equal(gatewayBranch.includes('after: "false"'), true);
+  assert.equal(gatewayBranch.includes('after: "true"'), true);
   assert.equal(gatewayBranch.includes("x-openai-actor-authorization"), true);
   assert.equal(gatewayBranch.includes("codestudio-lite"), true);
   assert.equal(gatewayBranch.includes('after: "file"'), true);

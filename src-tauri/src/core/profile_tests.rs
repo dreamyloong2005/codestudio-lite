@@ -113,7 +113,7 @@ fn assert_codex_managed_provider_contract(value: &toml::Value, provider_id: &str
             &format!("model_providers.{provider_id}.requires_openai_auth")
         )
         .and_then(|item| item.as_bool()),
-        Some(false)
+        Some(true)
     );
     assert_eq!(
         toml_lookup(
@@ -129,7 +129,7 @@ fn assert_codex_managed_provider_contract(value: &toml::Value, provider_id: &str
 
 fn assert_codex_managed_provider_contract_lines(content: &str) {
     assert!(content.contains(
-        "requires_openai_auth = false\nhttp_headers = { \"x-openai-actor-authorization\" = \"codestudio-lite\" }\n"
+        "requires_openai_auth = true\nhttp_headers = { \"x-openai-actor-authorization\" = \"codestudio-lite\" }\n"
     ), "generated config did not preserve the expected adjacent contract lines:\n{content}");
 }
 
@@ -2517,7 +2517,7 @@ fn codex_native_previews_use_managed_actor_authorization_contract() {
         assert_eq!(headers_index, requires_index + 1);
         assert_eq!(
             preview.changes[requires_index].after.as_deref(),
-            Some("false")
+            Some("true")
         );
         assert_eq!(
             preview.changes[headers_index].after.as_deref(),
