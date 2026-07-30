@@ -1213,6 +1213,7 @@ fn find_latest_claude_desktop_windows_stale_msix_dir() -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn is_claude_windows_package_architecture(name: &str) -> bool {
     name.contains("_arm64__") || name.contains("_x64__")
 }
