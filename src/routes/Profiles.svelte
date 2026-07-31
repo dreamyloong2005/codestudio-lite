@@ -1,18 +1,12 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
   import {
     applyProfile,
     clearClaudeEnvironmentVariables,
     deleteProfileDraft,
-    deleteUsageScript,
     duplicateProfileDraft,
     listProfileModels,
-    loadUsageScriptState,
     previewProfileApply,
-    queryProfileUsage,
     reorderProfileDrafts,
-    saveUsageScript,
-    testUsageScript,
     updateProfileDraft
   } from "../lib/api";
   import { t, type TranslationKey } from "../lib/i18n";
@@ -50,6 +44,7 @@
   import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import ModelSelectInput from "../components/ModelSelectInput.svelte";
   import ProfileList from "../components/profiles/ProfileList.svelte";
+  import ProfileUsageDialog from "../components/profiles/ProfileUsageDialog.svelte";
   import ProfileToolTabs from "../components/profiles/ProfileToolTabs.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import { css, cx } from "../../styled-system/css";
@@ -76,11 +71,6 @@
     profileInlineNoticeRecipe,
     profileModeLayoutRecipe,
     profileModeSwitcherRecipe,
-    profileUsageCodeFieldRecipe,
-    profileUsageResultCardRecipe,
-    profileUsageResultGridRecipe,
-    profileUsageTemplateRowRecipe,
-    profileUsageOfficialPanelRecipe,
     profileWriteContentPreviewRecipe,
     routeStackRecipe,
     sectionActionsRecipe,
@@ -98,12 +88,8 @@
     ProfileModelOption,
     ProfileSummary,
     ProviderApplyMode,
-    UsageData,
     UsageQueryResult,
-    WizardPrefill,
-    UsageScriptSaveRequest,
-    UsageScriptState,
-    UsageScriptTemplateType
+    WizardPrefill
   } from "../types";
 
   export let summary: ProfileSummary | null = null;
@@ -132,18 +118,6 @@
     apiKey: string;
   };
 
-
-  type UsageForm = {
-    enabled: boolean;
-    templateType: UsageScriptTemplateType;
-    code: string;
-    apiKey: string;
-    baseUrl: string;
-    accessToken: string;
-    userId: string;
-    timeoutSeconds: number;
-    autoQueryIntervalMinutes: number;
-  };
 
   type ProfileUsageEntry = {
     result: UsageQueryResult | null;
@@ -176,14 +150,6 @@
   let profileIoMessage: string | null = null;
   let syncClaudeVsCodePlugin = false;
   let pendingUsageProfile: ProfileDraft | null = null;
-  let usageState: UsageScriptState | null = null;
-  let usageForm: UsageForm = emptyUsageForm();
-  let usageError: string | null = null;
-  let usageMessage: string | null = null;
-  let usageBusy: "load" | "save" | "test" | "query" | "delete" | null = null;
-  let usageResult: UsageQueryResult | null = null;
-  let usageAutoQueryTimer: ReturnType<typeof window.setInterval> | null = null;
-  let usageAutoQueryKey = "";
   let profileUsageEntries: Record<string, ProfileUsageEntry> = {};
   let selectedToolId: string | null = null;
   let profileIconInput: HTMLInputElement | null = null;
@@ -191,12 +157,6 @@
     width: "min(760px, calc(100vw - 40px))",
     "@supports (width: 100dvw)": {
       width: "min(760px, calc(100dvw - 40px))"
-    }
-  });
-  const usageModalPanelClass = css({
-    width: "min(900px, calc(100vw - 40px))",
-    "@supports (width: 100dvw)": {
-      width: "min(900px, calc(100dvw - 40px))"
     }
   });
   const dangerButtonClass = css({
@@ -207,10 +167,6 @@
       borderColor: "color-mix(in srgb, var(--danger) 55%, transparent)",
       background: "color-mix(in srgb, var(--danger) 18%, transparent)"
     }
-  });
-  const usageToggleClass = css({
-    borderColor: "color-mix(in srgb, var(--accent) 30%, transparent)",
-    background: "color-mix(in srgb, var(--accent) 8%, transparent)"
   });
   const inlineEmptyClass = css({
     display: "flex",
@@ -317,14 +273,6 @@
   const officialProfileNameKeys = OFFICIAL_PROFILE_NAME_KEYS as Record<string, TranslationKey>;
   const protocolOptions = PROFILE_PROTOCOL_OPTIONS;
   type ProtocolOption = (typeof protocolOptions)[number];
-  const usageTemplateOptions: Array<{ id: UsageScriptTemplateType; labelKey: TranslationKey }> = [
-    { id: "general", labelKey: "profiles.usage.template.general" },
-    { id: "newapi", labelKey: "profiles.usage.template.newapi" },
-    { id: "balance", labelKey: "profiles.usage.template.balance" },
-    { id: "token_plan", labelKey: "profiles.usage.template.tokenPlan" },
-    { id: "custom", labelKey: "profiles.usage.template.custom" }
-  ];
-
   $: installedProfileToolIds = resolveInstalledProfileToolIds(snapshot);
   $: normalizedModeFilter = (modeFilter === "gateway" ? "gateway" : "config") as ProviderApplyMode;
   $: profileModeSections = buildProfileModeSections(summary, installedProfileToolIds, normalizedModeFilter);
@@ -382,9 +330,6 @@
     editModelError = null;
     editModelLoadedKey = "";
   }
-  $: pendingUsageIsCodexOfficialOAuth = pendingUsageProfile
-    ? profileUsesCodexOfficialOAuth(pendingUsageProfile)
-    : false;
   $: canSaveEdit =
     Boolean(pendingEdit) &&
     editForm.name.trim().length > 0 &&
@@ -417,24 +362,6 @@
       : editModelOptions.length > 0
         ? $t("profiles.modelListLoaded", { count: editModelOptions.length })
         : null;
-  $: canSaveUsage =
-    Boolean(pendingUsageProfile) &&
-    (!usageForm.enabled || pendingUsageIsCodexOfficialOAuth || usageForm.code.trim().length > 0) &&
-    usageForm.timeoutSeconds >= 2 &&
-    usageForm.timeoutSeconds <= 60 &&
-    usageForm.autoQueryIntervalMinutes >= 0 &&
-    usageForm.autoQueryIntervalMinutes <= 1440 &&
-    usageBusy !== "load" &&
-    usageBusy !== "save";
-  $: configureUsageAutoQuery(
-    pendingUsageProfile?.id ?? "",
-    usageState?.config?.enabled ? usageState.config.autoQueryIntervalMinutes : 0
-  );
-
-  onDestroy(() => {
-    clearUsageAutoQueryTimer();
-  });
-
   async function openApply(profile: ProfileDraft) {
     if (profileIsActive(summary, profile)) {
       return;
@@ -474,20 +401,6 @@
     };
   }
 
-  function emptyUsageForm(): UsageForm {
-    return {
-      enabled: false,
-      templateType: "general",
-      code: "",
-      apiKey: "",
-      baseUrl: "",
-      accessToken: "",
-      userId: "",
-      timeoutSeconds: 10,
-      autoQueryIntervalMinutes: 0
-    };
-  }
-
   function emptyProfileUsageEntry(profile?: ProfileDraft): ProfileUsageEntry {
     return {
       result: null,
@@ -505,345 +418,13 @@
     };
   }
 
-  function setProfileUsageResult(profileId: string, result: UsageQueryResult | null) {
-    const current = profileUsageEntries[profileId] ?? emptyProfileUsageEntry();
-    setProfileUsageEntry(profileId, {
-      ...current,
-      result,
-      state: "idle",
-      configured: true,
-      error: null,
-      updatedAt: result?.queriedAt ?? current.updatedAt
-    });
-  }
-
-  async function openUsage(profile: ProfileDraft) {
-    if (!profileCanOpenUsage(profile) || usageBusy !== null) {
-      return;
-    }
+  function openUsage(profile: ProfileDraft) {
+    if (!profileCanOpenUsage(profile)) return;
     pendingUsageProfile = profile;
-    usageState = null;
-    usageResult = null;
-    usageError = null;
-    usageMessage = null;
-    usageBusy = "load";
-
-    try {
-      const state = await loadUsageScriptState(profile.id);
-      usageState = state;
-      usageResult = state.lastResult;
-      setProfileUsageEntry(profile.id, {
-        result: state.lastResult,
-        state: "idle",
-        configured: Boolean(state.config?.enabled),
-        error: null,
-        updatedAt: state.lastResult?.queriedAt ?? profileUsageEntries[profile.id]?.updatedAt ?? null
-      });
-      usageForm = usageFormFromState(profile, state);
-    } catch (err) {
-      usageError = errorLabel(err instanceof Error ? err.message : String(err));
-      usageForm = usageFormFromState(profile, null);
-    } finally {
-      usageBusy = null;
-    }
   }
 
   function closeUsage() {
-    if (usageBusy !== null) {
-      return;
-    }
     pendingUsageProfile = null;
-    usageState = null;
-    usageResult = null;
-    usageError = null;
-    usageMessage = null;
-    usageForm = emptyUsageForm();
-  }
-
-  function usageFormFromState(profile: ProfileDraft, state: UsageScriptState | null): UsageForm {
-    const config = state?.config;
-    const templateType = config?.templateType ?? "general";
-    return {
-      enabled: config?.enabled ?? false,
-      templateType,
-      code: config?.code || state?.defaultCode || "",
-      apiKey: "",
-      baseUrl: config?.baseUrl ?? profile.baseUrl,
-      accessToken: "",
-      userId: config?.userId ?? "",
-      timeoutSeconds: config?.timeoutSeconds ?? 10,
-      autoQueryIntervalMinutes: config?.autoQueryIntervalMinutes ?? 0
-    };
-  }
-
-  function selectUsageTemplate(templateType: UsageScriptTemplateType) {
-    if (usageBusy !== null) {
-      return;
-    }
-    usageForm = {
-      ...usageForm,
-      templateType,
-      code: usageDefaultCode(templateType)
-    };
-  }
-
-  function usageDefaultCode(templateType: UsageScriptTemplateType) {
-    if (usageState?.config?.templateType === templateType && usageState.config.code.trim()) {
-      return usageState.config.code;
-    }
-    if (!usageState?.config && usageState?.defaultCode && templateType === "general") {
-      return usageState.defaultCode;
-    }
-    if (templateType === "newapi") {
-      return `({
-  request: {
-    url: "{{baseUrl}}/api/user/self",
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer {{accessToken}}",
-      "User-Agent": "codestudio-lite/1.0",
-      "New-Api-User": "{{userId}}"
-    }
-  },
-  extractor: function(response) {
-    if (response.success && response.data) {
-      return {
-        planName: response.data.group || "Default",
-        remaining: response.data.quota / 500000,
-        used: response.data.used_quota / 500000,
-        total: (response.data.quota + response.data.used_quota) / 500000,
-        unit: "USD"
-      };
-    }
-    return { isValid: false, invalidMessage: response.message || "Query failed" };
-  }
-})`;
-    }
-    if (templateType === "balance") {
-      return `({
-  request: {
-    url: "{{baseUrl}}/dashboard/billing/credit_grants",
-    method: "GET",
-    headers: {
-      "Authorization": "Bearer {{apiKey}}",
-      "User-Agent": "codestudio-lite/1.0"
-    }
-  },
-  extractor: function(response) {
-    var total = response.total_granted || response.total_available || response.balance || 0;
-    var used = response.total_used || 0;
-    return {
-      remaining: response.total_available !== undefined ? response.total_available : Math.max(total - used, 0),
-      used: used,
-      total: total,
-      unit: "USD"
-    };
-  }
-})`;
-    }
-    if (templateType === "token_plan") {
-      return `({
-  request: {
-    url: "{{baseUrl}}/api/user/self",
-    method: "GET",
-    headers: {
-      "Authorization": "Bearer {{apiKey}}",
-      "User-Agent": "codestudio-lite/1.0"
-    }
-  },
-  extractor: function(response) {
-    var data = response.data || response;
-    var total = data.total || data.quota || data.entitlement || 0;
-    var used = data.used || data.used_quota || 0;
-    return {
-      planName: data.plan || data.plan_name || data.group || "Token plan",
-      remaining: data.remaining !== undefined ? data.remaining : Math.max(total - used, 0),
-      used: used,
-      total: total,
-      unit: data.unit || "tokens"
-    };
-  }
-})`;
-    }
-    return `({
-  request: {
-    url: "{{baseUrl}}/user/balance",
-    method: "GET",
-    headers: {
-      "Authorization": "Bearer {{apiKey}}",
-      "User-Agent": "codestudio-lite/1.0"
-    }
-  },
-  extractor: function(response) {
-    return {
-      isValid: response.is_active !== false,
-      remaining: response.balance,
-      unit: "USD"
-    };
-  }
-})`;
-  }
-
-  function buildUsageRequest(): UsageScriptSaveRequest | null {
-    if (!pendingUsageProfile) {
-      return null;
-    }
-    return {
-      profileId: pendingUsageProfile.id,
-      enabled: usageForm.enabled,
-      templateType: usageForm.templateType,
-      code: usageForm.code,
-      apiKey: usageForm.apiKey.trim() ? usageForm.apiKey : null,
-      baseUrl: usageForm.baseUrl.trim() ? normalizeBaseUrl(usageForm.baseUrl) : null,
-      accessToken: usageForm.accessToken.trim() ? usageForm.accessToken : null,
-      userId: usageForm.userId.trim() ? usageForm.userId : null,
-      timeoutSeconds: Number(usageForm.timeoutSeconds),
-      autoQueryIntervalMinutes: Number(usageForm.autoQueryIntervalMinutes)
-    };
-  }
-
-  async function handleUsageSave() {
-    const request = buildUsageRequest();
-    if (!request || !canSaveUsage) {
-      usageError = $t("profiles.usage.saveRequired");
-      return;
-    }
-    usageBusy = "save";
-    usageError = null;
-    usageMessage = null;
-    try {
-      const state = await saveUsageScript(request);
-      usageState = state;
-      usageResult = state.config?.enabled ? state.lastResult : null;
-      usageForm = usageFormFromState(pendingUsageProfile!, state);
-      const usageEnabled = Boolean(state.config?.enabled);
-      setProfileUsageEntry(pendingUsageProfile!.id, {
-        result: usageEnabled ? state.lastResult : null,
-        state: "idle",
-        configured: usageEnabled,
-        error: null,
-        updatedAt: usageEnabled
-          ? state.lastResult?.queriedAt ?? profileUsageEntries[pendingUsageProfile!.id]?.updatedAt ?? null
-          : null
-      });
-      usageMessage = $t("profiles.usage.saveSuccess");
-    } catch (err) {
-      usageError = errorLabel(err instanceof Error ? err.message : String(err));
-    } finally {
-      usageBusy = null;
-    }
-  }
-
-  async function handleUsageTest() {
-    if (pendingUsageIsCodexOfficialOAuth) {
-      return;
-    }
-    const request = buildUsageRequest();
-    if (!request || !canSaveUsage) {
-      usageError = $t("profiles.usage.saveRequired");
-      return;
-    }
-    usageBusy = "test";
-    usageError = null;
-    usageMessage = null;
-    try {
-      usageResult = await testUsageScript(request);
-      setProfileUsageResult(pendingUsageProfile!.id, usageResult);
-      usageMessage = $t("profiles.usage.testSuccess");
-    } catch (err) {
-      usageError = errorLabel(err instanceof Error ? err.message : String(err));
-    } finally {
-      usageBusy = null;
-    }
-  }
-
-  async function handleUsageQuery() {
-    if (!pendingUsageProfile) {
-      return;
-    }
-    if (!usageState?.config?.enabled) {
-      return;
-    }
-    usageBusy = "query";
-    usageError = null;
-    usageMessage = null;
-    const queryEntry = profileUsageEntries[pendingUsageProfile.id] ?? emptyProfileUsageEntry(pendingUsageProfile);
-    setProfileUsageEntry(pendingUsageProfile.id, {
-      ...queryEntry,
-      state: "querying",
-      configured: true,
-      error: null
-    });
-    try {
-      usageResult = await queryProfileUsage(pendingUsageProfile.id);
-      setProfileUsageResult(pendingUsageProfile.id, usageResult);
-      usageMessage = $t("profiles.usage.querySuccess");
-    } catch (err) {
-      usageError = errorLabel(err instanceof Error ? err.message : String(err));
-      const current = profileUsageEntries[pendingUsageProfile.id] ?? emptyProfileUsageEntry();
-      setProfileUsageEntry(pendingUsageProfile.id, {
-        ...current,
-        state: "idle",
-        error: usageError
-      });
-    } finally {
-      usageBusy = null;
-    }
-  }
-
-  function configureUsageAutoQuery(profileId: string, intervalMinutes: number) {
-    const normalizedInterval = Number(intervalMinutes) || 0;
-    const nextKey = profileId && normalizedInterval > 0 ? `${profileId}:${normalizedInterval}` : "";
-    if (usageAutoQueryKey === nextKey) {
-      return;
-    }
-    clearUsageAutoQueryTimer();
-    usageAutoQueryKey = nextKey;
-    if (!profileId || normalizedInterval <= 0) {
-      return;
-    }
-    usageAutoQueryTimer = window.setInterval(() => {
-      if (!pendingUsageProfile || pendingUsageProfile.id !== profileId || usageBusy !== null) {
-        return;
-      }
-      void handleUsageQuery();
-    }, Math.max(normalizedInterval, 1) * 60 * 1000);
-  }
-
-  function clearUsageAutoQueryTimer() {
-    if (usageAutoQueryTimer !== null) {
-      window.clearInterval(usageAutoQueryTimer);
-      usageAutoQueryTimer = null;
-    }
-    usageAutoQueryKey = "";
-  }
-
-  async function handleUsageDelete() {
-    if (!pendingUsageProfile) {
-      return;
-    }
-    usageBusy = "delete";
-    usageError = null;
-    usageMessage = null;
-    try {
-      const state = await deleteUsageScript(pendingUsageProfile.id);
-      usageState = state;
-      usageResult = null;
-      usageForm = usageFormFromState(pendingUsageProfile, state);
-      setProfileUsageEntry(pendingUsageProfile.id, {
-        result: null,
-        state: "idle",
-        configured: false,
-        error: null,
-        updatedAt: null
-      });
-      usageMessage = $t("profiles.usage.deleteSuccess");
-    } catch (err) {
-      usageError = errorLabel(err instanceof Error ? err.message : String(err));
-    } finally {
-      usageBusy = null;
-    }
   }
 
   function openEdit(profile: ProfileDraft) {
@@ -1270,25 +851,6 @@
     return canonicalProfileToolId(profile.app) === "codex" && providerIsOfficial(profile.provider);
   }
 
-  function formatUsageValue(value: number | null | undefined, unit: string | null | undefined) {
-    if (typeof value !== "number" || Number.isNaN(value)) {
-      return $t("common.none");
-    }
-    const formatted = Math.abs(value) >= 1000 ? value.toLocaleString() : value.toFixed(2).replace(/\.00$/, "");
-    return unit ? `${formatted} ${unit}` : formatted;
-  }
-
-  function usageItemTitle(item: UsageData, index: number) {
-    return item.planName || $t("profiles.usage.resultPlanFallback", { index: index + 1 });
-  }
-
-  function usageQueriedAt(result: UsageQueryResult | null) {
-    if (!result?.queriedAt) {
-      return $t("profiles.usage.neverQueried");
-    }
-    return new Date(result.queriedAt).toLocaleString();
-  }
-
   function normalizeProtocol(value: string) {
     return value.trim();
   }
@@ -1639,25 +1201,10 @@
     };
   }
 
-  function handleUsageBaseUrlInput(event: Event) {
-    const value = (event.currentTarget as HTMLInputElement).value;
-    usageForm = {
-      ...usageForm,
-      baseUrl: value
-    };
-  }
-
   function normalizeEditBaseUrlInput() {
     editForm = {
       ...editForm,
       baseUrl: normalizeBaseUrl(editForm.baseUrl)
-    };
-  }
-
-  function normalizeUsageBaseUrlInput() {
-    usageForm = {
-      ...usageForm,
-      baseUrl: normalizeBaseUrl(usageForm.baseUrl)
     };
   }
 
@@ -1688,8 +1235,8 @@
   }
   function handleModalEscape(event: KeyboardEvent) {
     if (event.key !== "Escape") return;
-    if (pendingUsageProfile && usageBusy === null) {
-      closeUsage();
+    if (pendingUsageProfile) {
+      return;
     } else if (pendingEdit && editingId === null) {
       closeEdit();
     } else if (pendingDelete && deletingId === null) {
@@ -1704,9 +1251,8 @@
 
   function handleModalEnter(event: KeyboardEvent) {
     if (event.key !== "Enter" || keyboardTargetOwnsEnter(event.target)) return;
-    if (pendingUsageProfile && canSaveUsage && usageBusy === null) {
-      event.preventDefault();
-      void handleUsageSave();
+    if (pendingUsageProfile) {
+      return;
     } else if (pendingEdit && canSaveEdit) {
       event.preventDefault();
       void handleEditSave();
@@ -1820,193 +1366,11 @@
   {/if}
 
   {#if pendingUsageProfile}
-    <div class={desktopClientModalBackdropRecipe()} role="presentation">
-      <div class={cx(desktopClientModalPanelRecipe(), usageModalPanelClass)} role="dialog" aria-modal="true" aria-labelledby="usage-title">
-        <div class={desktopClientModalBodyRecipe()}>
-          <div>
-          <h2 id="usage-title">{$t("profiles.usage.title", { name: pendingUsageProfile.name })}</h2>
-        </div>
-
-        {#if usageError}
-          <div class={profileInlineNoticeRecipe({ tone: "error" })}>{usageError}</div>
-        {/if}
-        {#if usageMessage}
-          <div class={profileInlineNoticeRecipe({ tone: "success" })}>{usageMessage}</div>
-        {/if}
-
-        {#if usageBusy === "load"}
-          <div class={cx(emptyRowRecipe(), inlineEmptyClass)}>
-            <AppIcon name="loading" class={spinRecipe()} size={18} />
-            {$t("common.loading")}
-          </div>
-        {:else}
-          <label class={cx(nativeToggleRecipe(), usageToggleClass)} data-native-toggle>
-            <input type="checkbox" bind:checked={usageForm.enabled} disabled={usageBusy !== null} />
-            <span>
-              <strong>{$t("profiles.usage.enabled")}</strong>
-              <small>{$t("profiles.usage.enabledDescription")}</small>
-            </span>
-          </label>
-
-          {#if pendingUsageIsCodexOfficialOAuth}
-            <div class={profileUsageOfficialPanelRecipe()}>
-              <AppIcon name="stats" size={18} />
-              <div>
-                <strong>{$t("profiles.usage.officialOAuth")}</strong>
-                <span>{$t("profiles.usage.officialOAuthHint")}</span>
-              </div>
-            </div>
-          {:else}
-            <div class={profileUsageTemplateRowRecipe()}>
-              {#each usageTemplateOptions as option}
-                <button
-                  type="button"
-                  data-selected={usageForm.templateType === option.id}
-                  disabled={usageBusy !== null}
-                  on:click={() => selectUsageTemplate(option.id)}
-                >
-                  {$t(option.labelKey)}
-                </button>
-              {/each}
-            </div>
-
-            <div class={profileFormGridRecipe({ columns: "double" })}>
-              <label>
-                {$t("wizard.providerBaseUrl")}
-                <input
-                  value={usageForm.baseUrl}
-                  disabled={usageBusy !== null}
-                  placeholder={pendingUsageProfile.baseUrl}
-                  on:input={handleUsageBaseUrlInput}
-                  on:blur={normalizeUsageBaseUrlInput}
-                />
-              </label>
-              <label>
-                {$t("wizard.providerApiKey")}
-                <input
-                  type="password"
-                  bind:value={usageForm.apiKey}
-                  disabled={usageBusy !== null}
-                  placeholder={$t(pendingUsageProfile.authRef ? "profiles.usage.keepProfileKey" : "profiles.usage.keyOptional")}
-                />
-              </label>
-              <label>
-                {$t("profiles.usage.accessToken")}
-                <input type="password" bind:value={usageForm.accessToken} disabled={usageBusy !== null} placeholder={$t("profiles.usage.accessTokenPlaceholder")} />
-              </label>
-              <label>
-                {$t("profiles.usage.userId")}
-                <input bind:value={usageForm.userId} disabled={usageBusy !== null} placeholder={$t("profiles.usage.userIdPlaceholder")} />
-              </label>
-              <label>
-                {$t("profiles.usage.timeout")}
-                <input type="number" min="2" max="60" bind:value={usageForm.timeoutSeconds} disabled={usageBusy !== null} />
-              </label>
-              <label>
-                {$t("profiles.usage.autoInterval")}
-                <input type="number" min="0" max="1440" bind:value={usageForm.autoQueryIntervalMinutes} disabled={usageBusy !== null} />
-                <small>{$t("profiles.usage.autoIntervalHint")}</small>
-              </label>
-            </div>
-
-            <label class={profileUsageCodeFieldRecipe()}>
-              <span>{$t("profiles.usage.script")}</span>
-              <textarea bind:value={usageForm.code} disabled={usageBusy !== null} spellcheck="false"></textarea>
-            </label>
-          {/if}
-
-          <section class={profileDiffPanelRecipe()}>
-            <div class={profileDiffHeadingRecipe()}>
-              <div>
-                <strong>{$t("profiles.usage.resultTitle")}</strong>
-                <span>{$t("profiles.usage.queriedAt", { time: usageQueriedAt(usageResult) })}</span>
-              </div>
-              <StatusPill status={usageResult?.success ? "ok" : "info"} label={usageResult?.success ? $t("common.ok") : $t("profiles.usage.noResult")} />
-            </div>
-            {#if usageResult?.data.length}
-              <div class={profileUsageResultGridRecipe()}>
-                {#each usageResult.data as item, index}
-                  <div class={profileUsageResultCardRecipe()} data-invalid={item.isValid === false}>
-                    <strong>{usageItemTitle(item, index)}</strong>
-                    {#if item.isValid === false}
-                      <span>{item.invalidMessage ?? $t("profiles.usage.invalid")}</span>
-                    {/if}
-                    <dl>
-                      <div>
-                        <dt>{$t("profiles.usage.remaining")}</dt>
-                        <dd data-usage-balance>{formatUsageValue(item.remaining, item.unit)}</dd>
-                      </div>
-                      <div>
-                        <dt>{$t("profiles.usage.used")}</dt>
-                        <dd>{formatUsageValue(item.used, item.unit)}</dd>
-                      </div>
-                      <div>
-                        <dt>{$t("profiles.usage.total")}</dt>
-                        <dd>{formatUsageValue(item.total, item.unit)}</dd>
-                      </div>
-                    </dl>
-                    {#if item.extra}
-                      <small>{item.extra}</small>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {:else}
-              <div class={emptyRowRecipe()}>{$t("profiles.usage.emptyResult")}</div>
-            {/if}
-          </section>
-        {/if}
-
-        </div>
-
-        <div class={desktopClientModalActionsRecipe()}>
-          <button class={actionButtonRecipe()} disabled={usageBusy !== null} on:click={closeUsage}>
-            {$t("common.close")}
-          </button>
-          {#if usageState?.config && !pendingUsageIsCodexOfficialOAuth}
-            <button class={cx(actionButtonRecipe(), dangerButtonClass)} disabled={usageBusy !== null} on:click={handleUsageDelete}>
-              {#if usageBusy === "delete"}
-                <AppIcon name="loading" class={spinRecipe()} size={16} />
-              {:else}
-                <AppIcon name="delete" size={16} />
-              {/if}
-              {$t("profiles.usage.delete")}
-            </button>
-          {/if}
-          {#if !pendingUsageIsCodexOfficialOAuth}
-            <button class={actionButtonRecipe()} disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageTest}>
-              {#if usageBusy === "test"}
-                <AppIcon name="loading" class={spinRecipe()} size={16} />
-              {:else}
-                <AppIcon name="play" size={16} />
-              {/if}
-              {$t("profiles.usage.test")}
-            </button>
-          {/if}
-          <button
-            class={actionButtonRecipe({ tone: pendingUsageIsCodexOfficialOAuth ? "primary" : "secondary" })}
-            disabled={!usageState?.config?.enabled || usageBusy !== null}
-            on:click={handleUsageQuery}
-          >
-            {#if usageBusy === "query"}
-              <AppIcon name="loading" class={spinRecipe()} size={16} />
-            {:else}
-              <AppIcon name="stats" size={16} />
-            {/if}
-            {$t("profiles.usage.query")}
-          </button>
-          <button class={actionButtonRecipe({ tone: "primary" })} disabled={!canSaveUsage || usageBusy !== null} on:click={handleUsageSave}>
-            {#if usageBusy === "save"}
-              <AppIcon name="loading" class={spinRecipe()} size={16} />
-              {$t("common.saving")}
-            {:else}
-              <AppIcon name="apply" size={16} />
-              {$t("common.save")}
-            {/if}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ProfileUsageDialog
+      profile={pendingUsageProfile}
+      formatError={errorLabel}
+      onClose={closeUsage}
+    />
   {/if}
 
   {#if pendingEdit}

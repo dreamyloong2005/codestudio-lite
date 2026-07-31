@@ -607,15 +607,17 @@ test("shared utility globals for spinning icons are removed and visible eyebrows
 
 test("Profiles modal surfaces use Panda recipes", () => {
   const route = read("src/routes/Profiles.svelte");
+  const usageDialog = read("src/components/profiles/ProfileUsageDialog.svelte");
+  const profileSurfaces = `${route}\n${usageDialog}`;
   const styles = read("src/styles.css");
-  const modalMarkup = route.split("{#if pendingUsageProfile}")[1];
+  const modalMarkup = profileSurfaces;
 
   assert.match(route, /import \{ css, cx \} from "\.\.\/\.\.\/styled-system\/css";/);
   assert.match(route, /profileDiffPanelRecipe/);
   assert.match(route, /profileDiffHeadingRecipe/);
   assert.match(route, /profileDiffRowRecipe/);
   assert.match(route, /profileInlineNoticeRecipe/);
-  assert.match(route, /profileUsageOfficialPanelRecipe/);
+  assert.match(profileSurfaces, /profileUsageOfficialPanelRecipe/);
   assert.match(route, /desktopClientModalBackdropRecipe/);
   assert.match(route, /desktopClientModalPanelRecipe/);
   assert.match(route, /desktopClientPreviewListRecipe/);
@@ -741,22 +743,32 @@ test("Profiles main card list uses Panda recipes", () => {
 
 test("Profiles edit and usage forms use Panda recipes", () => {
   const route = read("src/routes/Profiles.svelte");
+  const usageDialog = read("src/components/profiles/ProfileUsageDialog.svelte");
+  const profileSurfaces = `${route}\n${usageDialog}`;
   const styles = read("src/styles.css");
-  const modalMarkup = route.split("{#if pendingUsageProfile}")[1];
+  const modalMarkup = profileSurfaces;
+
+  assert.match(route, /import ProfileUsageDialog from "\.\.\/components\/profiles\/ProfileUsageDialog\.svelte"/);
+  assert.match(route, /<ProfileUsageDialog/);
+  assert.doesNotMatch(route, /function handleUsageSave\(/);
+  assert.doesNotMatch(route, /function configureUsageAutoQuery\(/);
+  assert.match(usageDialog, /createProfileUsageController/);
+  assert.match(usageDialog, /profileUsageTemplateRowRecipe/);
+  assert.match(usageDialog, /data-usage-balance/);
 
   assert.match(route, /profileEmbeddedStackRecipe/);
   assert.match(route, /profileFormGridRecipe/);
   assert.match(route, /profileFieldErrorRecipe/);
   assert.match(route, /profileIconEditorRecipe/);
   assert.match(route, /profileIconActionsRecipe/);
-  assert.match(route, /profileUsageTemplateRowRecipe/);
-  assert.match(route, /profileUsageCodeFieldRecipe/);
-  assert.match(route, /profileUsageResultGridRecipe/);
-  assert.match(route, /profileUsageResultCardRecipe/);
+  assert.match(profileSurfaces, /profileUsageTemplateRowRecipe/);
+  assert.match(profileSurfaces, /profileUsageCodeFieldRecipe/);
+  assert.match(profileSurfaces, /profileUsageResultGridRecipe/);
+  assert.match(profileSurfaces, /profileUsageResultCardRecipe/);
   assert.match(route, /profileWriteContentPreviewRecipe/);
-  assert.match(route, /data-selected=\{usageForm\.templateType === option\.id\}/);
-  assert.match(route, /data-invalid=\{item\.isValid === false\}/);
-  assert.match(route, /data-usage-balance/);
+  assert.match(usageDialog, /data-selected=\{state\.form\.templateType === option\.id\}/);
+  assert.match(usageDialog, /data-invalid=\{item\.isValid === false\}/);
+  assert.match(usageDialog, /data-usage-balance/);
 
   assert.doesNotMatch(route, /"embedded-profile-stack"/);
   assert.doesNotMatch(modalMarkup, /class="form-grid edit-profile-form/);
