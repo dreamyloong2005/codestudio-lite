@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+const enhancementSource = () =>
+  [
+    read("src-tauri/src/core/chatgpt_desktop/enhancement.rs"),
+    read("src-tauri/src/core/chatgpt_desktop/codex_enhancements.js")
+  ].join("\n");
 
 test("ChatGPT desktop exposes a single patch-backed launch entrypoint", () => {
   const route = read("src/routes/ChatGPTDesktop.svelte");
@@ -20,12 +25,12 @@ test("ChatGPT desktop exposes a single patch-backed launch entrypoint", () => {
   assert.match(commands, /pub async fn launch_chatgpt_desktop\(\)/);
   assert.doesNotMatch(commands, /launch_chatgpt_desktop_patched|launch_patched/);
   assert.doesNotMatch(lib, /launch_chatgpt_desktop_patched/);
-  assert.match(core, /fn launch_detected_chatgpt_desktop\([\s\S]*codex_patch_launch_args/);
+  assert.match(core, /fn launch_detected_chatgpt_desktop\([\s\S]*enhancement::launch/);
   assert.doesNotMatch(core, /pub fn launch_patched/);
 });
 
 test("Codex plugin force unlock includes modern marketplace request patches", () => {
-  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const core = enhancementSource();
 
   assert.match(core, /Page\.addScriptToEvaluateOnNewDocument/);
   assert.match(core, /allowUnsafeEvalBlockedByCSP/);
@@ -87,6 +92,7 @@ test("ChatGPT Desktop leaves official GPT-5.6 model availability to the upstream
   const types = read("src/types.ts");
   const api = read("src/lib/api.ts");
   const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const enhancement = enhancementSource();
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
   const enUS = read("src/lib/locales/en-US.ts");
@@ -94,9 +100,11 @@ test("ChatGPT Desktop leaves official GPT-5.6 model availability to the upstream
   for (const source of [route, store, types, api]) {
     assert.doesNotMatch(source, /gpt56OfficialEntryOnLaunch/);
   }
-  assert.doesNotMatch(core, /gpt56_official_entry|gpt56OfficialEntry|official_gpt56|officialGpt56/);
-  assert.doesNotMatch(core, /\bCodexAuthMethod\b|api_key_login/);
-  assert.match(core, /if \(settings\.modelWhitelistUnlock\)/);
+  for (const source of [core, enhancement]) {
+    assert.doesNotMatch(source, /gpt56_official_entry|gpt56OfficialEntry|official_gpt56|officialGpt56/);
+    assert.doesNotMatch(source, /\bCodexAuthMethod\b|api_key_login/);
+  }
+  assert.match(enhancement, /if \(settings\.modelWhitelistUnlock\)/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
     assert.doesNotMatch(dictionary, /"chatgptDesktop\.gpt56OfficialEntryOnLaunch/);
@@ -109,6 +117,7 @@ test("Codex launch options include the official remote plugin cache", () => {
   const types = read("src/types.ts");
   const api = read("src/lib/api.ts");
   const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const enhancement = enhancementSource();
   const moduleIndex = read("src-tauri/src/core/mod.rs");
   const zhCN = read("src/lib/locales/zh-CN.ts");
   const zhTW = read("src/lib/locales/zh-TW.ts");
@@ -140,9 +149,9 @@ test("Codex launch options include the official remote plugin cache", () => {
   assert.match(marketplace, /ensure_official_remote_plugin_cache/);
   assert.doesNotMatch(marketplace, /remove_official_remote_plugin_cache_config/);
   assert.match(marketplace, /source_type"\]\s*=\s*toml_edit::value\("local"\)/);
-  assert.match(core, /codex_plugin_marketplaces_for_injection/);
-  assert.match(core, /__CODESTUDIO_LITE_PLUGIN_MARKETPLACES__/);
-  assert.match(core, /openai-curated-remote/);
+  assert.match(enhancement, /codex_plugin_marketplaces_for_injection/);
+  assert.match(enhancement, /__CODESTUDIO_LITE_PLUGIN_MARKETPLACES__/);
+  assert.match(enhancement, /openai-curated-remote/);
 
   for (const dictionary of [zhCN, zhTW, enUS]) {
     assert.match(dictionary, /"chatgptDesktop\.officialRemotePluginCacheOnLaunch"/);
@@ -202,9 +211,9 @@ test("ChatGPT desktop launch restarts a running client only when history sync is
 });
 
 test("Codex plugin and model injection is gated by individual Codex++ launch options", () => {
-  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const core = enhancementSource();
 
-  assert.match(core, /struct CodexEnhancementInjectionSettings/);
+  assert.match(core, /struct EnhancementSettings/);
   assert.match(core, /plugin_marketplace_unlock:\s*settings\.plugin_marketplace_unlock_on_launch/);
   assert.match(core, /plugin_auto_expand:\s*settings\.plugin_auto_expand_on_launch/);
   assert.match(core, /model_whitelist_unlock:\s*settings\.model_whitelist_unlock_on_launch/);
@@ -222,7 +231,7 @@ test("Codex plugin and model injection is gated by individual Codex++ launch opt
 });
 
 test("Codex model whitelist injection reads Codex++ local model catalog files", () => {
-  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const core = enhancementSource();
 
   assert.match(core, /model_catalog_json/);
   assert.match(core, /fn collect_codex_model_catalog_json_models/);
@@ -232,7 +241,7 @@ test("Codex model whitelist injection reads Codex++ local model catalog files", 
 });
 
 test("Codex service tier injection mirrors the latest Codex++ Fast controls", () => {
-  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const core = enhancementSource();
 
   assert.match(core, /const codexThreadServiceTierVersion = "1"/);
   assert.match(core, /const codexThreadServiceTierMaxEntries = 120/);
@@ -251,7 +260,7 @@ test("Codex service tier injection mirrors the latest Codex++ Fast controls", ()
 });
 
 test("Codex service tier observer avoids badge self-trigger refresh loops", () => {
-  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const core = enhancementSource();
 
   assert.match(core, /const codestudioLiteCodexEnhancementsVersion = "5"/);
   assert.match(core, /clearInterval\(window\.__codestudioLiteCodexEnhancementsTimer\)/);
@@ -269,7 +278,7 @@ test("Codex service tier observer avoids badge self-trigger refresh loops", () =
 });
 
 test("Codex model whitelist refresh is not run twice from the main enhancement refresh", () => {
-  const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const core = enhancementSource();
   const refreshBody = core
     .split("function refresh(mutations = null) {")
     .at(1)
@@ -284,6 +293,7 @@ test("Codex model whitelist refresh is not run twice from the main enhancement r
 test("Codex enhancement injection runs after launch without blocking the command", () => {
   const commands = read("src-tauri/src/commands/chatgpt_desktop.rs");
   const core = read("src-tauri/src/core/chatgpt_desktop.rs");
+  const enhancement = enhancementSource();
   const launchBody = core
     .split("fn launch_detected_chatgpt_desktop(")
     .at(1)
@@ -294,7 +304,8 @@ test("Codex enhancement injection runs after launch without blocking the command
   assert.match(commands, /pub async fn launch_chatgpt_desktop\(\) -> Result<\(\), String>/);
   assert.match(commands, /spawn_blocking\(\|\| chatgpt_desktop::launch\(\)\)/);
   assert.doesNotMatch(launchBody, /inject_codex_enhancements\(debug_port/);
-  assert.match(launchBody, /spawn_codex_enhancement_injection\(debug_port/);
+  assert.match(launchBody, /enhancement::launch\(settings/);
+  assert.match(enhancement, /thread::spawn\(move \|\| controller\.run\(\)\)/);
 });
 
 test("ChatGPT desktop notices are localized and dismiss with an icon", () => {

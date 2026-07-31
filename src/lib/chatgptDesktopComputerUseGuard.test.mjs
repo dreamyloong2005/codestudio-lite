@@ -52,15 +52,15 @@ test("Codex launch runs Computer Use Guard before and after starting the app", (
   assert.match(core, /if let Some\(enabled\) = request\.computer_use_guard_on_launch/);
   assert.match(core, /settings\.computer_use_guard_on_launch = enabled/);
   assert.match(launchBody, /ensure_computer_use_guard_if_enabled\(&settings\)\?/);
-  assert.match(launchBody, /launch_installed_codex\(&installed, &args\)\?/);
+  assert.match(launchBody, /enhancement::launch\(settings, \|args\| launch_installed_codex\(installed, args\)\)\?/);
   assert.match(launchBody, /start_computer_use_guard_watchdog_if_enabled\(&settings\)/);
   assert.ok(
     launchBody.indexOf("ensure_computer_use_guard_if_enabled(&settings)?")
-      < launchBody.indexOf("launch_installed_codex(&installed, &args)?"),
+      < launchBody.indexOf("enhancement::launch(settings"),
     "guard should repair config before Codex starts"
   );
   assert.ok(
-    launchBody.indexOf("launch_installed_codex(&installed, &args)?")
+    launchBody.indexOf("enhancement::launch(settings")
       < launchBody.indexOf("start_computer_use_guard_watchdog_if_enabled(&settings)"),
     "watchdog should start after Codex starts"
   );
