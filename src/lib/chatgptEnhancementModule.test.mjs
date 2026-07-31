@@ -10,6 +10,8 @@ test("ChatGPT desktop launch delegates enhancement sequencing to one controller"
 
   assert.match(parent, /mod enhancement;/);
   assert.match(parent, /enhancement::launch\(settings, \|args\|\s*launch_installed_codex\(installed, args\)\s*\)/);
+  assert.doesNotMatch(parent, /fn select_debug_port\(/);
+  assert.doesNotMatch(parent, /fn spawn_codex_enhancement_injection\(/);
   assert.match(controller, /pub\(super\) fn launch/);
   assert.match(controller, /struct EnhancementController/);
 });
