@@ -1,3 +1,5 @@
+mod enhancement;
+
 use crate::core::activity_log;
 use crate::core::app_paths::{app_paths, display_path, ensure_dirs};
 use crate::core::codex_plugin_marketplace;
@@ -960,14 +962,8 @@ fn launch_detected_chatgpt_desktop(
 ) -> Result<(), String> {
     ensure_official_remote_plugin_cache_if_enabled(&settings);
     ensure_computer_use_guard_if_enabled(&settings)?;
-    let debug_port = select_debug_port()?;
-    let args = codex_patch_launch_args(debug_port);
-    launch_installed_codex(&installed, &args)?;
+    enhancement::launch(settings, |args| launch_installed_codex(installed, args))?;
     start_computer_use_guard_watchdog_if_enabled(&settings);
-    let enhancement_settings = codex_enhancement_settings_from(&settings);
-    if enhancement_settings.enabled() {
-        spawn_codex_enhancement_injection(debug_port, enhancement_settings);
-    }
     let _ = activity_log::append(Severity::Info, "Launched ChatGPT Desktop.");
     Ok(())
 }
