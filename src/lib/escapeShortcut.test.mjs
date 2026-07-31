@@ -3,6 +3,11 @@ import fs from "node:fs";
 import test from "node:test";
 
 const profiles = fs.readFileSync("src/routes/Profiles.svelte", "utf8");
+const usageSources = [
+  profiles,
+  fs.readFileSync("src/components/profiles/ProfileUsageDialog.svelte", "utf8"),
+  fs.readFileSync("src/lib/profiles/profileUsageController.ts", "utf8")
+].join("\n");
 const dashboard = fs.readFileSync("src/routes/Dashboard.svelte", "utf8");
 const terminal = fs.readFileSync("src/routes/TerminalPanel.svelte", "utf8");
 
@@ -17,7 +22,7 @@ test("small-window close and back actions support Escape", () => {
 
 test("small-window primary actions support Enter without stealing field input", () => {
   assert.match(profiles, /<svelte:window[^>]*handleModalEnter/);
-  assert.match(profiles, /void handleUsageSave\(\)/);
+  assert.match(usageSources, /void controller\.save\(\)/);
   assert.match(profiles, /void handleEditSave\(\)/);
   assert.match(profiles, /void handleDeleteConfirm\(\)/);
   assert.match(profiles, /void handleApplyWithOptions\(pendingApply\.id\)/);
