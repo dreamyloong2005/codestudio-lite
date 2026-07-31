@@ -96,6 +96,122 @@ const formFrom = (profile: ProfileDraft, loaded: UsageScriptState | null): Profi
 const profileUsesOfficialOAuth = (profile: ProfileDraft): boolean =>
   canonicalProfileToolId(profile.app) === "codex" && providerIsOfficial(profile.provider);
 
+const normalizeBaseUrl = (value: string) => value.trim().replace(/\/+$/, "");
+
+const requestFrom = (profile: ProfileDraft, form: ProfileUsageForm): UsageScriptSaveRequest => ({
+  profileId: profile.id,
+  enabled: form.enabled,
+  templateType: form.templateType,
+  code: form.code,
+  apiKey: form.apiKey.trim() ? form.apiKey : null,
+  baseUrl: form.baseUrl.trim() ? normalizeBaseUrl(form.baseUrl) : null,
+  accessToken: form.accessToken.trim() ? form.accessToken : null,
+  userId: form.userId.trim() ? form.userId : null,
+  timeoutSeconds: Number(form.timeoutSeconds),
+  autoQueryIntervalMinutes: Number(form.autoQueryIntervalMinutes)
+});
+
+const codeForTemplate = (
+  templateType: UsageScriptTemplateType,
+  loaded: UsageScriptState | null
+): string => {
+  if (loaded?.config?.templateType === templateType && loaded.config.code.trim()) {
+    return loaded.config.code;
+  }
+  if (!loaded?.config && loaded?.defaultCode && templateType === "general") {
+    return loaded.defaultCode;
+  }
+  if (templateType === "newapi") {
+    return `({
+  request: {
+    url: "{{baseUrl}}/api/user/self",
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer {{accessToken}}",
+      "User-Agent": "codestudio-lite/1.0",
+      "New-Api-User": "{{userId}}"
+    }
+  },
+  extractor: function(response) {
+    if (response.success && response.data) {
+      return {
+        planName: response.data.group || "Default",
+        remaining: response.data.quota / 500000,
+        used: response.data.used_quota / 500000,
+        total: (response.data.quota + response.data.used_quota) / 500000,
+        unit: "USD"
+      };
+    }
+    return { isValid: false, invalidMessage: response.message || "Query failed" };
+  }
+})`;
+  }
+  if (templateType === "balance") {
+    return `({
+  request: {
+    url: "{{baseUrl}}/dashboard/billing/credit_grants",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    var total = response.total_granted || response.total_available || response.balance || 0;
+    var used = response.total_used || 0;
+    return {
+      remaining: response.total_available !== undefined ? response.total_available : Math.max(total - used, 0),
+      used: used,
+      total: total,
+      unit: "USD"
+    };
+  }
+})`;
+  }
+  if (templateType === "token_plan") {
+    return `({
+  request: {
+    url: "{{baseUrl}}/api/user/self",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    var data = response.data || response;
+    var total = data.total || data.quota || data.entitlement || 0;
+    var used = data.used || data.used_quota || 0;
+    return {
+      planName: data.plan || data.plan_name || data.group || "Token plan",
+      remaining: data.remaining !== undefined ? data.remaining : Math.max(total - used, 0),
+      used: used,
+      total: total,
+      unit: data.unit || "tokens"
+    };
+  }
+})`;
+  }
+  return `({
+  request: {
+    url: "{{baseUrl}}/user/balance",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "codestudio-lite/1.0"
+    }
+  },
+  extractor: function(response) {
+    return {
+      isValid: response.is_active !== false,
+      remaining: response.balance,
+      unit: "USD"
+    };
+  }
+})`;
+};
+
 const closedState = (): ProfileUsageViewState => ({
   status: "closed",
   profile: null,
@@ -108,7 +224,8 @@ const closedState = (): ProfileUsageViewState => ({
 });
 
 export function createProfileUsageController({
-  api
+  api,
+  scheduler
 }: {
   api: UsageApi;
   scheduler: UsageScheduler;
@@ -116,13 +233,30 @@ export function createProfileUsageController({
   const store = writable<ProfileUsageViewState>(closedState());
   let current = closedState();
   let generation = 0;
+  let timer: unknown = null;
 
   const set = (state: ProfileUsageViewState) => {
     current = state;
     store.set(state);
   };
 
+  const clearTimer = () => {
+    if (timer === null) return;
+    scheduler.clearInterval(timer);
+    timer = null;
+  };
+
+  const configureTimer = () => {
+    clearTimer();
+    const minutes = current.loaded?.config?.enabled
+      ? current.loaded.config.autoQueryIntervalMinutes
+      : 0;
+    if (current.status !== "ready" || minutes <= 0) return;
+    timer = scheduler.setInterval(() => void query(), minutes * 60_000);
+  };
+
   const open = async (profile: ProfileDraft) => {
+    clearTimer();
     const requestGeneration = ++generation;
     set({
       status: "loading",
@@ -144,6 +278,7 @@ export function createProfileUsageController({
         form: formFrom(profile, loaded),
         result: loaded.lastResult
       });
+      configureTimer();
     } catch (error) {
       if (generation !== requestGeneration || current.profile?.id !== profile.id) return;
       set({
@@ -157,9 +292,76 @@ export function createProfileUsageController({
   const close = () => {
     if (current.status !== "ready" && current.status !== "closed") return false;
     generation += 1;
+    clearTimer();
     set(closedState());
     return true;
   };
+
+  const runOperation = async <T>(
+    status: Exclude<ProfileUsageStatus, "closed" | "loading" | "ready">,
+    operation: (profile: ProfileDraft, form: ProfileUsageForm) => Promise<T>,
+    apply: (state: ProfileUsageViewState, value: T) => ProfileUsageViewState
+  ) => {
+    if (current.status !== "ready" || !current.profile) return;
+    const requestGeneration = generation;
+    const profile = current.profile;
+    const form = current.form;
+    set({ ...current, status, error: null, notice: null });
+    try {
+      const value = await operation(profile, form);
+      if (generation !== requestGeneration || current.profile?.id !== profile.id) return;
+      set(apply({ ...current, status: "ready" }, value));
+      configureTimer();
+    } catch (error) {
+      if (generation !== requestGeneration || current.profile?.id !== profile.id) return;
+      set({
+        ...current,
+        status: "ready",
+        error: error instanceof Error ? error.message : String(error)
+      });
+      configureTimer();
+    }
+  };
+
+  const save = () =>
+    runOperation(
+      "saving",
+      (profile, form) => api.save(requestFrom(profile, form)),
+      (state, loaded) => ({
+        ...state,
+        loaded,
+        form: formFrom(state.profile!, loaded),
+        result: loaded.lastResult,
+        notice: "saved"
+      })
+    );
+
+  const test = () =>
+    runOperation(
+      "testing",
+      (profile, form) => api.test(requestFrom(profile, form)),
+      (state, result) => ({ ...state, result, notice: "tested" })
+    );
+
+  const query = () =>
+    runOperation(
+      "querying",
+      (profile) => api.query(profile.id),
+      (state, result) => ({ ...state, result, notice: "queried" })
+    );
+
+  const remove = () =>
+    runOperation(
+      "deleting",
+      (profile) => api.remove(profile.id),
+      (state, loaded) => ({
+        ...state,
+        loaded,
+        form: formFrom(state.profile!, loaded),
+        result: loaded.lastResult,
+        notice: "deleted"
+      })
+    );
 
   return {
     subscribe: store.subscribe,
@@ -169,13 +371,26 @@ export function createProfileUsageController({
       if (current.status !== "ready") return;
       set({ ...current, form: { ...current.form, ...patch }, error: null, notice: null });
     },
-    selectTemplate() {},
-    async save() {},
-    async test() {},
-    async query() {},
-    async remove() {},
+    selectTemplate(templateType) {
+      if (current.status !== "ready") return;
+      set({
+        ...current,
+        form: {
+          ...current.form,
+          templateType,
+          code: codeForTemplate(templateType, current.loaded)
+        },
+        error: null,
+        notice: null
+      });
+    },
+    save,
+    test,
+    query,
+    remove,
     dispose() {
       generation += 1;
+      clearTimer();
       set(closedState());
     }
   };
