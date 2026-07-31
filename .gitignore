@@ -4,6 +4,7 @@ dist/
 dist-portable/
 dist-updater/
 .tmp-tests/
+.worktrees/
 src-tauri/target/
 installer/**/bin/
 installer/**/obj/
