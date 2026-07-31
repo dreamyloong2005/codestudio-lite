@@ -3,6 +3,10 @@ use super::{
     spawn_codex_enhancement_injection, ChatGptDesktopSettings, CodexEnhancementInjectionSettings,
 };
 
+const SCRIPT_TEMPLATE: &str = include_str!("codex_enhancements.js");
+const SETTINGS_PLACEHOLDER: &str = "__CODESTUDIO_LITE_SETTINGS__";
+const MARKETPLACES_PLACEHOLDER: &str = "__CODESTUDIO_LITE_PLUGIN_MARKETPLACES__";
+
 pub(super) fn launch<F>(settings: &ChatGptDesktopSettings, launcher: F) -> Result<(), String>
 where
     F: FnOnce(&[String]) -> Result<(), String>,
@@ -10,6 +14,26 @@ where
     EnhancementController::prepare(settings)?.launch_with(launcher, |controller| {
         spawn_codex_enhancement_injection(controller.debug_port, controller.settings);
     })
+}
+
+pub(super) fn render_script(
+    settings_json: &str,
+    marketplaces_json: &str,
+) -> Result<String, String> {
+    for placeholder in [SETTINGS_PLACEHOLDER, MARKETPLACES_PLACEHOLDER] {
+        if SCRIPT_TEMPLATE.matches(placeholder).count() != 1 {
+            return Err(format!(
+                "Codex enhancement script must contain exactly one {placeholder} placeholder."
+            ));
+        }
+    }
+    let rendered = SCRIPT_TEMPLATE
+        .replace(SETTINGS_PLACEHOLDER, settings_json)
+        .replace(MARKETPLACES_PLACEHOLDER, marketplaces_json);
+    if rendered.contains(SETTINGS_PLACEHOLDER) || rendered.contains(MARKETPLACES_PLACEHOLDER) {
+        return Err("Codex enhancement script contains an unresolved placeholder.".to_string());
+    }
+    Ok(rendered)
 }
 
 struct EnhancementController {
@@ -35,5 +59,18 @@ impl EnhancementController {
             start(self);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renderer_replaces_every_required_placeholder() {
+        let script = render_script(r#"{"enabled":true}"#, "[]").unwrap();
+        assert!(script.contains(r#"{"enabled":true}"#));
+        assert!(!script.contains(SETTINGS_PLACEHOLDER));
+        assert!(!script.contains(MARKETPLACES_PLACEHOLDER));
     }
 }
