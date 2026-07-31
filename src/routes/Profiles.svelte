@@ -45,6 +45,7 @@
   import ModelSelectInput from "../components/ModelSelectInput.svelte";
   import ProfileList from "../components/profiles/ProfileList.svelte";
   import ProfileUsageDialog from "../components/profiles/ProfileUsageDialog.svelte";
+  import type { ProfileUsageSummaryUpdate } from "../lib/profiles/profileUsageController";
   import ProfileToolTabs from "../components/profiles/ProfileToolTabs.svelte";
   import StatusPill from "../components/StatusPill.svelte";
   import { css, cx } from "../../styled-system/css";
@@ -416,6 +417,11 @@
       ...profileUsageEntries,
       [profileId]: entry
     };
+  }
+
+  function updateProfileUsageSummary(profileId: string, update: ProfileUsageSummaryUpdate) {
+    const current = profileUsageEntries[profileId] ?? emptyProfileUsageEntry();
+    setProfileUsageEntry(profileId, { ...current, ...update });
   }
 
   function openUsage(profile: ProfileDraft) {
@@ -1370,6 +1376,7 @@
       profile={pendingUsageProfile}
       formatError={errorLabel}
       onClose={closeUsage}
+      onSummaryChange={updateProfileUsageSummary}
     />
   {/if}
 

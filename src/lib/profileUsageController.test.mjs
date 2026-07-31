@@ -211,3 +211,110 @@ test("usage controller replaces and disposes auto-query timers", async () => {
   await Promise.resolve();
   assert.equal(queryCalls, 0);
 });
+
+test("usage controller reports parent summary changes across the workflow", async () => {
+  const updates = [];
+  const api = completeApi({
+    load: async (profileId) => stateWithConfig({
+      profileId,
+      enabled: true,
+      code: "script",
+      autoQueryIntervalMinutes: 0
+    })
+  });
+  const controller = createProfileUsageController({
+    api,
+    scheduler: scheduler(),
+    onSummaryChange: (profileId, update) => updates.push({ profileId, update })
+  });
+
+  await controller.open(profile("alpha"));
+  await controller.query();
+  controller.updateForm({ enabled: false });
+  await controller.save();
+  await controller.remove();
+
+  assert.deepEqual(updates.map(({ profileId, update }) => ({ profileId, ...update })), [
+    {
+      profileId: "alpha",
+      result: null,
+      state: "idle",
+      configured: true,
+      error: null
+    },
+    {
+      profileId: "alpha",
+      state: "querying",
+      configured: true,
+      error: null
+    },
+    {
+      profileId: "alpha",
+      result: successfulResult(),
+      state: "idle",
+      configured: true,
+      error: null,
+      updatedAt: "2026-07-31T00:01:00Z"
+    },
+    {
+      profileId: "alpha",
+      result: null,
+      state: "idle",
+      configured: false,
+      error: null,
+      updatedAt: null
+    },
+    {
+      profileId: "alpha",
+      result: null,
+      state: "idle",
+      configured: false,
+      error: null,
+      updatedAt: null
+    }
+  ]);
+});
+
+test("usage controller clears a stale result when saving a disabled configuration", async () => {
+  const staleResult = successfulResult();
+  const api = completeApi({
+    load: async (profileId) => ({
+      ...stateWithConfig({ profileId, enabled: true, code: "script" }),
+      lastResult: staleResult
+    }),
+    save: async (request) => ({
+      ...stateWithConfig(request),
+      lastResult: staleResult
+    })
+  });
+  const controller = createProfileUsageController({ api, scheduler: scheduler() });
+
+  await controller.open(profile("alpha"));
+  controller.updateForm({ enabled: false });
+  await controller.save();
+
+  assert.equal(get(controller).result, null);
+});
+
+test("usage controller reports a failed query after leaving the querying state", async () => {
+  const updates = [];
+  const api = completeApi({
+    query: async () => {
+      throw new Error("query failed");
+    }
+  });
+  const controller = createProfileUsageController({
+    api,
+    scheduler: scheduler(),
+    onSummaryChange: (_profileId, update) => updates.push(update)
+  });
+  await controller.open(profile("alpha"));
+  updates.length = 0;
+
+  await controller.query();
+
+  assert.deepEqual(updates, [
+    { state: "querying", configured: true, error: null },
+    { state: "idle", error: "query failed" }
+  ]);
+});

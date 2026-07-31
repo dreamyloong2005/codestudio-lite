@@ -8,7 +8,10 @@
     testUsageScript
   } from "../../lib/api";
   import { t, type TranslationKey } from "../../lib/i18n";
-  import { createProfileUsageController } from "../../lib/profiles/profileUsageController";
+  import {
+    createProfileUsageController,
+    type ProfileUsageSummaryUpdate
+  } from "../../lib/profiles/profileUsageController";
   import type { ProfileDraft, UsageData, UsageQueryResult, UsageScriptTemplateType } from "../../types";
   import AppIcon from "../AppIcon.svelte";
   import StatusPill from "../StatusPill.svelte";
@@ -36,6 +39,7 @@
   export let profile: ProfileDraft;
   export let formatError: (message: string) => string = (message) => message;
   export let onClose: () => void = () => {};
+  export let onSummaryChange: (profileId: string, update: ProfileUsageSummaryUpdate) => void = () => {};
 
   const controller = createProfileUsageController({
     api: {
@@ -48,7 +52,11 @@
     scheduler: {
       setInterval: (callback, milliseconds) => window.setInterval(callback, milliseconds),
       clearInterval: (handle) => window.clearInterval(handle as number)
-    }
+    },
+    onSummaryChange: (profileId, update) => onSummaryChange(profileId, {
+      ...update,
+      ...(update.error ? { error: formatError(update.error) } : {})
+    })
   });
 
   const usageTemplateOptions: Array<{ id: UsageScriptTemplateType; labelKey: TranslationKey }> = [

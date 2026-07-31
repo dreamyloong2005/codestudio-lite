@@ -54,6 +54,14 @@ export interface UsageScheduler {
   clearInterval(handle: unknown): void;
 }
 
+export interface ProfileUsageSummaryUpdate {
+  result?: UsageQueryResult | null;
+  state?: "idle" | "querying";
+  configured?: boolean;
+  error?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface ProfileUsageController extends Readable<ProfileUsageViewState> {
   open(profile: ProfileDraft): Promise<void>;
   close(): boolean;
@@ -225,10 +233,12 @@ const closedState = (): ProfileUsageViewState => ({
 
 export function createProfileUsageController({
   api,
-  scheduler
+  scheduler,
+  onSummaryChange = () => {}
 }: {
   api: UsageApi;
   scheduler: UsageScheduler;
+  onSummaryChange?: (profileId: string, update: ProfileUsageSummaryUpdate) => void;
 }): ProfileUsageController {
   const store = writable<ProfileUsageViewState>(closedState());
   let current = closedState();
@@ -278,6 +288,13 @@ export function createProfileUsageController({
         form: formFrom(profile, loaded),
         result: loaded.lastResult
       });
+      onSummaryChange(profile.id, {
+        result: loaded.lastResult,
+        state: "idle",
+        configured: Boolean(loaded.config?.enabled),
+        error: null,
+        ...(loaded.lastResult?.queriedAt ? { updatedAt: loaded.lastResult.queriedAt } : {})
+      });
       configureTimer();
     } catch (error) {
       if (generation !== requestGeneration || current.profile?.id !== profile.id) return;
@@ -300,7 +317,8 @@ export function createProfileUsageController({
   const runOperation = async <T>(
     status: Exclude<ProfileUsageStatus, "closed" | "loading" | "ready">,
     operation: (profile: ProfileDraft, form: ProfileUsageForm) => Promise<T>,
-    apply: (state: ProfileUsageViewState, value: T) => ProfileUsageViewState
+    apply: (state: ProfileUsageViewState, value: T) => ProfileUsageViewState,
+    onError?: (profile: ProfileDraft, message: string) => void
   ) => {
     if (current.status !== "ready" || !current.profile) return;
     const requestGeneration = generation;
@@ -314,11 +332,13 @@ export function createProfileUsageController({
       configureTimer();
     } catch (error) {
       if (generation !== requestGeneration || current.profile?.id !== profile.id) return;
+      const message = error instanceof Error ? error.message : String(error);
       set({
         ...current,
         status: "ready",
-        error: error instanceof Error ? error.message : String(error)
+        error: message
       });
+      onError?.(profile, message);
       configureTimer();
     }
   };
@@ -327,40 +347,83 @@ export function createProfileUsageController({
     runOperation(
       "saving",
       (profile, form) => api.save(requestFrom(profile, form)),
-      (state, loaded) => ({
-        ...state,
-        loaded,
-        form: formFrom(state.profile!, loaded),
-        result: loaded.lastResult,
-        notice: "saved"
-      })
+      (state, loaded) => {
+        const configured = Boolean(loaded.config?.enabled);
+        const result = configured ? loaded.lastResult : null;
+        onSummaryChange(state.profile!.id, {
+          result,
+          state: "idle",
+          configured,
+          error: null,
+          ...(configured && result?.queriedAt ? { updatedAt: result.queriedAt } : {}),
+          ...(!configured ? { updatedAt: null } : {})
+        });
+        return {
+          ...state,
+          loaded,
+          form: formFrom(state.profile!, loaded),
+          result,
+          notice: "saved"
+        };
+      }
     );
 
   const test = () =>
     runOperation(
       "testing",
       (profile, form) => api.test(requestFrom(profile, form)),
-      (state, result) => ({ ...state, result, notice: "tested" })
+      (state, result) => {
+        onSummaryChange(state.profile!.id, {
+          result,
+          state: "idle",
+          configured: true,
+          error: null,
+          ...(result.queriedAt ? { updatedAt: result.queriedAt } : {})
+        });
+        return { ...state, result, notice: "tested" };
+      }
     );
 
   const query = () =>
     runOperation(
       "querying",
-      (profile) => api.query(profile.id),
-      (state, result) => ({ ...state, result, notice: "queried" })
+      (profile) => {
+        onSummaryChange(profile.id, { state: "querying", configured: true, error: null });
+        return api.query(profile.id);
+      },
+      (state, result) => {
+        onSummaryChange(state.profile!.id, {
+          result,
+          state: "idle",
+          configured: true,
+          error: null,
+          ...(result.queriedAt ? { updatedAt: result.queriedAt } : {})
+        });
+        return { ...state, result, notice: "queried" };
+      },
+      (profile, message) => onSummaryChange(profile.id, { state: "idle", error: message })
     );
 
   const remove = () =>
     runOperation(
       "deleting",
       (profile) => api.remove(profile.id),
-      (state, loaded) => ({
-        ...state,
-        loaded,
-        form: formFrom(state.profile!, loaded),
-        result: loaded.lastResult,
-        notice: "deleted"
-      })
+      (state, loaded) => {
+        onSummaryChange(state.profile!.id, {
+          result: null,
+          state: "idle",
+          configured: false,
+          error: null,
+          updatedAt: null
+        });
+        return {
+          ...state,
+          loaded,
+          form: formFrom(state.profile!, loaded),
+          result: null,
+          notice: "deleted"
+        };
+      }
     );
 
   return {
