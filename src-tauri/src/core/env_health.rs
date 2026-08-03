@@ -26,6 +26,9 @@ const CLAUDE_ENV_VARS: &[&str] = &[
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
 ];
+const CODEX_TOOL_ID: &str = "codex";
+const CODEX_TOOL_NAME: &str = "Codex";
+const CODEX_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_MODEL"];
 const PATH_REPAIR_DIRS_STATE_KEY: &str = "env_health.path_repair_dirs";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -251,6 +254,28 @@ pub fn claude_env_conflicts_without_profile() -> Vec<EnvironmentVariableConflict
     claude_env_conflicts(expected)
 }
 
+pub fn codex_env_conflicts_for_active_config(
+    drafts: &[crate::core::types::ProfileDraft],
+    active_config: &HashMap<String, String>,
+) -> Vec<EnvironmentVariableConflict> {
+    let Some(profile_id) = active_config.get(CODEX_TOOL_ID) else { return codex_env_conflicts_without_profile(); };
+    let Some(profile) = drafts.iter().find(|profile| profile.id == *profile_id) else { return codex_env_conflicts_without_profile(); };
+    codex_env_conflicts_for_profile(profile)
+}
+
+pub fn codex_env_conflicts_for_profile(profile: &crate::core::types::ProfileDraft) -> Vec<EnvironmentVariableConflict> {
+    if canonical_tool_id(&profile.app) != CODEX_TOOL_ID { return Vec::new(); }
+    let mut expected = default_expected(CODEX_ENV_VARS);
+    expected.insert("OPENAI_BASE_URL".into(), ExpectedEnvValue::Exact(profile.base_url.trim().into()));
+    if profile.auth_ref.as_deref().is_some_and(|value| !value.trim().is_empty()) { expected.insert("OPENAI_API_KEY".into(), ExpectedEnvValue::StoredSecret); }
+    if profile.model.trim().is_empty() { expected.insert("OPENAI_MODEL".into(), ExpectedEnvValue::Absent); } else { expected.insert("OPENAI_MODEL".into(), ExpectedEnvValue::Exact(profile.model.trim().into())); }
+    conflicts_for(expected, CODEX_ENV_VARS, CODEX_TOOL_ID, CODEX_TOOL_NAME)
+}
+
+pub fn codex_env_conflicts_without_profile() -> Vec<EnvironmentVariableConflict> {
+    conflicts_for(default_expected(CODEX_ENV_VARS), CODEX_ENV_VARS, CODEX_TOOL_ID, CODEX_TOOL_NAME)
+}
+
 pub fn clear_environment_variables(
     request: ClearEnvironmentVariablesRequest,
 ) -> Result<ClearEnvironmentVariablesResult, String> {
@@ -259,14 +284,11 @@ pub fn clear_environment_variables(
             "Refused: clearing environment variables requires explicit confirmation.".to_string(),
         );
     }
-    if canonical_tool_id(&request.tool_id) != CLAUDE_TOOL_ID {
-        return Err(
-            "Only Claude-related environment variables can be cleared right now.".to_string(),
-        );
-    }
+    let tool_id = canonical_tool_id(&request.tool_id);
+    let (tool_id, tool_name, names) = if tool_id == CLAUDE_TOOL_ID { (CLAUDE_TOOL_ID, CLAUDE_TOOL_NAME, CLAUDE_ENV_VARS) } else if tool_id == CODEX_TOOL_ID { (CODEX_TOOL_ID, CODEX_TOOL_NAME, CODEX_ENV_VARS) } else { return Err("Only Claude and Codex environment variables can be cleared.".to_string()); };
 
     let requested = if request.variables.is_empty() {
-        CLAUDE_ENV_VARS
+        names
             .iter()
             .map(|name| (*name).to_string())
             .collect()
@@ -274,7 +296,7 @@ pub fn clear_environment_variables(
         request
             .variables
             .into_iter()
-            .filter(|name| CLAUDE_ENV_VARS.contains(&name.as_str()))
+            .filter(|name| names.contains(&name.as_str()))
             .collect::<Vec<_>>()
     };
     let mut seen = HashSet::new();
@@ -314,11 +336,11 @@ pub fn clear_environment_variables(
         skipped.push("Only this process environment was cleared on the current platform; shell startup files must be checked manually.".to_string());
     }
 
-    let conflicts = claude_env_conflicts_without_profile();
+    let conflicts = conflicts_for(default_expected(names), names, tool_id, tool_name);
     let success =
         conflicts.is_empty() || conflicts.iter().all(|conflict| conflict.scope == "machine");
     let message = if success {
-        "Claude global environment variables were cleared.".to_string()
+        "Global environment variables were cleared.".to_string()
     } else {
         "Writable environment variables were cleared, but conflicts are still detected.".to_string()
     };
@@ -351,7 +373,20 @@ enum ExpectedEnvValue {
 fn claude_env_conflicts(
     expected: HashMap<String, ExpectedEnvValue>,
 ) -> Vec<EnvironmentVariableConflict> {
-    read_claude_env_values()
+    conflicts_for(expected, CLAUDE_ENV_VARS, CLAUDE_TOOL_ID, CLAUDE_TOOL_NAME)
+}
+
+fn default_expected(names: &[&str]) -> HashMap<String, ExpectedEnvValue> {
+    names.iter().map(|name| ((*name).to_string(), ExpectedEnvValue::Absent)).collect()
+}
+
+fn conflicts_for(
+    expected: HashMap<String, ExpectedEnvValue>,
+    names: &[&str],
+    tool_id: &str,
+    tool_name: &str,
+) -> Vec<EnvironmentVariableConflict> {
+    read_env_values(names)
         .into_iter()
         .filter(|value| !value.value.trim().is_empty())
         .filter_map(|value| {
@@ -369,12 +404,12 @@ fn claude_env_conflicts(
             }
             let message = match expected_value {
                 ExpectedEnvValue::StoredSecret => format!(
-                    "{} affects Claude API connections and may override the saved Provider API key.",
-                    value.name
+                    "{} affects {} API connections and may override the saved Provider API key.",
+                    value.name, tool_name
                 ),
                 _ => format!(
-                    "{} affects Claude API connections and does not match the current CodeStudio configuration.",
-                    value.name
+                    "{} affects {} API connections and does not match the current CodeStudio configuration.",
+                    value.name, tool_name
                 ),
             };
             let expected_value_preview = match expected_value {
@@ -385,8 +420,8 @@ fn claude_env_conflicts(
                 ExpectedEnvValue::Exact(_) | ExpectedEnvValue::Absent => None,
             };
             Some(EnvironmentVariableConflict {
-                tool_id: CLAUDE_TOOL_ID.to_string(),
-                tool_name: CLAUDE_TOOL_NAME.to_string(),
+                tool_id: tool_id.to_string(),
+                tool_name: tool_name.to_string(),
                 variable: value.name.clone(),
                 current_value_preview: preview_env_value(&value.name, &value.value),
                 expected_value_preview,
@@ -398,18 +433,18 @@ fn claude_env_conflicts(
         .collect()
 }
 
-fn read_claude_env_values() -> Vec<RawEnvVarValue> {
+fn read_env_values(names: &[&str]) -> Vec<RawEnvVarValue> {
     if cfg!(target_os = "windows") {
-        read_claude_env_values_windows().unwrap_or_else(|_| read_process_env_values())
+        read_env_values_windows(names).unwrap_or_else(|_| read_process_env_values(names))
     } else if cfg!(target_os = "macos") {
-        read_claude_env_values_macos()
+        read_env_values_macos(names)
     } else {
-        read_process_env_values()
+        read_process_env_values(names)
     }
 }
 
-fn read_process_env_values() -> Vec<RawEnvVarValue> {
-    CLAUDE_ENV_VARS
+fn read_process_env_values(names: &[&str]) -> Vec<RawEnvVarValue> {
+    names
         .iter()
         .filter_map(|name| {
             env::var(name).ok().map(|value| RawEnvVarValue {
@@ -421,8 +456,8 @@ fn read_process_env_values() -> Vec<RawEnvVarValue> {
         .collect()
 }
 
-fn read_claude_env_values_windows() -> Result<Vec<RawEnvVarValue>, String> {
-    let names = CLAUDE_ENV_VARS
+fn read_env_values_windows(names: &[&str]) -> Result<Vec<RawEnvVarValue>, String> {
+    let names = names
         .iter()
         .map(|name| ps_quote(name))
         .collect::<Vec<_>>()
@@ -456,9 +491,9 @@ $items | ConvertTo-Json -Compress -Depth 3
     }
 }
 
-fn read_claude_env_values_macos() -> Vec<RawEnvVarValue> {
-    let mut values = read_process_env_values();
-    for name in CLAUDE_ENV_VARS {
+fn read_env_values_macos(names: &[&str]) -> Vec<RawEnvVarValue> {
+    let mut values = read_process_env_values(names);
+    for name in names {
         let Ok(output) = hidden_command_with_args("launchctl", &["getenv", name]).output() else {
             continue;
         };

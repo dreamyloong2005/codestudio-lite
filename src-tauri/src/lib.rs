@@ -64,7 +64,7 @@ pub fn run() {
             commands::install_terminal::stop_install_terminal,
             commands::install_terminal::write_install_terminal,
             commands::profiles::apply_profile,
-            commands::profiles::clear_claude_environment_variables,
+            commands::profiles::clear_environment_variables,
             commands::profiles::delete_profile_draft,
             commands::profiles::duplicate_profile_draft,
             commands::profiles::list_profile_models,

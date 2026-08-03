@@ -110,10 +110,14 @@ where
     profile::ensure_app_dirs()?;
     let paths = app_paths().map_err(|err| err.to_string())?;
     let profile_summary = profile::load_profile_summary()?;
-    let env_conflicts = env_health::claude_env_conflicts_for_active_config(
+    let mut env_conflicts = env_health::claude_env_conflicts_for_active_config(
         &profile_summary.drafts,
         &profile_summary.active_profiles_by_mode.config,
     );
+    env_conflicts.extend(env_health::codex_env_conflicts_for_active_config(
+        &profile_summary.drafts,
+        &profile_summary.active_profiles_by_mode.config,
+    ));
     let base = DetectionProgressBase {
         generated_at: Utc::now().to_rfc3339(),
         platform: current_platform_label(),

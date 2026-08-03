@@ -781,7 +781,7 @@ export async function clearClaudeEnvironmentVariables(
   request: ClearEnvironmentVariablesRequest
 ): Promise<ClearEnvironmentVariablesResult> {
   if (isTauri()) {
-    return invoke("clear_claude_environment_variables", { request });
+    return invoke("clear_environment_variables", { request });
   }
   if (!request.confirm) {
     throw new Error("explicit confirmation is required");

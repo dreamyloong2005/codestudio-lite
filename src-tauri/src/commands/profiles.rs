@@ -89,7 +89,7 @@ pub fn switch_active_profile(
 }
 
 #[tauri::command]
-pub fn clear_claude_environment_variables(
+pub fn clear_environment_variables(
     request: ClearEnvironmentVariablesRequest,
 ) -> Result<ClearEnvironmentVariablesResult, String> {
     env_health::clear_environment_variables(request).map_err(|err| err.to_string())
