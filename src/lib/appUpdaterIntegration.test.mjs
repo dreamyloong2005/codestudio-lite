@@ -28,6 +28,7 @@ test("release builds generate updater configuration from R2 inputs", () => {
   const burnBuild = read("installer/windows/burn/build-burn.ps1");
   const macosBuild = read("scripts/build-macos-updater.sh");
   const macosNormalizer = read("scripts/normalize-macos-artifacts.sh");
+  const macosNormalizerModule = read("scripts/normalize-macos-artifacts.mjs");
   const linuxBuild = read("scripts/build-linux-updater.sh");
   const linuxNormalizer = read("scripts/normalize-linux-artifacts.sh");
 
@@ -50,7 +51,9 @@ test("release builds generate updater configuration from R2 inputs", () => {
   assert.match(burnBuild, /tauri:build:updater -- --bundles msi/);
   assert.match(macosBuild, /aarch64-apple-darwin:arm64/);
   assert.match(macosBuild, /x86_64-apple-darwin:x64/);
-  assert.match(macosNormalizer, /CodeStudio-Lite-\$\{VERSION\}-macOS-\$\{ARCH_LABEL\}/);
+  assert.match(macosNormalizer, /normalize-macos-artifacts\.mjs/);
+  assert.match(macosNormalizerModule, /macosArtifactPaths/);
+  assert.match(macosNormalizerModule, /paths\.raw\.archiveSignature/);
   assert.match(linuxBuild, /normalize-linux-artifacts\.sh/);
   assert.match(linuxNormalizer, /CodeStudio-Lite-\$\{VERSION\}-Linux-\$\{ARCH_LABEL\}/);
   assert.match(linuxNormalizer, /command -v node/);

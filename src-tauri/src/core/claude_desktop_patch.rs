@@ -6,6 +6,7 @@ use crate::core::detector::{
     claude_desktop_windows_stale_msix_manifest,
 };
 use crate::core::download_http::{self, DownloadHttpTransport};
+use crate::core::macos_app_scope::{resolve as resolve_macos_app, MacosManagedApp};
 #[cfg(target_os = "windows")]
 use crate::core::platform::package;
 #[cfg(target_os = "windows")]
@@ -689,8 +690,10 @@ fn launch_macos_claude_desktop_localized() -> Result<(), String> {
     ensure_macos_accessibility_trusted_for_localized_launch()?;
     write_localized_launch_marker()?;
     close_existing_claude_for_localized_launch()?;
-    hidden_command("open")
-        .args(["-a", "Claude"])
+    let preferred_app = preferred_macos_claude_app()?;
+    let command = macos_open_command_for_app(&preferred_app);
+    hidden_command(&command[0])
+        .args(&command[1..])
         .status()
         .map_err(|err| format!("Failed to launch Claude Desktop: {err}"))
         .and_then(|status| {
@@ -2907,6 +2910,12 @@ fn cf_string_to_string(value: CFTypeRef) -> Option<String> {
 }
 
 fn macos_localized_launch_script() -> String {
+    let preferred_app =
+        preferred_macos_claude_app().unwrap_or_else(|_| PathBuf::from("/Applications/Claude.app"));
+    macos_localized_launch_script_for_app(&preferred_app)
+}
+
+fn macos_localized_launch_script_for_app(preferred_app: &Path) -> String {
     r#"#!/bin/sh
 set -eu
 mkdir -p "$HOME/.codestudio-lite/claude-desktop-patch"
@@ -2936,7 +2945,7 @@ if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
   /usr/bin/pkill -KILL -x Claude >/dev/null 2>&1 || true
   /bin/sleep 0.5
 fi
-/usr/bin/open -a Claude
+/usr/bin/open -a __CLAUDE_APP_PATH__
 /bin/sleep 2
 deadline=$(( $(/bin/date +%s) + 90 ))
 debugger_attempts=0
@@ -2974,6 +2983,10 @@ echo "[claude-zh] Claude main process debugger is ready." >&2
         "__CLAUDE_NODE_INSPECT_PORT__",
         &CLAUDE_NODE_INSPECT_PORT.to_string(),
     )
+    .replace(
+        "__CLAUDE_APP_PATH__",
+        &sh_single_quote(&preferred_app.to_string_lossy()),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -2988,6 +3001,12 @@ fn launch_macos_claude_desktop_plain_restart() -> Result<(), String> {
 
 #[cfg(any(target_os = "macos", test))]
 fn macos_plain_launch_script() -> String {
+    let preferred_app =
+        preferred_macos_claude_app().unwrap_or_else(|_| PathBuf::from("/Applications/Claude.app"));
+    macos_plain_launch_script_for_app(&preferred_app)
+}
+
+fn macos_plain_launch_script_for_app(preferred_app: &Path) -> String {
     r#"set -eu
 if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
   /usr/bin/pkill -TERM -x Claude >/dev/null 2>&1 || true
@@ -3004,9 +3023,32 @@ if /usr/bin/pgrep -x Claude >/dev/null 2>&1; then
   echo "Claude Desktop is still running; restart was not continued." >&2
   exit 1
 fi
-/usr/bin/open -a Claude
+/usr/bin/open -a __CLAUDE_APP_PATH__
 "#
-    .to_string()
+    .replace(
+        "__CLAUDE_APP_PATH__",
+        &sh_single_quote(&preferred_app.to_string_lossy()),
+    )
+}
+
+fn preferred_macos_claude_app() -> Result<PathBuf, String> {
+    let home = app_paths().map_err(|err| err.to_string())?.home_dir;
+    let resolution = resolve_macos_app(
+        &home,
+        Path::new("/Applications"),
+        MacosManagedApp::ClaudeDesktop,
+    );
+    resolution
+        .preferred_app
+        .ok_or_else(|| "Claude Desktop was not detected.".to_string())
+}
+
+fn macos_open_command_for_app(preferred_app: &Path) -> Vec<String> {
+    vec![
+        "open".to_string(),
+        "-a".to_string(),
+        preferred_app.to_string_lossy().to_string(),
+    ]
 }
 
 fn sh_single_quote(value: &str) -> String {

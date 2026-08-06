@@ -2,6 +2,9 @@ pub mod commands;
 pub mod core;
 
 pub fn run() {
+    if crate::core::macos_app_scope::run_codestudio_self_cleanup_helper_from_args() {
+        return;
+    }
     tauri::Builder::default()
         // Single-instance guard: must be registered before any other plugin.
         // If a second instance is launched, the callback fires in the first
@@ -63,6 +66,9 @@ pub fn run() {
             commands::install_terminal::launch_tool_external,
             commands::install_terminal::stop_install_terminal,
             commands::install_terminal::write_install_terminal,
+            commands::macos_app_scope::cleanup_macos_user_application,
+            commands::macos_app_scope::load_macos_application_scope_status,
+            commands::macos_app_scope::take_codestudio_self_cleanup_failure,
             commands::profiles::apply_profile,
             commands::profiles::clear_claude_environment_variables,
             commands::profiles::delete_profile_draft,

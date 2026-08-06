@@ -16,6 +16,7 @@ pub mod download_http;
 pub mod env_health;
 pub mod gateway;
 pub mod gateway_request_log;
+pub mod macos_app_scope;
 pub mod npm_global;
 pub mod platform;
 pub mod privacy_filter;

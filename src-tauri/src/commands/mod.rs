@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod gateway;
 pub mod gateway_request_log;
 pub mod install_terminal;
+pub mod macos_app_scope;
 pub mod profiles;
 pub mod settings;
 pub mod tool_installer;

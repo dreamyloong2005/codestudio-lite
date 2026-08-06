@@ -509,6 +509,143 @@ fn macos_process_command_line(pid: u32) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+pub fn close_processes_in_macos_bundle(
+    label: &str,
+    bundle: &Path,
+) -> Result<ProcessTerminationReport, String> {
+    close_processes_in_macos_bundles(label, &[bundle.to_path_buf()])
+}
+
+pub fn close_processes_in_macos_bundles(
+    label: &str,
+    bundles: &[std::path::PathBuf],
+) -> Result<ProcessTerminationReport, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(ProcessTerminationReport::default());
+    }
+    let started = Instant::now();
+    drain_macos_bundle_processes_with(
+        Duration::from_secs(5),
+        Duration::from_secs(3),
+        || started.elapsed(),
+        || scan_macos_bundle_process_ids(label, bundles),
+        |pids, forced| {
+            let signal = if forced { "-KILL" } else { "-TERM" };
+            for pid in pids {
+                let output = hidden_command_with_args("kill", &[signal, &pid.to_string()])
+                    .output()
+                    .map_err(|err| format!("Failed to stop {label}: {err}"))?;
+                if !output.status.success() && macos_pid_alive(*pid) {
+                    return Err(format!("Failed to stop {label} process {pid}."));
+                }
+            }
+            Ok(())
+        },
+        || thread::sleep(Duration::from_millis(250)),
+    )
+    .map_err(|error| {
+        if error.contains(label) {
+            error
+        } else {
+            format!("{label}: {error}")
+        }
+    })
+}
+
+fn scan_macos_bundle_process_ids(
+    label: &str,
+    bundles: &[std::path::PathBuf],
+) -> Result<Vec<u32>, String> {
+    let output = hidden_command_with_args("ps", &["-axo", "pid=,command="])
+        .output()
+        .map_err(|err| format!("Failed to inspect {label} processes: {err}"))?;
+    if !output.status.success() {
+        return Err(format!("Failed to inspect {label} processes."));
+    }
+    let ps = String::from_utf8_lossy(&output.stdout);
+    let mut ids = BTreeSet::new();
+    for bundle in bundles {
+        ids.extend(macos_bundle_process_ids_from_ps(
+            &ps,
+            bundle,
+            std::process::id(),
+        ));
+    }
+    Ok(ids.into_iter().collect())
+}
+
+fn drain_macos_bundle_processes_with<FNow, FScan, FSignal, FPause>(
+    graceful_window: Duration,
+    force_window: Duration,
+    mut now: FNow,
+    mut scan: FScan,
+    mut signal: FSignal,
+    mut pause: FPause,
+) -> Result<ProcessTerminationReport, String>
+where
+    FNow: FnMut() -> Duration,
+    FScan: FnMut() -> Result<Vec<u32>, String>,
+    FSignal: FnMut(&[u32], bool) -> Result<(), String>,
+    FPause: FnMut(),
+{
+    let mut observed = BTreeSet::new();
+    let mut forced = BTreeSet::new();
+    let mut stable_empty_scans = 0;
+    let force_deadline = graceful_window.saturating_add(force_window);
+
+    for _ in 0..128 {
+        let elapsed = now();
+        let targets = scan()?;
+        if targets.is_empty() {
+            stable_empty_scans += 1;
+            if stable_empty_scans >= 2 || elapsed > force_deadline {
+                return Ok(ProcessTerminationReport {
+                    total: observed.len() as u64,
+                    forced: forced.len() as u64,
+                    remaining: 0,
+                });
+            }
+            pause();
+            continue;
+        }
+        stable_empty_scans = 0;
+        observed.extend(targets.iter().copied());
+        let should_force = elapsed >= graceful_window;
+        signal(&targets, should_force)?;
+        if should_force {
+            forced.extend(targets.iter().copied());
+        }
+        if elapsed > force_deadline {
+            return Err(format!(
+                "processes kept running or relaunching during the bounded cleanup deadline ({} remaining).",
+                targets.len()
+            ));
+        }
+        pause();
+    }
+
+    let remaining = scan()?.len() as u64;
+    Err(format!(
+        "processes kept running or relaunching during the bounded cleanup deadline ({remaining} remaining)."
+    ))
+}
+
+fn macos_bundle_process_ids_from_ps(ps: &str, bundle: &Path, current_pid: u32) -> Vec<u32> {
+    let bundle = bundle.to_string_lossy();
+    let executable_prefix = format!("{bundle}/");
+    ps.lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let split = line.find(char::is_whitespace)?;
+            let pid = line[..split].parse::<u32>().ok()?;
+            let command = line[split..].trim_start();
+            (pid != current_pid
+                && (command == bundle.as_ref() || command.starts_with(&executable_prefix)))
+            .then_some(pid)
+        })
+        .collect()
+}
+
 fn quit_macos_app_by_name(name: &str) {
     let clean_name = macos_process_name(name);
     if clean_name.is_empty() {
@@ -589,6 +726,101 @@ mod tests {
         assert_eq!(macos_process_name("Claude.exe"), "Claude");
         assert_eq!(macos_process_name("tool.cmd"), "tool");
         assert_eq!(macos_process_name("Code - Insiders"), "Code - Insiders");
+    }
+
+    #[test]
+    fn macos_bundle_process_filter_matches_only_executables_inside_the_verified_bundle() {
+        let ps = r#"
+  100 /Users/test/Applications/Claude.app/Contents/MacOS/Claude
+  101 /Applications/Claude.app/Contents/MacOS/Claude
+  102 /Users/test/Applications/Claude.app-evil/Contents/MacOS/Claude
+  103 /bin/sh -c /Users/test/Applications/Claude.app/Contents/MacOS/Claude
+"#;
+
+        assert_eq!(
+            macos_bundle_process_ids_from_ps(
+                ps,
+                Path::new("/Users/test/Applications/Claude.app"),
+                999,
+            ),
+            vec![100]
+        );
+    }
+
+    #[test]
+    fn macos_bundle_process_drain_terms_relaunches_during_grace_and_forces_only_after_deadline() {
+        use std::cell::Cell;
+
+        let now = Cell::new(Duration::ZERO);
+        let mut signals = Vec::new();
+
+        let report = drain_macos_bundle_processes_with(
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            || now.get(),
+            || {
+                let second = now.get().as_secs();
+                Ok(match second {
+                    0..=1 => vec![100],
+                    2..=5 => vec![200],
+                    _ => Vec::new(),
+                })
+            },
+            |pids, forced| {
+                signals.push((now.get(), forced, pids.to_vec()));
+                Ok(())
+            },
+            || now.set(now.get() + Duration::from_secs(1)),
+        )
+        .unwrap();
+
+        assert!(signals
+            .iter()
+            .any(|(at, forced, pids)| !forced && *at < Duration::from_secs(5) && pids == &[100]));
+        assert!(signals
+            .iter()
+            .any(|(at, forced, pids)| !forced && *at < Duration::from_secs(5) && pids == &[200]));
+        assert!(signals
+            .iter()
+            .filter(|(_, forced, _)| *forced)
+            .all(|(at, _, _)| *at >= Duration::from_secs(5)));
+        assert!(signals
+            .iter()
+            .any(|(at, forced, pids)| *forced && *at >= Duration::from_secs(5) && pids == &[200]));
+        assert_eq!(report.total, 2);
+        assert_eq!(report.forced, 1);
+        assert_eq!(report.remaining, 0);
+    }
+
+    #[test]
+    fn macos_bundle_process_drain_never_forces_a_process_that_exits_in_grace_period() {
+        use std::cell::Cell;
+
+        let now = Cell::new(Duration::ZERO);
+        let mut forced = Vec::new();
+        let report = drain_macos_bundle_processes_with(
+            Duration::from_secs(5),
+            Duration::from_secs(3),
+            || now.get(),
+            || {
+                Ok((now.get() < Duration::from_secs(2))
+                    .then_some(300)
+                    .into_iter()
+                    .collect())
+            },
+            |pids, is_forced| {
+                if is_forced {
+                    forced.extend_from_slice(pids);
+                }
+                Ok(())
+            },
+            || now.set(now.get() + Duration::from_secs(1)),
+        )
+        .unwrap();
+
+        assert!(forced.is_empty());
+        assert_eq!(report.total, 1);
+        assert_eq!(report.forced, 0);
     }
 }
 

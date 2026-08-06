@@ -27,6 +27,8 @@ pub struct ToolStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_kind: Option<String>,
     #[serde(default)]
+    pub duplicate_user_install: bool,
+    #[serde(default)]
     pub running: bool,
 }
 
@@ -1115,4 +1117,45 @@ pub struct ClaudeDesktopPageState {
 pub struct ChatGptDesktopInstallKinds {
     pub msix: DesktopInstallKindInfo,
     pub portable: DesktopInstallKindInfo,
+}
+
+#[cfg(test)]
+mod tool_status_tests {
+    use super::{ConfigState, InstallState, ToolCategory, ToolStatus};
+
+    #[test]
+    fn tool_status_serializes_duplicate_user_install_and_defaults_legacy_payloads_to_false() {
+        let status = ToolStatus {
+            id: "codex".to_string(),
+            name: "Codex".to_string(),
+            category: ToolCategory::AiTool,
+            command: "codex".to_string(),
+            path_repair: None,
+            version: None,
+            latest_version: None,
+            update_available: false,
+            update_command: None,
+            install_state: InstallState::Missing,
+            config_state: ConfigState::Unknown,
+            config_path: None,
+            install_path: None,
+            install_command: None,
+            details: None,
+            install_kind: None,
+            duplicate_user_install: false,
+            running: false,
+        };
+
+        let serialized = serde_json::to_value(status).expect("ToolStatus should serialize");
+        let mut legacy = serialized.clone();
+        legacy
+            .as_object_mut()
+            .expect("ToolStatus JSON should be an object")
+            .remove("duplicateUserInstall");
+        let deserialized: ToolStatus =
+            serde_json::from_value(legacy).expect("legacy ToolStatus should deserialize");
+
+        assert_eq!(serialized["duplicateUserInstall"], false);
+        assert!(!deserialized.duplicate_user_install);
+    }
 }

@@ -21,7 +21,34 @@ export interface ToolStatus {
   installCommand: string | null;
   details: string | null;
   installKind?: string | null;
+  duplicateUserInstall: boolean;
   running: boolean;
+}
+
+export type MacosManagedAppId = "codestudio-lite" | "chatgpt-desktop" | "claude-desktop";
+export type MacosInstallScope = "system" | "user";
+
+export interface MacosApplicationScopeStatus {
+  appId: MacosManagedAppId;
+  systemApp: string | null;
+  userApps: string[];
+  preferredApp: string | null;
+  preferredDestination: string;
+  duplicateUserInstall: boolean;
+  runningApp: string | null;
+  runningScope: MacosInstallScope | null;
+}
+
+export interface MacosApplicationCleanupResult {
+  status: MacosApplicationScopeStatus;
+  movedToTrash: string[];
+  restartScheduled: boolean;
+}
+
+export interface CodestudioSelfCleanupFailure {
+  message: string;
+  restoredUserApp: string | null;
+  systemApp: string;
 }
 
 export interface PathRepairHint {

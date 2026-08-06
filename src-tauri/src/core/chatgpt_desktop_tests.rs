@@ -507,27 +507,6 @@ fn mirror_package_download_resumes_after_an_interrupted_response() {
 }
 
 #[test]
-fn macos_app_candidates_prioritize_chatgpt_and_preserve_legacy_aliases() {
-    let home = Path::new("/Users/tester");
-    let candidates = macos_app_candidates_for_home(Some(home));
-
-    assert_eq!(
-        candidates,
-        vec![
-            PathBuf::from("/Applications/ChatGPT.app"),
-            PathBuf::from("/Applications/Codex.app"),
-            PathBuf::from("/Applications/OpenAI Codex.app"),
-            PathBuf::from("/Applications/OpenAI.Codex.app"),
-            PathBuf::from("/Users/tester/Applications/ChatGPT.app"),
-            PathBuf::from("/Users/tester/Applications/Codex.app"),
-            PathBuf::from("/Users/tester/Applications/OpenAI Codex.app"),
-            PathBuf::from("/Users/tester/Applications/OpenAI.Codex.app"),
-        ]
-    );
-    assert_eq!(default_macos_install_root(), "/Applications/ChatGPT.app");
-}
-
-#[test]
 fn macos_bundle_executable_drives_process_and_tool_identity() {
     let root = std::env::temp_dir().join(format!(
         "codestudio-lite-chatgpt-macos-bundle-test-{}-{}",
@@ -558,7 +537,10 @@ fn macos_bundle_executable_drives_process_and_tool_identity() {
     };
 
     assert_eq!(macos_process_name_for_installed(&installed), "ChatGPT");
-    assert_eq!(macos_tool_command(Some(&installed)), "ChatGPT.app");
+    assert_eq!(
+        macos_tool_command(Some(&installed)),
+        app.to_string_lossy().to_string()
+    );
     assert_eq!(
         macos_open_command(&installed, &["--remote-debugging-port=9229".to_string()]),
         vec![

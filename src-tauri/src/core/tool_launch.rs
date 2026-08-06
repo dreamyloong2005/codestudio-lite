@@ -1,5 +1,6 @@
 use crate::core::claude_desktop_patch;
 use crate::core::credentials;
+use crate::core::macos_app_scope::{resolve as resolve_macos_app, MacosManagedApp};
 use crate::core::platform::resolve_command;
 use crate::core::profile;
 use crate::core::tool_catalog::{
@@ -143,10 +144,28 @@ fn launch_command_for_tool(tool_id: &str, command: &str) -> String {
     match tool_id {
         "codex-vscode" | "claude-vscode" | "gemini-code-assist" => "code".to_string(),
         "antigravity" => "agy".to_string(),
-        "claude-desktop" if cfg!(target_os = "macos") => "open -a Claude".to_string(),
+        "claude-desktop" if cfg!(target_os = "macos") => macos_claude_launch_command(),
         "claude-desktop" => claude_desktop_patch::base_launch_command(tool_id, "Claude"),
         _ => command.to_string(),
     }
+}
+
+fn macos_claude_launch_command() -> String {
+    let home = crate::core::app_paths::app_paths()
+        .ok()
+        .map(|paths| paths.home_dir)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/empty"));
+    let resolution = resolve_macos_app(
+        &home,
+        std::path::Path::new("/Applications"),
+        MacosManagedApp::ClaudeDesktop,
+    );
+    macos_claude_launch_command_for(&resolution.preferred_destination)
+}
+
+fn macos_claude_launch_command_for(app: &std::path::Path) -> String {
+    format!("open -a {}", sh_single_quote(&app.to_string_lossy()))
 }
 
 fn resolve_command_from_launch_command(command: &str) -> Option<String> {
@@ -402,6 +421,7 @@ fn sh_single_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     const PROTOCOL_OPENAI_RESPONSES: &str = "openai-responses";
     const PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
@@ -489,6 +509,14 @@ mod tests {
 
         assert_eq!(plan.tool_name, "Codex VS Code");
         assert_eq!(plan.command, "code");
+    }
+
+    #[test]
+    fn macos_claude_launch_command_quotes_the_exact_bundle_path() {
+        assert_eq!(
+            macos_claude_launch_command_for(Path::new("/Users/tester/Applications/Claude.app")),
+            "open -a '/Users/tester/Applications/Claude.app'"
+        );
     }
 
     #[test]

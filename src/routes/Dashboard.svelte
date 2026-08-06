@@ -65,6 +65,7 @@
   } from "../lib/chatgptDesktopBranding";
   import {
     clearClaudeEnvironmentVariables,
+    cleanupMacosUserApplication,
     installTool,
     listenInstallTerminalOutput,
     listenToolInstallProgress,
@@ -117,6 +118,9 @@
   let installingToolId: string | null = null;
   let updatingToolId: string | null = null;
   let repairingToolId: string | null = null;
+  let duplicateCleanupPendingId: string | null = null;
+  let duplicateCleanupSuccessId: string | null = null;
+  let duplicateCleanupError: { toolId: string; message: string } | null = null;
   let installProgressLogs: ToolInstallProgress[] = [];
   let installProgressLogKeys = new Set<string>();
   let installLogViewport: HTMLDivElement | null = null;
@@ -646,6 +650,16 @@
   const dashboardSingleCommandClass = css({
     gridColumn: "1 / -1"
   });
+  const dashboardDuplicateWarningClass = css({
+    gridColumn: "1 / -1",
+    position: "relative",
+    zIndex: 2,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "10px",
+    flexWrap: "wrap"
+  });
   const dashboardProgressFillClass = css({
     width: "100%"
   });
@@ -1092,6 +1106,37 @@
     launchingToolId = null;
     launchTerminalExitCode = null;
   }
+
+  function managedAppIdForTool(tool: ToolStatus): "chatgpt-desktop" | "claude-desktop" | null {
+    if (isChatGPTDesktopToolId(tool.id)) return "chatgpt-desktop";
+    if (tool.id === "claude-desktop") return "claude-desktop";
+    return null;
+  }
+
+  async function cleanupDuplicateUserApplication(tool: ToolStatus) {
+    const appId = managedAppIdForTool(tool);
+    if (!appId || duplicateCleanupPendingId) return;
+    duplicateCleanupPendingId = tool.id;
+    duplicateCleanupSuccessId = null;
+    duplicateCleanupError = null;
+    try {
+      const result = await cleanupMacosUserApplication(appId);
+      duplicateCleanupSuccessId = tool.id;
+      onToolStatusUpdated({
+        ...tool,
+        duplicateUserInstall: result.status.duplicateUserInstall
+      });
+      await onRefresh({ quiet: true, scheduleFollowup: false, showRefreshIndicator: false });
+    } catch (err) {
+      duplicateCleanupError = {
+        toolId: tool.id,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    } finally {
+      duplicateCleanupPendingId = null;
+    }
+  }
+
   function handleDialogEscape(event: KeyboardEvent) {
     if (event.key !== "Escape") return;
     if (pendingInstallTool && !installingToolId) {
@@ -1374,6 +1419,45 @@
               {/if}
             {/if}
           </div>
+          {#if managedAppIdForTool(tool) && (tool.duplicateUserInstall || duplicateCleanupPendingId === tool.id || duplicateCleanupSuccessId === tool.id || duplicateCleanupError?.toolId === tool.id)}
+            <div
+              class={cx(
+                duplicateCleanupError?.toolId === tool.id
+                  ? noticeRecipe({ tone: "error" })
+                  : duplicateCleanupSuccessId === tool.id && !tool.duplicateUserInstall
+                    ? noticeRecipe({ tone: "success" })
+                    : noticeRecipe(),
+                dashboardDuplicateWarningClass
+              )}
+              data-duplicate-user-install
+            >
+              <span>
+                {#if duplicateCleanupError?.toolId === tool.id}
+                  {$t("applicationScope.cleanupError", { message: duplicateCleanupError.message })}
+                {:else if duplicateCleanupSuccessId === tool.id && !tool.duplicateUserInstall}
+                  {$t("applicationScope.cleanupSuccess", { name: tool.name })}
+                {:else}
+                  {$t("applicationScope.duplicateWarning", { name: tool.name })}
+                {/if}
+              </span>
+              {#if tool.duplicateUserInstall}
+                <button
+                  class={actionButtonRecipe({ compact: true })}
+                  type="button"
+                  disabled={duplicateCleanupPendingId !== null}
+                  on:click|stopPropagation={() => cleanupDuplicateUserApplication(tool)}
+                >
+                  {#if duplicateCleanupPendingId === tool.id}
+                    <AppIcon name="loading" size={16} class={spinRecipe()} />
+                    {$t("applicationScope.deletingUserCopy")}
+                  {:else}
+                    <AppIcon name="delete" size={16} />
+                    {$t("applicationScope.deleteUserCopy")}
+                  {/if}
+                </button>
+              {/if}
+            </div>
+          {/if}
         </article>
       {:else}
         <div class={emptyRowRecipe()} data-dashboard-empty>{$t("dashboard.noClientSnapshot")}</div>

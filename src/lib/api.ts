@@ -46,6 +46,7 @@ import type {
   ClaudeDesktopInstallKinds,
   ClaudeDesktopPlan,
   ClaudeDesktopPageState,
+  CodestudioSelfCleanupFailure,
   ClearEnvironmentVariablesRequest,
   ClearEnvironmentVariablesResult,
   ChatGPTDesktopInstallKinds,
@@ -73,6 +74,9 @@ import type {
   InstallTerminalResizeRequest,
   ListProfileModelsRequest,
   ListProfileModelsResult,
+  MacosApplicationCleanupResult,
+  MacosApplicationScopeStatus,
+  MacosManagedAppId,
   NativeConfigDiffLine,
   PreviewProfileApplyRequest,
   PreviewProfileApplyResult,
@@ -884,6 +888,44 @@ export async function installApplicationUpdate(
   }
 }
 
+export async function loadMacosApplicationScopeStatus(
+  appId: MacosManagedAppId
+): Promise<MacosApplicationScopeStatus> {
+  if (isTauri()) {
+    return invoke("load_macos_application_scope_status", { appId });
+  }
+  return {
+    appId,
+    systemApp: null,
+    userApps: [],
+    preferredApp: null,
+    preferredDestination: appId === "codestudio-lite" ? "/Applications/CodeStudio Lite.app" : "/Applications",
+    duplicateUserInstall: false,
+    runningApp: null,
+    runningScope: null
+  };
+}
+
+export async function cleanupMacosUserApplication(
+  appId: MacosManagedAppId
+): Promise<MacosApplicationCleanupResult> {
+  if (isTauri()) {
+    return invoke("cleanup_macos_user_application", { appId });
+  }
+  return {
+    status: await loadMacosApplicationScopeStatus(appId),
+    movedToTrash: [],
+    restartScheduled: false
+  };
+}
+
+export async function takeCodestudioSelfCleanupFailure(): Promise<CodestudioSelfCleanupFailure | null> {
+  if (isTauri()) {
+    return invoke("take_codestudio_self_cleanup_failure");
+  }
+  return null;
+}
+
 export async function loadGatewayStatus(): Promise<GatewayStatus> {
   if (isTauri()) {
     return invoke("load_gateway_status");
@@ -1609,6 +1651,7 @@ function mockTool(overrides: Partial<ToolStatus> & Pick<ToolStatus, "id" | "name
     installPath: null,
     installCommand: null,
     details: null,
+    duplicateUserInstall: false,
     running: false,
     ...overrides
   };
