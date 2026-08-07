@@ -31,7 +31,7 @@ test("release builds generate updater configuration from R2 inputs", () => {
   const linuxBuild = read("scripts/build-linux-updater.sh");
   const linuxNormalizer = read("scripts/normalize-linux-artifacts.sh");
 
-  assert.equal(packageJson.scripts["updater:config"], "node scripts/prepare-updater-config.mjs");
+  assert.equal(packageJson.scripts["updater:config"], "node src/lib/prepareUpdaterConfig.mjs");
   assert.equal(publicConfig.baseUrl, "https://download.codestudio.build");
   assert.equal(typeof publicConfig.pubkey, "string");
   assert.match(packageJson.scripts["tauri:build:updater"], /tauri\.updater\.generated\.conf\.json/);
@@ -145,7 +145,9 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   assert.doesNotMatch(appInfo, /GITHUB_RELEASES_API_URL|api\.github\.com/);
   assert.match(store, /pendingUpdate\.rawJson/);
   assert.match(store, /installerArtifactForTarget/);
-  assert.match(store, /check\(\{ timeout: 8000, target \}\)/);
+  assert.match(store, /searchParams\.set\(\s*["']r["']/);
+  assert.match(store, /new URL\(url\)/);
+  assert.match(store, /check\(\{[\s\S]*timeout: 8000,[\s\S]*target,[\s\S]*headers:/);
   assert.match(store, /Reflect\.get\(platforms, target\)/);
   assert.doesNotMatch(store, /navigator\.userAgent/);
   assert.match(store, /installApplicationUpdate/);
@@ -157,6 +159,7 @@ test("settings hands signed installer updates to Burn or DMG", () => {
   assert.match(commands, /pub fn application_update_target/);
   assert.match(api, /invoke\("application_update_target"\)/);
   assert.match(core, /download_http::download_to_file/);
+  assert.match(core, /query_pairs.*r|query.*r/);
   assert.match(core, /minisign_verify::\{PublicKey, Signature\}/);
   assert.match(core, /verify_stream/);
   assert.match(core, /launch_windows_burn/);

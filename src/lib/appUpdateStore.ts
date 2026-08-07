@@ -273,12 +273,25 @@ export function installerArtifactForTarget(
   if (!filename) {
     throw new Error("The updater installer URL has no filename.");
   }
-  return { url, signature, filename };
+  parsedUrl.searchParams.set(
+    "r",
+    `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
+  return { url: parsedUrl.toString(), signature, filename };
 }
 
 async function fetchTauriRelease(): Promise<ReleaseLookup> {
   const target = await applicationUpdateTarget();
-  pendingUpdate = await check({ timeout: 8000, target });
+  const cacheBuster = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  pendingUpdate = await check({
+    timeout: 8000,
+    target,
+    headers: {
+      "Cache-Control": "no-cache, no-store",
+      Pragma: "no-cache",
+      "X-CodeStudio-Update-Cache": cacheBuster
+    }
+  });
   pendingUpdateTarget = pendingUpdate ? target : null;
   if (!pendingUpdate) {
     return { release: null, emptyStatus: "upToDate" };

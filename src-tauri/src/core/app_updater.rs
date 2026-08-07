@@ -196,7 +196,7 @@ fn validate_request(request: &InstallApplicationUpdateRequest) -> Result<(), Str
         || url.host_str() != Some(UPDATE_HOST)
         || url.username() != ""
         || url.password().is_some()
-        || url.query().is_some()
+        || !valid_update_cache_query(&url)
         || url.fragment().is_some()
     {
         return Err(format!(
@@ -231,6 +231,15 @@ fn validate_request(request: &InstallApplicationUpdateRequest) -> Result<(), Str
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     Ok(())
+}
+
+fn valid_update_cache_query(url: &Url) -> bool {
+    let pairs: Vec<_> = url.query_pairs().collect();
+    pairs.len() <= 1
+        && pairs
+            .first()
+            .map(|(key, value)| key == "r" && !value.trim().is_empty())
+            .unwrap_or(true)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -397,6 +406,28 @@ mod tests {
             url: "https://example.com/CodeStudio-Lite-1.4.2-Windows-x64-setup.exe".to_string(),
             signature: "signature".to_string(),
             filename: "CodeStudio-Lite-1.4.2-Windows-x64-setup.exe".to_string(),
+        };
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn accepts_cache_busted_r2_update_urls() {
+        let request = InstallApplicationUpdateRequest {
+            version: "1.5.2".to_string(),
+            url: "https://download.codestudio.build/releases/1.5.2/CodeStudio-Lite-1.5.2-Windows-x64-setup.exe?r=123-abc".to_string(),
+            signature: "signature".to_string(),
+            filename: "CodeStudio-Lite-1.5.2-Windows-x64-setup.exe".to_string(),
+        };
+        assert!(validate_request(&request).is_ok());
+    }
+
+    #[test]
+    fn rejects_unapproved_update_query_parameters() {
+        let request = InstallApplicationUpdateRequest {
+            version: "1.5.2".to_string(),
+            url: "https://download.codestudio.build/releases/1.5.2/CodeStudio-Lite-1.5.2-Windows-x64-setup.exe?token=unexpected".to_string(),
+            signature: "signature".to_string(),
+            filename: "CodeStudio-Lite-1.5.2-Windows-x64-setup.exe".to_string(),
         };
         assert!(validate_request(&request).is_err());
     }
