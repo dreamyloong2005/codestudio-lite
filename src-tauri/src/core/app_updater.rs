@@ -1,3 +1,4 @@
+use crate::core::macos_app_scope::{resolve as resolve_macos_app, MacosManagedApp};
 use crate::core::platform::{macos_arm64_hardware_available, native_macos_arch_for_runtime};
 use crate::core::{app_paths, download_http, gateway};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -329,14 +330,9 @@ fn launch_platform_installer(
 fn launch_macos_dmg_helper(_: &AppHandle, installer: &Path, version: &str) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
-    let current_exe = std::env::current_exe()
-        .map_err(|err| format!("Failed to locate the running application: {err}"))?;
-    let app_bundle = current_exe
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
-        .ok_or("CodeStudio Lite is not running from a macOS application bundle.")?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| "Unable to resolve the macOS home directory.".to_string())?;
+    let target_app = macos_update_destination_for_roots(&home, Path::new("/Applications"));
     let helper = installer
         .parent()
         .ok_or("The application update directory is invalid.")?
@@ -349,13 +345,19 @@ fn launch_macos_dmg_helper(_: &AppHandle, installer: &Path, version: &str) -> Re
         .arg(&helper)
         .arg(std::process::id().to_string())
         .arg(installer)
-        .arg(app_bundle)
+        .arg(target_app)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("Failed to start the macOS update helper: {err}"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_update_destination_for_roots(home: &Path, system_applications: &Path) -> PathBuf {
+    resolve_macos_app(home, system_applications, MacosManagedApp::CodeStudioLite)
+        .preferred_destination
 }
 
 #[cfg(target_os = "macos")]
@@ -398,6 +400,20 @@ rm -f "$dmg" "$0"
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_codestudio_app(root: &Path) -> PathBuf {
+        let app = root.join("CodeStudio Lite.app");
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.codestudio.lite</string>
+</dict></plist>"#,
+        )
+        .unwrap();
+        app
+    }
 
     #[test]
     fn rejects_non_r2_update_urls() {
@@ -475,6 +491,37 @@ mod tests {
             validate_macos_installer_filename("CodeStudio-Lite-1.5.0-macOS-x64.dmg", "arm64")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn macos_update_destination_follows_application_scope_preference() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "codestudio-update-scope-{}-{nonce}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let system = root.join("Applications");
+        let user_root = home.join("Applications");
+        let user_app = write_codestudio_app(&user_root);
+
+        assert_eq!(macos_update_destination_for_roots(&home, &system), user_app);
+
+        let system_app = write_codestudio_app(&system);
+        assert_eq!(
+            macos_update_destination_for_roots(&home, &system),
+            system_app
+        );
+
+        fs::remove_dir_all(&user_root).unwrap();
+        assert_eq!(
+            macos_update_destination_for_roots(&home, &system),
+            system_app
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "macos")]

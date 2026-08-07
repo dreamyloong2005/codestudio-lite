@@ -6,6 +6,7 @@ const publicConfig = JSON.parse(
   readFileSync(resolve(rootDir, "updater.config.json"), "utf8").replace(/^\uFEFF/, "")
 );
 const outputFlagIndex = process.argv.indexOf("--output");
+const skipBeforeBuild = process.argv.includes("--skip-before-build");
 const outputPath = resolve(
   rootDir,
   outputFlagIndex >= 0 && process.argv[outputFlagIndex + 1]
@@ -15,14 +16,17 @@ const outputPath = resolve(
 
 const baseUrl = configuredValue("CODESTUDIO_UPDATE_BASE_URL", publicConfig.baseUrl).replace(/\/+$/, "");
 const publicKey = configuredValue("TAURI_UPDATER_PUBKEY", publicConfig.pubkey);
+const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim();
 const parsedBaseUrl = new URL(baseUrl);
 if (parsedBaseUrl.protocol !== "https:") {
   throw new Error("CODESTUDIO_UPDATE_BASE_URL must use HTTPS.");
 }
 
 const config = {
+  ...(skipBeforeBuild ? { build: { beforeBuildCommand: "" } } : {}),
   bundle: {
-    createUpdaterArtifacts: true
+    createUpdaterArtifacts: true,
+    ...(appleSigningIdentity ? { macOS: { signingIdentity: appleSigningIdentity } } : {})
   },
   plugins: {
     updater: {

@@ -680,7 +680,8 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
             "ensure_claude_desktop_developer_mode()?",
             "write_localized_launch_marker()?",
             "close_existing_claude_for_localized_launch()?",
-            "hidden_command(\"open\")",
+            "preferred_macos_claude_app()?",
+            "macos_open_command_for_app(&preferred_app)",
             "spawn_silent_localization_injector()",
         ],
     );
@@ -704,7 +705,8 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
     );
     for after_preflight in [
         "close_existing_claude_for_localized_launch()?",
-        "hidden_command(\"open\")",
+        "preferred_macos_claude_app()?",
+        "macos_open_command_for_app(&preferred_app)",
     ] {
         assert_order(
             macos_launch_body,
@@ -734,7 +736,7 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
             "/usr/bin/pgrep -x Claude",
             "/usr/bin/pkill -TERM -x Claude",
             "/usr/bin/pkill -KILL -x Claude",
-            "/usr/bin/open -a Claude",
+            "/usr/bin/open -a '",
             "claude_debugger_open()",
             "lsof -nP -iTCP",
             "/usr/bin/curl -fsS --max-time 1",
@@ -758,7 +760,7 @@ fn macos_localization_uses_official_main_process_debugger_menu() {
     assert_order(
         &script,
         "enable_claude_devtools \"$HOME/Library/Application Support/Claude/developer_settings.json\"",
-        "/usr/bin/open -a Claude",
+        "/usr/bin/open -a '",
         "macOS localized launch script should enable Claude Developer mode before launching Claude",
     );
     assert_contains_none(
@@ -798,8 +800,31 @@ fn macos_plain_claude_launch_restarts_instead_of_activating_existing_process() {
             "/usr/bin/pgrep -x Claude",
             "/usr/bin/pkill -TERM -x Claude",
             "/usr/bin/pkill -KILL -x Claude",
-            "/usr/bin/open -a Claude",
+            "/usr/bin/open -a '",
         ],
+    );
+    assert!(!script.contains("/usr/bin/open -a Claude"));
+}
+
+#[test]
+fn macos_claude_launch_commands_use_the_exact_preferred_bundle_path() {
+    let preferred = Path::new("/Users/tester/Applications/Claude.app");
+    let expected_open = "/usr/bin/open -a '/Users/tester/Applications/Claude.app'";
+
+    let localized = macos_localized_launch_script_for_app(preferred);
+    let plain = macos_plain_launch_script_for_app(preferred);
+
+    assert!(localized.contains(expected_open));
+    assert!(plain.contains(expected_open));
+    assert!(!localized.contains("/usr/bin/open -a Claude"));
+    assert!(!plain.contains("/usr/bin/open -a Claude"));
+    assert_eq!(
+        macos_open_command_for_app(preferred),
+        vec![
+            "open".to_string(),
+            "-a".to_string(),
+            "/Users/tester/Applications/Claude.app".to_string(),
+        ]
     );
 }
 

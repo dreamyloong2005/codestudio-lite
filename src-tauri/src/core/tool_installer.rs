@@ -7,6 +7,7 @@ use crate::core::claude_desktop_release::{
 use crate::core::detector;
 use crate::core::download_http;
 use crate::core::env_health;
+use crate::core::macos_app_scope::{resolve as resolve_macos_app, MacosManagedApp};
 use crate::core::npm_global;
 use crate::core::platform::{
     hidden_command, hidden_command_with_args, package, powershell_exe, resolve_command,
@@ -41,7 +42,7 @@ enum InstallAction {
         latest_url: &'static str,
         app_name: &'static str,
         bundle_identifier: &'static str,
-        destination: &'static str,
+        managed_app: MacosManagedApp,
     },
     ClaudeDesktopWindowsMsix,
     PowerShellScript(&'static str, &'static str),
@@ -849,7 +850,7 @@ fn install_definition(tool_id: &str) -> Option<InstallDefinition> {
                     latest_url: CLAUDE_DESKTOP_LATEST_MACOS_URL,
                     app_name: CLAUDE_DESKTOP_MACOS_APP_NAME,
                     bundle_identifier: CLAUDE_DESKTOP_MACOS_BUNDLE_ID,
-                    destination: CLAUDE_DESKTOP_MACOS_DESTINATION,
+                    managed_app: MacosManagedApp::ClaudeDesktop,
                 }
             } else if cfg!(target_os = "windows") {
                 InstallAction::ClaudeDesktopWindowsMsix
@@ -1071,16 +1072,20 @@ fn build_plan(
         InstallAction::MacosDmgApp {
             label,
             app_name,
-            destination,
+            managed_app,
             ..
         } => {
+            let destination = macos_dmg_destination(*managed_app);
             steps.push(ToolInstallStep {
                 label: "Fetch official release".to_string(),
                 detail: format!("Read the latest {label} metadata from downloads.claude.ai."),
             });
             steps.push(ToolInstallStep {
                 label: "Install DMG".to_string(),
-                detail: format!("Mount the official DMG and copy {app_name} to {destination}."),
+                detail: format!(
+                    "Mount the official DMG and copy {app_name} to {}.",
+                    destination.display()
+                ),
             });
             steps.push(ToolInstallStep {
                 label: "Verify app".to_string(),
@@ -1480,7 +1485,9 @@ fn claude_desktop_plan_download_url() -> Result<String, String> {
 
 fn default_claude_desktop_install_location() -> String {
     if cfg!(target_os = "macos") {
-        CLAUDE_DESKTOP_MACOS_DESTINATION.to_string()
+        macos_dmg_destination(MacosManagedApp::ClaudeDesktop)
+            .to_string_lossy()
+            .to_string()
     } else if cfg!(target_os = "windows") {
         "Windows App package registration".to_string()
     } else {
@@ -1783,13 +1790,13 @@ fn run_install_action(
             latest_url,
             app_name,
             bundle_identifier,
-            destination,
+            managed_app,
             ..
         } => run_macos_dmg_app_install(
             latest_url,
             app_name,
             bundle_identifier,
-            Path::new(destination),
+            &macos_dmg_destination(*managed_app),
             progress,
         ),
         InstallAction::ClaudeDesktopWindowsMsix => {
@@ -1868,13 +1875,13 @@ fn run_update_action(
             latest_url,
             app_name,
             bundle_identifier,
-            destination,
+            managed_app,
             ..
         } => run_macos_dmg_app_install(
             latest_url,
             app_name,
             bundle_identifier,
-            Path::new(destination),
+            &macos_dmg_destination(*managed_app),
             progress,
         ),
         InstallAction::ClaudeDesktopWindowsMsix => {
@@ -1942,17 +1949,9 @@ fn run_uninstall_action_for_tool(
             &["uninstall", "--id", package_id, "--exact"],
             progress,
         ),
-        InstallAction::MacosDmgApp {
-            app_name,
-            bundle_identifier,
-            destination,
-            ..
-        } => run_macos_app_uninstall(
-            app_name,
-            bundle_identifier,
-            Path::new(destination),
-            progress,
-        ),
+        InstallAction::MacosDmgApp { managed_app, .. } => {
+            run_macos_managed_app_uninstall(*managed_app, progress)
+        }
         InstallAction::VsCodeExtension(extension_id) => {
             run_action_command("code", &["--uninstall-extension", extension_id], progress)
         }
@@ -1984,7 +1983,6 @@ const WINGET_MULTIPLE_PACKAGES_HEX: &str = "0x8A150016";
 const CLAUDE_DESKTOP_PLAN_CACHE_KEY: &str = "claude_desktop.update_plan";
 const CLAUDE_DESKTOP_MACOS_APP_NAME: &str = "Claude.app";
 const CLAUDE_DESKTOP_MACOS_BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
-const CLAUDE_DESKTOP_MACOS_DESTINATION: &str = "/Applications/Claude.app";
 const HERMES_UNIX_INSTALL_COMMAND: &str =
     "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash";
 const ANTIGRAVITY_WINDOWS_INSTALL_SCRIPT: &str =
@@ -2771,10 +2769,8 @@ fn run_macos_dmg_app_install(
     })
 }
 
-fn run_macos_app_uninstall(
-    app_name: &str,
-    bundle_identifier: &str,
-    destination: &Path,
+fn run_macos_managed_app_uninstall(
+    managed_app: MacosManagedApp,
     progress: Option<&InstallProgressContext>,
 ) -> Result<InstallCommandOutput, String> {
     if !cfg!(target_os = "macos") {
@@ -2782,37 +2778,66 @@ fn run_macos_app_uninstall(
             "macOS app uninstall is only supported on macOS.",
         ));
     }
-    let candidates = macos_app_candidates(destination, app_name);
-    let app = package::detect_macos_app(&candidates, Some(bundle_identifier))
-        .or_else(|| package::detect_macos_app(&candidates, None));
-    let path = app
-        .map(|app| PathBuf::from(app.path))
-        .unwrap_or_else(|| destination.to_path_buf());
+    let home = app_paths()
+        .ok()
+        .map(|paths| paths.home_dir)
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "Unable to resolve the macOS home directory.".to_string())?;
+    let candidates = macos_managed_uninstall_candidates_for_roots(
+        managed_app,
+        &home,
+        Path::new("/Applications"),
+    );
     emit_install_progress(
         progress,
         "stdout",
-        format!("Removing {}...\n", path.display()),
+        format!(
+            "Removing {}...\n",
+            candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         None,
         false,
     );
-    let result = if path.exists() {
-        fs::remove_dir_all(&path).map_err(|err| format!("Failed to remove macOS app bundle: {err}"))
-    } else {
-        Ok(())
-    };
+    let result = candidates.iter().try_for_each(|path| {
+        fs::remove_dir_all(path).map_err(|err| {
+            format!(
+                "Failed to remove macOS app bundle {}: {err}",
+                path.display()
+            )
+        })
+    });
     match result {
         Ok(()) => {
             emit_install_progress(progress, "status", String::new(), Some(0), true);
             Ok(InstallCommandOutput {
                 success: true,
                 exit_code: Some(0),
-                stdout_tail: format!("Removed {}.", path.display()),
+                stdout_tail: format!(
+                    "Removed {}.",
+                    candidates
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 stderr_tail: String::new(),
                 missing_command: None,
             })
         }
         Err(err) => Ok(failed_output_with_progress(&err, progress)),
     }
+}
+
+fn macos_managed_uninstall_candidates_for_roots(
+    managed_app: MacosManagedApp,
+    home: &Path,
+    system_applications: &Path,
+) -> Vec<PathBuf> {
+    resolve_macos_app(home, system_applications, managed_app).ordered_candidates
 }
 
 fn current_status(tool_id: &str) -> Result<ToolStatus, String> {
@@ -3256,12 +3281,21 @@ fn format_download_progress(downloaded: u64, total: Option<u64>) -> String {
     }
 }
 
-fn macos_app_candidates(destination: &Path, app_name: &str) -> Vec<PathBuf> {
-    let mut candidates = vec![destination.to_path_buf()];
-    if let Ok(paths) = app_paths() {
-        candidates.push(paths.home_dir.join("Applications").join(app_name));
-    }
-    candidates
+fn macos_dmg_destination(managed_app: MacosManagedApp) -> PathBuf {
+    let home = app_paths()
+        .ok()
+        .map(|paths| paths.home_dir)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("/var/empty"));
+    macos_dmg_destination_for_roots(managed_app, &home, Path::new("/Applications"))
+}
+
+fn macos_dmg_destination_for_roots(
+    managed_app: MacosManagedApp,
+    home: &Path,
+    system_applications: &Path,
+) -> PathBuf {
+    resolve_macos_app(home, system_applications, managed_app).preferred_destination
 }
 
 fn open_folder(path: &Path) -> Result<(), String> {
@@ -3735,8 +3769,11 @@ fn uninstall_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> 
         InstallAction::Winget(package_id) => {
             format!("winget uninstall --id {package_id} --exact")
         }
-        InstallAction::MacosDmgApp { destination, .. } => {
-            format!("Remove macOS app bundle at {destination}")
+        InstallAction::MacosDmgApp { managed_app, .. } => {
+            format!(
+                "Remove macOS app bundle at {}",
+                macos_dmg_destination(*managed_app).display()
+            )
         }
         InstallAction::VsCodeExtension(extension_id) => {
             format!("code --uninstall-extension {extension_id}")
@@ -3755,7 +3792,9 @@ fn uninstall_command_preview_for_tool(tool_id: &str, action: &InstallAction) -> 
 fn action_requires_admin(action: &InstallAction) -> bool {
     match action {
         InstallAction::Winget(_) => true,
-        InstallAction::MacosDmgApp { destination, .. } => destination.starts_with("/Applications/"),
+        InstallAction::MacosDmgApp { managed_app, .. } => {
+            macos_dmg_destination(*managed_app).starts_with("/Applications/")
+        }
         InstallAction::ClaudeDesktopWindowsMsix => false,
         InstallAction::ShellScript(_, script) => script.contains("sudo "),
         InstallAction::InteractiveShellScript(_, script) => script.contains("sudo "),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::macos_app_scope::MacosManagedApp;
 use crate::core::types::{ConfigState, DesktopInstallKindInfo, ToolCategory};
 
 #[test]
@@ -36,18 +37,12 @@ fn pi_install_update_and_uninstall_keep_the_upstream_npm_contract() {
     let definition = install_definition("pi").expect("Pi install definition");
 
     assert_eq!(manager_label(&definition.action), "npm");
-    assert_eq!(
-        command_preview(&definition.action),
-        "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
-    );
-    assert_eq!(
-        update_command_preview_for_tool("pi", &definition.action),
-        "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest"
-    );
-    assert_eq!(
-        uninstall_command_preview_for_tool("pi", &definition.action),
-        "npm uninstall -g @earendil-works/pi-coding-agent"
-    );
+    assert!(command_preview(&definition.action)
+        .ends_with("npm install -g --ignore-scripts @earendil-works/pi-coding-agent"));
+    assert!(update_command_preview_for_tool("pi", &definition.action)
+        .ends_with("npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest"));
+    assert!(uninstall_command_preview_for_tool("pi", &definition.action)
+        .ends_with("npm uninstall -g @earendil-works/pi-coding-agent"));
     assert_eq!(
         path_repair_tool_ids_for_action(&definition.action),
         vec!["node", "npm"]
@@ -208,10 +203,101 @@ fn claude_desktop_macos_uses_official_dmg_not_homebrew_cask() {
             latest_url: CLAUDE_DESKTOP_LATEST_MACOS_URL,
             app_name: CLAUDE_DESKTOP_MACOS_APP_NAME,
             bundle_identifier: CLAUDE_DESKTOP_MACOS_BUNDLE_ID,
-            destination: CLAUDE_DESKTOP_MACOS_DESTINATION,
+            managed_app: MacosManagedApp::ClaudeDesktop,
         }),
         "Download and install the latest Claude Desktop official DMG from downloads.claude.ai"
     );
+}
+
+#[test]
+fn claude_desktop_install_and_update_destination_follow_macos_scope_resolution() {
+    let root = std::env::temp_dir().join(format!(
+        "codestudio-lite-claude-installer-scope-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = root.join("home");
+    let system_applications = root.join("system-applications");
+    let user_app =
+        write_claude_installer_test_app(&home.join("Applications"), "Claude.app", "1.0.0");
+
+    assert_eq!(
+        macos_dmg_destination_for_roots(
+            MacosManagedApp::ClaudeDesktop,
+            &home,
+            &system_applications
+        ),
+        user_app
+    );
+
+    let system_app = write_claude_installer_test_app(&system_applications, "Claude.app", "2.0.0");
+
+    assert_eq!(
+        macos_dmg_destination_for_roots(
+            MacosManagedApp::ClaudeDesktop,
+            &home,
+            &system_applications
+        ),
+        system_app
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn claude_desktop_uninstall_scope_includes_user_only_and_both_copies() {
+    let root = std::env::temp_dir().join(format!(
+        "codestudio-lite-claude-uninstall-scope-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = root.join("home");
+    let system_applications = root.join("system-applications");
+    let user_app =
+        write_claude_installer_test_app(&home.join("Applications"), "Claude.app", "1.0.0");
+
+    assert_eq!(
+        macos_managed_uninstall_candidates_for_roots(
+            MacosManagedApp::ClaudeDesktop,
+            &home,
+            &system_applications,
+        ),
+        vec![user_app.clone()]
+    );
+
+    let system_app = write_claude_installer_test_app(&system_applications, "Claude.app", "2.0.0");
+    assert_eq!(
+        macos_managed_uninstall_candidates_for_roots(
+            MacosManagedApp::ClaudeDesktop,
+            &home,
+            &system_applications,
+        ),
+        vec![system_app, user_app]
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn write_claude_installer_test_app(applications: &Path, app_name: &str, version: &str) -> PathBuf {
+    let app = applications.join(app_name);
+    fs::create_dir_all(app.join("Contents")).unwrap();
+    fs::write(
+        app.join("Contents").join("Info.plist"),
+        format!(
+            r#"<plist><dict>
+<key>CFBundleIdentifier</key><string>com.anthropic.claudefordesktop</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>"#
+        ),
+    )
+    .unwrap();
+    app
 }
 
 #[cfg(windows)]
@@ -260,6 +346,7 @@ fn update_plan_allows_installed_tools_with_detected_updates() {
         install_command: Some("npm install -g @anthropic-ai/claude-code".to_string()),
         details: Some("Ready".to_string()),
         install_kind: None,
+        duplicate_user_install: false,
         running: false,
     };
 

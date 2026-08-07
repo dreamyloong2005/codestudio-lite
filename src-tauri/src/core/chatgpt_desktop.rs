@@ -6,6 +6,7 @@ use crate::core::codex_plugin_marketplace;
 use crate::core::codex_provider_sync;
 use crate::core::computer_use_guard;
 use crate::core::download_http;
+use crate::core::macos_app_scope::{resolve as resolve_macos_app, MacosManagedApp};
 use crate::core::platform::{
     hidden_command, macos_arm64_hardware_available, native_macos_arch_for_runtime, package,
     windows_native_architecture,
@@ -737,7 +738,7 @@ where
         let report = package::install_macos_dmg_with_app_candidates(
             &staged_path,
             CHATGPT_MACOS_APP_CANDIDATES,
-            &expand_env_path(&settings.install_root)?,
+            &effective_install_root(&settings)?,
             None,
         )?;
         notes.extend(report.notes);
@@ -779,7 +780,7 @@ where
             .map(|item| item.source.clone())
             .unwrap_or_else(|| action.clone()),
         install_root: Some(
-            expand_env_path(&settings.install_root)?
+            effective_install_root(&settings)?
                 .to_string_lossy()
                 .to_string(),
         ),
@@ -863,10 +864,6 @@ pub fn uninstall(
     let mut notes = Vec::new();
     if cfg!(target_os = "windows") {
         close_chatgpt_desktop_processes(&installed_before, &mut notes)?;
-    } else if cfg!(target_os = "macos") {
-        if let Err(err) = close_chatgpt_desktop_processes(&installed_before, &mut notes) {
-            notes.push(format!("Failed to close ChatGPT Desktop: {err}"));
-        }
     }
     let action = if installed_before.source == "portable" {
         if Path::new(&installed_before.path).exists() {
@@ -881,11 +878,24 @@ pub fn uninstall(
         }
         "remove-portable"
     } else if installed_before.source == "macos" {
-        let app_path = Path::new(&installed_before.path);
-        if app_path.exists() {
-            fs::remove_dir_all(app_path)
-                .map_err(|err| format!("Failed to remove macOS app: {err}"))?;
-        }
+        let home = app_paths()
+            .ok()
+            .map(|paths| paths.home_dir)
+            .or_else(dirs::home_dir)
+            .ok_or_else(|| "Unable to resolve the macOS home directory.".to_string())?;
+        run_macos_chatgpt_uninstall_for_roots_with(
+            &home,
+            Path::new("/Applications"),
+            |roots| {
+                process_control::close_processes_in_macos_bundles("ChatGPT Desktop", roots)
+                    .map(|_| ())
+            },
+            |app_path| {
+                fs::remove_dir_all(app_path).map_err(|err| {
+                    format!("Failed to remove macOS app {}: {err}", app_path.display())
+                })
+            },
+        )?;
         "remove-macos"
     } else if installed_before.source == "msix" {
         let report = package::remove_msix_package(PACKAGE_IDENTITY)?;
@@ -1040,7 +1050,7 @@ pub fn open_path(kind: String) -> Result<(), String> {
     let target = match kind.as_str() {
         "install" => detect_installed(&settings)
             .map(|installed| PathBuf::from(installed.path))
-            .unwrap_or(expand_env_path(&settings.install_root)?),
+            .unwrap_or(effective_install_root(&settings)?),
         "staging" => staging_dir()?,
         "config" => app_paths()
             .map_err(|err| err.to_string())?
@@ -1057,7 +1067,24 @@ pub fn tool_status() -> ToolStatus {
 
 pub fn tool_status_with_generation() -> (ToolStatus, ChatGptDesktopProductGeneration) {
     let settings = load_settings().unwrap_or_default();
-    let installed = detect_installed(&settings);
+    let (installed, duplicate_user_install) = detect_installed_with_scope(&settings);
+    tool_status_with_detection(installed, duplicate_user_install)
+}
+
+#[cfg(test)]
+fn tool_status_with_generation_for_macos_roots(
+    home: &Path,
+    system_applications: &Path,
+) -> (ToolStatus, ChatGptDesktopProductGeneration) {
+    let (installed, duplicate_user_install) =
+        detect_macos_installation_for(home, system_applications);
+    tool_status_with_detection(installed, duplicate_user_install)
+}
+
+fn tool_status_with_detection(
+    installed: Option<InstalledChatGptDesktop>,
+    duplicate_user_install: bool,
+) -> (ToolStatus, ChatGptDesktopProductGeneration) {
     let generation = installed
         .as_ref()
         .map(|item| item.generation)
@@ -1095,13 +1122,14 @@ pub fn tool_status_with_generation() -> (ToolStatus, ChatGptDesktopProductGenera
             None => ConfigState::Unknown,
         },
         config_path: config_path.as_deref().map(display_path),
-        install_path: None,
+        install_path: installed.as_ref().map(|item| item.path.clone()),
         install_command: Some(format!("Install or update from the {product_name} page")),
         details: installed
             .as_ref()
             .map(|item| format!("{} / {}", item.source, item.path))
             .or_else(|| Some(format!("Official {product_name} client was not detected"))),
         install_kind: None,
+        duplicate_user_install,
         running: is_chatgpt_desktop_running(installed.as_ref()),
     };
     (status, generation)
@@ -1169,7 +1197,7 @@ fn build_plan(
             .filter(|path| path.exists())
             .map(|path| display_path(&path)),
         install_root: Some(
-            expand_env_path(&settings.install_root)?
+            effective_install_root(settings)?
                 .to_string_lossy()
                 .to_string(),
         ),
@@ -1493,18 +1521,32 @@ pub fn chatgpt_desktop_install_kinds() -> ChatGptDesktopInstallKinds {
 }
 
 fn detect_installed(settings: &ChatGptDesktopSettings) -> Option<InstalledChatGptDesktop> {
+    detect_installed_with_scope(settings).0
+}
+
+fn detect_installed_with_scope(
+    settings: &ChatGptDesktopSettings,
+) -> (Option<InstalledChatGptDesktop>, bool) {
     if cfg!(target_os = "windows") {
-        package::detect_msix_package(PACKAGE_IDENTITY)
-            .map(installed_from_msix)
-            .or_else(|| {
-                expand_env_path(&settings.install_root)
-                    .ok()
-                    .and_then(|root| detect_portable_install(&root))
-            })
+        (
+            package::detect_msix_package(PACKAGE_IDENTITY)
+                .map(installed_from_msix)
+                .or_else(|| {
+                    expand_env_path(&settings.install_root)
+                        .ok()
+                        .and_then(|root| detect_portable_install(&root))
+                }),
+            false,
+        )
     } else if cfg!(target_os = "macos") {
-        package::detect_macos_app(&macos_app_candidates(), None).map(installed_from_macos_app)
+        let home = app_paths()
+            .ok()
+            .map(|paths| paths.home_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/var/empty"));
+        detect_macos_installation_for(&home, Path::new("/Applications"))
     } else {
-        None
+        (None, false)
     }
 }
 
@@ -1659,23 +1701,67 @@ fn detect_portable_install(root: &Path) -> Option<InstalledChatGptDesktop> {
     })
 }
 
-fn macos_app_candidates() -> Vec<PathBuf> {
-    macos_app_candidates_for_home(dirs::home_dir().as_deref())
+fn macos_app_resolution_for(
+    home: &Path,
+    system_applications: &Path,
+) -> crate::core::macos_app_scope::MacosAppResolution {
+    resolve_macos_app(home, system_applications, MacosManagedApp::ChatGptDesktop)
 }
 
-fn macos_app_candidates_for_home(home: Option<&Path>) -> Vec<PathBuf> {
-    let mut candidates = CHATGPT_MACOS_APP_CANDIDATES
-        .iter()
-        .map(|app_name| PathBuf::from("/Applications").join(app_name))
-        .collect::<Vec<_>>();
-    if let Some(home) = home {
-        candidates.extend(
-            CHATGPT_MACOS_APP_CANDIDATES
-                .iter()
-                .map(|app_name| home.join("Applications").join(app_name)),
-        );
+fn detect_macos_installation_for(
+    home: &Path,
+    system_applications: &Path,
+) -> (Option<InstalledChatGptDesktop>, bool) {
+    let resolution = macos_app_resolution_for(home, system_applications);
+    let installed = resolution.preferred_app.as_ref().and_then(|preferred| {
+        package::detect_macos_app(std::slice::from_ref(preferred), Some("com.openai.codex"))
+            .map(installed_from_macos_app)
+    });
+    (installed, resolution.duplicate_user_install)
+}
+
+fn effective_macos_install_root_for(home: &Path, system_applications: &Path) -> PathBuf {
+    macos_app_resolution_for(home, system_applications).preferred_destination
+}
+
+fn macos_chatgpt_uninstall_candidates_for_roots(
+    home: &Path,
+    system_applications: &Path,
+) -> Vec<PathBuf> {
+    macos_app_resolution_for(home, system_applications).ordered_candidates
+}
+
+fn run_macos_chatgpt_uninstall_for_roots_with<FDrain, FRemove>(
+    home: &Path,
+    system_applications: &Path,
+    mut drain_processes: FDrain,
+    mut remove_bundle: FRemove,
+) -> Result<Vec<PathBuf>, String>
+where
+    FDrain: FnMut(&[PathBuf]) -> Result<(), String>,
+    FRemove: FnMut(&Path) -> Result<(), String>,
+{
+    let candidates = macos_chatgpt_uninstall_candidates_for_roots(home, system_applications);
+    drain_processes(&candidates)?;
+    for candidate in &candidates {
+        remove_bundle(candidate)?;
     }
-    candidates
+    Ok(candidates)
+}
+
+fn effective_install_root(settings: &ChatGptDesktopSettings) -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") {
+        let home = app_paths()
+            .ok()
+            .map(|paths| paths.home_dir)
+            .or_else(dirs::home_dir)
+            .ok_or_else(|| "Unable to resolve the macOS home directory.".to_string())?;
+        return Ok(effective_macos_install_root_for(
+            &home,
+            Path::new("/Applications"),
+        ));
+    }
+    expand_env_path(&settings.install_root)
 }
 
 struct PortableInstallReport {
@@ -2681,13 +2767,8 @@ fn macos_process_name_for_installed(installed: &InstalledChatGptDesktop) -> Stri
 
 fn macos_tool_command(installed: Option<&InstalledChatGptDesktop>) -> String {
     installed
-        .and_then(|item| {
-            Path::new(&item.path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| CHATGPT_MACOS_APP_NAME.to_string())
+        .map(|item| item.path.clone())
+        .unwrap_or_else(default_macos_install_root)
 }
 
 fn macos_open_command(installed: &InstalledChatGptDesktop, args: &[String]) -> Vec<String> {
@@ -2951,6 +3032,216 @@ fn open_folder(path: &Path) -> Result<(), String> {
             .spawn()
             .map(|_| ())
             .map_err(|err| format!("Failed to open path: {err}"))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod chatgpt_macos_scope_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl TestRoot {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "codestudio-lite-chatgpt-{name}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn home(&self) -> PathBuf {
+            self.path.join("home")
+        }
+
+        fn system_applications(&self) -> PathBuf {
+            self.path.join("system-applications")
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn write_app(applications: &Path, app_name: &str, executable: &str, version: &str) -> PathBuf {
+        let app = applications.join(app_name);
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        fs::write(
+            app.join("Contents").join("Info.plist"),
+            format!(
+                r#"<plist><dict>
+<key>CFBundleIdentifier</key><string>com.openai.codex</string>
+<key>CFBundleExecutable</key><string>{executable}</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>"#
+            ),
+        )
+        .unwrap();
+        app
+    }
+
+    #[test]
+    fn both_scopes_prefer_exact_system_alias_and_flow_duplicate_status() {
+        let root = TestRoot::new("both");
+        let system_app = write_app(
+            &root.system_applications(),
+            "OpenAI Codex.app",
+            "Codex",
+            "1.2.3",
+        );
+        write_app(
+            &root.home().join("Applications"),
+            "ChatGPT.app",
+            "ChatGPT",
+            "2.0.0",
+        );
+
+        let (status, generation) =
+            tool_status_with_generation_for_macos_roots(&root.home(), &root.system_applications());
+
+        assert_eq!(generation, ChatGptDesktopProductGeneration::Legacy);
+        assert_eq!(status.command, system_app.to_string_lossy());
+        assert_eq!(
+            status.install_path.as_deref(),
+            Some(system_app.to_string_lossy().as_ref())
+        );
+        assert_eq!(status.version.as_deref(), Some("1.2.3"));
+        assert!(status.duplicate_user_install);
+        assert_eq!(
+            effective_macos_install_root_for(&root.home(), &root.system_applications()),
+            system_app
+        );
+    }
+
+    #[test]
+    fn user_only_scope_preserves_alias_for_detection_launch_and_update() {
+        let root = TestRoot::new("user-only");
+        let user_app = write_app(
+            &root.home().join("Applications"),
+            "OpenAI.Codex.app",
+            "Codex",
+            "3.4.5",
+        );
+
+        let (status, _) =
+            tool_status_with_generation_for_macos_roots(&root.home(), &root.system_applications());
+        let (installed, duplicate_user_install) =
+            detect_macos_installation_for(&root.home(), &root.system_applications());
+        let installed = installed.expect("user alias should be detected");
+
+        assert_eq!(status.command, user_app.to_string_lossy());
+        assert!(!status.duplicate_user_install);
+        assert!(!duplicate_user_install);
+        assert_eq!(
+            macos_open_command(&installed, &[]),
+            vec![
+                "open".to_string(),
+                "-a".to_string(),
+                user_app.to_string_lossy().to_string(),
+                "--args".to_string(),
+            ]
+        );
+        assert_eq!(
+            effective_macos_install_root_for(&root.home(), &root.system_applications()),
+            user_app
+        );
+    }
+
+    #[test]
+    fn uninstall_scope_keeps_the_exact_chatgpt_alias_path() {
+        let root = TestRoot::new("uninstall-alias");
+        let alias = write_app(
+            &root.home().join("Applications"),
+            "OpenAI.Codex.app",
+            "Codex",
+            "1.0.0",
+        );
+
+        assert_eq!(
+            macos_chatgpt_uninstall_candidates_for_roots(&root.home(), &root.system_applications(),),
+            vec![alias]
+        );
+    }
+
+    #[test]
+    fn macos_uninstall_drains_all_resolved_running_alias_roots_before_deleting() {
+        let root = TestRoot::new("uninstall-drain-all-aliases");
+        let system_app = write_app(
+            &root.system_applications(),
+            "ChatGPT.app",
+            "ChatGPT",
+            "1.0.0",
+        );
+        let user_app = write_app(
+            &root.home().join("Applications"),
+            "OpenAI.Codex.app",
+            "Codex",
+            "1.0.0",
+        );
+        let mut drained = Vec::new();
+        let mut removed = Vec::new();
+
+        let result = run_macos_chatgpt_uninstall_for_roots_with(
+            &root.home(),
+            &root.system_applications(),
+            |roots| {
+                drained.push(roots.to_vec());
+                Ok(())
+            },
+            |path| {
+                removed.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(drained, vec![vec![system_app.clone(), user_app.clone()]]);
+        assert_eq!(removed, vec![system_app.clone(), user_app.clone()]);
+        assert_eq!(result, vec![system_app, user_app]);
+    }
+
+    #[test]
+    fn macos_uninstall_aborts_without_deleting_when_exact_path_drain_fails() {
+        let root = TestRoot::new("uninstall-drain-fails");
+        let system_app = write_app(
+            &root.system_applications(),
+            "ChatGPT.app",
+            "ChatGPT",
+            "1.0.0",
+        );
+        let user_app = write_app(
+            &root.home().join("Applications"),
+            "Codex.app",
+            "Codex",
+            "1.0.0",
+        );
+        let mut remove_called = false;
+
+        let error = run_macos_chatgpt_uninstall_for_roots_with(
+            &root.home(),
+            &root.system_applications(),
+            |_| Err("exact alias drain failed".to_string()),
+            |_| {
+                remove_called = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "exact alias drain failed");
+        assert!(!remove_called);
+        assert!(system_app.exists());
+        assert!(user_app.exists());
     }
 }
 

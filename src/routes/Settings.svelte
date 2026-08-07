@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import AppIcon from "../components/AppIcon.svelte";
   import BrandLogo from "../components/BrandLogo.svelte";
+  import DismissibleNotice from "../components/DismissibleNotice.svelte";
   import {
     APP_NAME,
     APP_VERSION_LABEL,
@@ -9,10 +10,22 @@
     AUTHOR_NAME
   } from "../lib/appInfo";
   import { appUpdateState, checkForAppUpdate, installAppUpdate } from "../lib/appUpdateStore";
-  import { loadAppSettings, openExternalUrl, updateAppSettings } from "../lib/api";
+  import {
+    cleanupMacosUserApplication,
+    loadAppSettings,
+    loadMacosApplicationScopeStatus,
+    openExternalUrl,
+    takeCodestudioSelfCleanupFailure,
+    updateAppSettings
+  } from "../lib/api";
   import { setLocale, supportedLocales, t } from "../lib/i18n";
   import { applyTheme } from "../lib/theme";
-  import type { AppSettings, Locale } from "../types";
+  import type {
+    AppSettings,
+    CodestudioSelfCleanupFailure,
+    Locale,
+    MacosApplicationScopeStatus
+  } from "../types";
   import { cx } from "../../styled-system/css";
   import {
     actionButtonRecipe,
@@ -43,13 +56,64 @@
   let updateStatusTone: UpdateStatusTone = "info";
   let updateProgressPercent = 0;
   let updateBusy = false;
+  let codestudioScope: MacosApplicationScopeStatus | null = null;
+  let codestudioCleanupPending = false;
+  let codestudioCleanupSuccess = false;
+  let codestudioCleanupError: string | null = null;
+  let codestudioSelfCleanupFailure: CodestudioSelfCleanupFailure | null = null;
 
   onMount(() => {
     void loadSettings();
+    void refreshCodestudioScope();
     if ($appUpdateState.status === "idle") {
       void checkForAppUpdate();
     }
   });
+
+  async function refreshCodestudioScope() {
+    await Promise.all([
+      loadCodestudioScope(),
+      loadCodestudioSelfCleanupFailure()
+    ]);
+  }
+
+  async function loadCodestudioScope() {
+    try {
+      codestudioScope = await loadMacosApplicationScopeStatus("codestudio-lite");
+    } catch {
+      codestudioScope = null;
+    }
+  }
+
+  async function loadCodestudioSelfCleanupFailure() {
+    try {
+      const failure = await takeCodestudioSelfCleanupFailure();
+      if (failure) {
+        codestudioSelfCleanupFailure = failure;
+      }
+    } catch (err) {
+      codestudioCleanupError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function cleanupCodestudioUserCopy() {
+    if (codestudioCleanupPending) return;
+    codestudioCleanupPending = true;
+    codestudioCleanupSuccess = false;
+    codestudioCleanupError = null;
+    try {
+      const result = await cleanupMacosUserApplication("codestudio-lite");
+      codestudioScope = result.status;
+      codestudioCleanupSuccess = !result.restartScheduled;
+      if (!result.restartScheduled) {
+        await refreshCodestudioScope();
+      }
+    } catch (err) {
+      codestudioCleanupError = err instanceof Error ? err.message : String(err);
+    } finally {
+      codestudioCleanupPending = false;
+    }
+  }
 
   async function loadSettings() {
     const loadRevision = settingsEditRevision;
@@ -145,6 +209,15 @@
   {#if error}
     <div class={profileInlineNoticeRecipe({ tone: "error" })}>{error}</div>
   {/if}
+  {#if codestudioSelfCleanupFailure}
+    <DismissibleNotice
+      tone="error"
+      message={$t("applicationScope.selfCleanupFailure", {
+        message: codestudioSelfCleanupFailure.message
+      })}
+      on:dismiss={() => (codestudioSelfCleanupFailure = null)}
+    />
+  {/if}
 
   <section class={cx(panelRecipe(), settingsListRecipe())}>
     <label class={settingsRowRecipe()}>
@@ -202,6 +275,42 @@
           </button>
         </div>
       </div>
+
+      {#if codestudioScope?.duplicateUserInstall || codestudioCleanupSuccess || codestudioCleanupError}
+        <div
+          class={codestudioCleanupError
+            ? profileInlineNoticeRecipe({ tone: "error" })
+            : codestudioCleanupSuccess
+              ? profileInlineNoticeRecipe({ tone: "success" })
+              : profileInlineNoticeRecipe()}
+          data-codestudio-duplicate-user-install
+        >
+          <span>
+            {#if codestudioCleanupError}
+              {$t("applicationScope.cleanupError", { message: codestudioCleanupError })}
+            {:else if codestudioCleanupSuccess && !codestudioScope?.duplicateUserInstall}
+              {$t("applicationScope.cleanupSuccess", { name: APP_NAME })}
+            {:else}
+              {$t("applicationScope.duplicateWarning", { name: APP_NAME })}
+            {/if}
+          </span>
+          {#if codestudioScope?.duplicateUserInstall}
+            <button
+              class={actionButtonRecipe()}
+              type="button"
+              disabled={codestudioCleanupPending}
+              on:click={cleanupCodestudioUserCopy}
+            >
+              <AppIcon
+                name={codestudioCleanupPending ? "loading" : "delete"}
+                size={15}
+                class={codestudioCleanupPending ? spinRecipe() : ""}
+              />
+              {$t(codestudioCleanupPending ? "applicationScope.deletingUserCopy" : "applicationScope.deleteUserCopy")}
+            </button>
+          {/if}
+        </div>
+      {/if}
 
       <div class={settingsRowRecipe()}>
         <span><AppIcon name="user" size={18} /> {$t("settings.author")}</span>

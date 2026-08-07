@@ -233,6 +233,7 @@ function fallbackClaudeStatus(
     installCommand: base?.installCommand ?? null,
     details: null,
     installKind: kind,
+    duplicateUserInstall: base?.duplicateUserInstall ?? false,
     running: base?.running ?? false
   };
 }

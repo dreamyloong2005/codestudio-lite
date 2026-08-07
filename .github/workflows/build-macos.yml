@@ -6,11 +6,51 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
+  quality:
+    name: macOS quality gates
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check frontend and unit tests
+        run: npm test
+
+      - name: Test Rust
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Check Rust lints
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
   build-macos:
-    name: macOS ${{ matrix.arch }} bundle
+    needs: quality
+    name: macOS ${{ matrix.arch }} signed updater bundle
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
@@ -33,22 +73,37 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Check frontend
-        run: npm run check
+      - name: Build, sign, and verify updater artifacts
+        env:
+          CODESTUDIO_UPDATE_BASE_URL: ${{ vars.CODESTUDIO_UPDATE_BASE_URL || 'https://download.codestudio.build' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+        run: bash scripts/build-macos-updater-target.sh ${{ matrix.target }}
 
-      - name: Build macOS app
-        run: |
-          npm run tauri:build -- --target ${{ matrix.target }}
-          bash scripts/normalize-macos-artifacts.sh ${{ matrix.target }}
-
-      - name: Upload macOS bundles
+      - name: Upload verified macOS updater bundles
         uses: actions/upload-artifact@v4
         with:
           name: CodeStudio-Lite-macOS-${{ matrix.arch }}
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg.sig
           if-no-files-found: error
+          retention-days: 14

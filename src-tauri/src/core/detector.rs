@@ -7,6 +7,7 @@ use crate::core::claude_desktop_release::{
 };
 use crate::core::download_http;
 use crate::core::env_health;
+use crate::core::macos_app_scope::{resolve as resolve_macos_app, MacosManagedApp};
 use crate::core::npm_global;
 use crate::core::platform::{hidden_command_with_args, package, resolve_command};
 use crate::core::process_control;
@@ -593,6 +594,7 @@ fn detect_tool(definition: &ToolDefinition) -> ToolStatus {
         install_command: definition.install_command.map(ToString::to_string),
         details,
         install_kind: None,
+        duplicate_user_install: false,
         running: false,
     }
 }
@@ -605,7 +607,26 @@ struct DesktopAppDetection {
 }
 
 fn detect_claude_desktop_tool(definition: &ToolDefinition) -> ToolStatus {
-    let detected = detect_claude_desktop_installation();
+    let (detected, duplicate_user_install) = detect_claude_desktop_installation();
+    claude_desktop_tool_status(definition, detected, duplicate_user_install)
+}
+
+#[cfg(test)]
+fn detect_claude_desktop_tool_for_roots(
+    definition: &ToolDefinition,
+    home: &Path,
+    system_applications: &Path,
+) -> ToolStatus {
+    let (detected, duplicate_user_install) =
+        detect_claude_desktop_macos_for(home, system_applications);
+    claude_desktop_tool_status(definition, detected, duplicate_user_install)
+}
+
+fn claude_desktop_tool_status(
+    definition: &ToolDefinition,
+    detected: Option<DesktopAppDetection>,
+    duplicate_user_install: bool,
+) -> ToolStatus {
     let config_path = definition
         .config_relative_path
         .and_then(|relative| app_paths().ok().map(|paths| paths.home_dir.join(relative)));
@@ -634,6 +655,7 @@ fn detect_claude_desktop_tool(definition: &ToolDefinition) -> ToolStatus {
         install_command: definition.install_command.map(ToString::to_string),
         details,
         install_kind,
+        duplicate_user_install,
         running: process_control::is_process_running("Claude"),
     }
 }
@@ -685,14 +707,19 @@ fn claude_desktop_status_from_detection(
     )
 }
 
-fn detect_claude_desktop_installation() -> Option<DesktopAppDetection> {
+fn detect_claude_desktop_installation() -> (Option<DesktopAppDetection>, bool) {
     if cfg!(target_os = "windows") {
-        return detect_claude_desktop_windows();
+        return (detect_claude_desktop_windows(), false);
     }
     if cfg!(target_os = "macos") {
-        return detect_claude_desktop_macos();
+        let home = app_paths()
+            .ok()
+            .map(|paths| paths.home_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/var/empty"));
+        return detect_claude_desktop_macos_for(&home, Path::new("/Applications"));
     }
-    None
+    (None, false)
 }
 
 fn detect_claude_desktop_windows() -> Option<DesktopAppDetection> {
@@ -921,17 +948,23 @@ fn normalized_claude_desktop_version(version: &str) -> String {
     }
 }
 
-fn detect_claude_desktop_macos() -> Option<DesktopAppDetection> {
-    package::detect_macos_app(
-        &claude_desktop_macos_app_candidates(),
-        Some("com.anthropic.claudefordesktop"),
-    )
-    .or_else(|| package::detect_macos_app(&claude_desktop_macos_app_candidates(), None))
-    .map(|app| DesktopAppDetection {
-        path: app.path,
-        version: app.version,
-        source: "app-bundle",
-    })
+fn detect_claude_desktop_macos_for(
+    home: &Path,
+    system_applications: &Path,
+) -> (Option<DesktopAppDetection>, bool) {
+    let resolution = resolve_macos_app(home, system_applications, MacosManagedApp::ClaudeDesktop);
+    let detected = resolution.preferred_app.as_ref().and_then(|preferred| {
+        package::detect_macos_app(
+            std::slice::from_ref(preferred),
+            Some("com.anthropic.claudefordesktop"),
+        )
+        .map(|app| DesktopAppDetection {
+            path: app.path,
+            version: app.version,
+            source: "app-bundle",
+        })
+    });
+    (detected, resolution.duplicate_user_install)
 }
 
 fn claude_desktop_missing_detail(config_path: Option<&Path>) -> Option<String> {
@@ -1239,14 +1272,6 @@ fn compare_stale_claude_desktop_dirs(left: &Path, right: &Path) -> Ordering {
             .as_deref()
             .unwrap_or("0"),
     )
-}
-
-fn claude_desktop_macos_app_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![PathBuf::from("/Applications/Claude.app")];
-    if let Ok(paths) = app_paths() {
-        candidates.push(paths.home_dir.join("Applications").join("Claude.app"));
-    }
-    candidates
 }
 
 fn cached_claude_desktop_windows_msix_package() -> Option<package::InstalledMsixPackage> {
@@ -2282,10 +2307,101 @@ mod tests {
     }
 
     #[test]
-    fn claude_desktop_macos_candidates_include_app_bundle() {
-        let candidates = claude_desktop_macos_app_candidates();
+    fn claude_desktop_macos_detection_prefers_system_and_reports_user_duplicate() {
+        let root = std::env::temp_dir().join(format!(
+            "codestudio-lite-claude-scope-both-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let system_applications = root.join("system-applications");
+        let system_app = write_claude_macos_test_app(&system_applications, "Claude.app", "1.2.3");
+        write_claude_macos_test_app(&home.join("Applications"), "Claude.app", "2.0.0");
 
-        assert!(candidates.contains(&PathBuf::from("/Applications/Claude.app")));
+        let (detected, duplicate_user_install) =
+            detect_claude_desktop_macos_for(&home, &system_applications);
+        let detected = detected.expect("system Claude should be detected");
+
+        assert_eq!(detected.path, system_app.to_string_lossy());
+        assert_eq!(detected.version, "1.2.3");
+        assert!(duplicate_user_install);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_desktop_macos_duplicate_flag_flows_into_tool_status() {
+        let root = std::env::temp_dir().join(format!(
+            "codestudio-lite-claude-status-both-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let system_applications = root.join("system-applications");
+        let system_app = write_claude_macos_test_app(&system_applications, "Claude.app", "1.2.3");
+        write_claude_macos_test_app(&home.join("Applications"), "Claude.app", "2.0.0");
+        let definition = ai_tools()
+            .into_iter()
+            .find(|tool| tool.id == "claude-desktop")
+            .expect("Claude Desktop definition");
+
+        let status = detect_claude_desktop_tool_for_roots(&definition, &home, &system_applications);
+
+        assert!(status.duplicate_user_install);
+        assert_eq!(
+            status.install_path.as_deref(),
+            Some(system_app.to_string_lossy().as_ref())
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_desktop_macos_detection_preserves_user_only_launch_path() {
+        let root = std::env::temp_dir().join(format!(
+            "codestudio-lite-claude-scope-user-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let system_applications = root.join("system-applications");
+        let user_app =
+            write_claude_macos_test_app(&home.join("Applications"), "Claude.app", "3.4.5");
+
+        let (detected, duplicate_user_install) =
+            detect_claude_desktop_macos_for(&home, &system_applications);
+        let detected = detected.expect("user Claude should be detected");
+
+        assert_eq!(detected.path, user_app.to_string_lossy());
+        assert_eq!(detected.version, "3.4.5");
+        assert!(!duplicate_user_install);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_claude_macos_test_app(applications: &Path, app_name: &str, version: &str) -> PathBuf {
+        let app = applications.join(app_name);
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        fs::write(
+            app.join("Contents").join("Info.plist"),
+            format!(
+                r#"<plist><dict>
+<key>CFBundleIdentifier</key><string>com.anthropic.claudefordesktop</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>"#
+            ),
+        )
+        .unwrap();
+        app
     }
 
     #[test]
@@ -2336,6 +2452,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         };
 
@@ -2364,6 +2481,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         }];
         apply_claude_desktop_latest_to_tools(&mut tools, "1.14271.0");
@@ -2390,6 +2508,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         }];
         apply_claude_desktop_latest_to_tools(&mut tools, "1.14271.0");
@@ -2416,6 +2535,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         }];
         apply_claude_desktop_latest_to_tools(&mut tools, "1.14271.0");
@@ -2443,6 +2563,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         }];
         apply_chatgpt_desktop_latest_to_tools(&mut tools, "0.10.0");
@@ -2469,6 +2590,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         }];
         apply_chatgpt_desktop_latest_to_tools(&mut tools, "0.10.0");
@@ -2495,6 +2617,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         }];
         apply_chatgpt_desktop_latest_to_tools(&mut tools, "0.10.0");
@@ -2521,6 +2644,7 @@ mod tests {
             install_command: None,
             details: None,
             install_kind: None,
+            duplicate_user_install: false,
             running: false,
         }
     }
