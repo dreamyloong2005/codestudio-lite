@@ -413,7 +413,6 @@ fn set_external_launcher_permissions(_script_path: &std::path::Path) -> std::io:
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
 fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
